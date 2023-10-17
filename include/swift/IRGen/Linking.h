@@ -85,6 +85,22 @@ enum class TypeMetadataAddress {
   FullMetadata,
 };
 
+inline bool isEmbedded(CanType t) {
+  return t->getASTContext().LangOpts.hasFeature(Feature::Embedded);
+}
+
+inline bool isMetadataAllowedInEmbedded(CanType t) {
+  return isa<ClassType>(t) || isa<BoundGenericClassType>(t);
+}
+
+inline bool isEmbedded(Decl *d) {
+  return d->getASTContext().LangOpts.hasFeature(Feature::Embedded);
+}
+
+inline bool isEmbedded(const ProtocolConformance *c) {
+  return c->getType()->getASTContext().LangOpts.hasFeature(Feature::Embedded);
+}
+
 /// A link entity is some sort of named declaration, combined with all
 /// the information necessary to distinguish specific implementations
 /// of the declaration from each other.
@@ -342,11 +358,6 @@ class LinkEntity {
     /// the metadata cache once.
     CanonicalPrespecializedGenericTypeCachingOnceToken,
 
-    /// The record that describes an attribute that could be looked
-    /// up at runtime together with all types it's attached to and
-    /// generator functions.
-    RuntimeDiscoverableAttributeRecord,
-
     /// The same as AsyncFunctionPointer but with a different stored value, for
     /// use by TBDGen.
     /// The pointer is an AbstractFunctionDecl*.
@@ -520,6 +531,20 @@ class LinkEntity {
     return Kind(LINKENTITY_GET_FIELD(Data, Kind));
   }
 
+  friend llvm::hash_code hash_value(const LinkEntity &Entity) {
+    return llvm::hash_combine(Entity.Pointer, Entity.SecondaryPointer,
+                              Entity.Data);
+  }
+
+  friend bool operator==(const LinkEntity &LHS, const LinkEntity &RHS) {
+    return LHS.Pointer == RHS.Pointer &&
+           LHS.SecondaryPointer == RHS.SecondaryPointer && LHS.Data == RHS.Data;
+  }
+
+  friend bool operator!=(const LinkEntity &LHS, const LinkEntity &RHS) {
+    return !(LHS == RHS);
+  }
+
   static bool isDeclKind(Kind k) {
     return k <= Kind::AsyncFunctionPointerAST;
   }
@@ -680,7 +705,7 @@ class LinkEntity {
     Data = LINKENTITY_SET_FIELD(Kind, unsigned(kind));
   }
 
-  LinkEntity() = default;
+  LinkEntity() : Pointer(nullptr), SecondaryPointer(nullptr), Data(0) {}
 
   static bool isValidResilientMethodRef(SILDeclRef declRef) {
     if (declRef.isForeign)
@@ -819,6 +844,7 @@ public:
   static LinkEntity forTypeMetadata(CanType concreteType,
                                     TypeMetadataAddress addr) {
     assert(!isObjCImplementation(concreteType));
+    assert(!isEmbedded(concreteType) || isMetadataAllowedInEmbedded(concreteType));
     LinkEntity entity;
     entity.setForType(Kind::TypeMetadata, concreteType);
     entity.Data |= LINKENTITY_SET_FIELD(MetadataAddress, unsigned(addr));
@@ -826,6 +852,7 @@ public:
   }
 
   static LinkEntity forTypeMetadataPattern(NominalTypeDecl *decl) {
+    assert(!isEmbedded(decl));
     LinkEntity entity;
     entity.setForDecl(Kind::TypeMetadataPattern, decl);
     return entity;
@@ -882,6 +909,7 @@ public:
 
   static LinkEntity forNominalTypeDescriptor(NominalTypeDecl *decl) {
     assert(!isObjCImplementation(decl));
+    assert(!isEmbedded(decl));
     LinkEntity entity;
     entity.setForDecl(Kind::NominalTypeDescriptor, decl);
     return entity;
@@ -889,18 +917,21 @@ public:
 
   static LinkEntity forNominalTypeDescriptorRecord(NominalTypeDecl *decl) {
     assert(!isObjCImplementation(decl));
+    assert(!isEmbedded(decl));
     LinkEntity entity;
     entity.setForDecl(Kind::NominalTypeDescriptorRecord, decl);
     return entity;
   }
 
   static LinkEntity forOpaqueTypeDescriptor(OpaqueTypeDecl *decl) {
+    assert(!isEmbedded(decl));
     LinkEntity entity;
     entity.setForDecl(Kind::OpaqueTypeDescriptor, decl);
     return entity;
   }
 
   static LinkEntity forOpaqueTypeDescriptorRecord(OpaqueTypeDecl *decl) {
+    assert(!isEmbedded(decl));
     LinkEntity entity;
     entity.setForDecl(Kind::OpaqueTypeDescriptorRecord, decl);
     return entity;
@@ -981,6 +1012,8 @@ public:
   }
 
   static LinkEntity forValueWitness(CanType concreteType, ValueWitness witness) {
+    // Explicitly allowed in embedded Swift because we generate value witnesses
+    // (but not witness tables) for Swift Concurrency usage.
     LinkEntity entity;
     entity.Pointer = concreteType.getPointer();
     entity.Data = LINKENTITY_SET_FIELD(Kind, unsigned(Kind::ValueWitness))
@@ -989,6 +1022,7 @@ public:
   }
 
   static LinkEntity forValueWitnessTable(CanType type) {
+    assert(!isEmbedded(type));
     LinkEntity entity;
     entity.setForType(Kind::ValueWitnessTable, type);
     return entity;
@@ -1018,6 +1052,7 @@ public:
   }
 
   static LinkEntity forProtocolWitnessTable(const RootProtocolConformance *C) {
+    assert(!isEmbedded(C));
     LinkEntity entity;
     entity.setForProtocolConformance(Kind::ProtocolWitnessTable, C);
     return entity;
@@ -1025,6 +1060,7 @@ public:
 
   static LinkEntity
   forProtocolWitnessTablePattern(const ProtocolConformance *C) {
+    assert(!isEmbedded(C));
     LinkEntity entity;
     entity.setForProtocolConformance(Kind::ProtocolWitnessTablePattern, C);
     return entity;
@@ -1382,12 +1418,6 @@ public:
         LINKENTITY_SET_FIELD(Kind, unsigned(Kind::ExtendedExistentialTypeShape))
       | LINKENTITY_SET_FIELD(ExtendedExistentialIsUnique, unsigned(isUnique))
       | LINKENTITY_SET_FIELD(ExtendedExistentialIsShared, unsigned(isShared));
-    return entity;
-  }
-
-  static LinkEntity forRuntimeDiscoverableAttributeRecord(NominalTypeDecl *attr) {
-    LinkEntity entity;
-    entity.setForDecl(Kind::RuntimeDiscoverableAttributeRecord, attr);
     return entity;
   }
 

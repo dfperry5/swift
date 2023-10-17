@@ -163,6 +163,11 @@ protected:
       assert(returnStmt->isImplicit());
       element = returnStmt->getResult();
     }
+    // Unwrap an implicit ThenStmt.
+    if (auto *thenStmt = getAsStmt<ThenStmt>(element)) {
+      if (thenStmt->isImplicit())
+        element = thenStmt->getResult();
+    }
 
     if (auto *decl = element.dyn_cast<Decl *>()) {
       switch (decl->getKind()) {
@@ -195,6 +200,15 @@ protected:
       // Allocate variable with a placeholder type
       auto *resultVar = buildPlaceholderVar(stmt->getStartLoc(), newBody);
 
+      if (ctx.CompletionCallback && stmt->getSourceRange().isValid() &&
+          !containsIDEInspectionTarget(stmt->getSourceRange(), ctx.SourceMgr) &&
+          !isa<GuardStmt>(stmt)) {
+        // A statement that doesn't contain the code completion expression can't
+        // influence the type of the code completion expression, so we can skip
+        // it to improve performance.
+        return llvm::None;
+      }
+
       auto result = visit(stmt, resultVar);
       if (!result)
         return UnsupportedElt(stmt);
@@ -223,6 +237,16 @@ protected:
       // to rank code completion items that match the type expected by
       // buildBlock higher.
       buildBlockArguments.push_back(expr);
+    } else if (ctx.CompletionCallback && expr->getSourceRange().isValid() &&
+               !containsIDEInspectionTarget(expr->getSourceRange(),
+                                            ctx.SourceMgr)) {
+      // A statement that doesn't contain the code completion expression can't
+      // influence the type of the code completion expression. Add a variable
+      // for it that we can put into the buildBlock call but don't add the
+      // expression itself into the transformed body to improve performance.
+      auto *resultVar = buildPlaceholderVar(expr->getStartLoc(), newBody);
+      buildBlockArguments.push_back(
+          builder.buildVarRef(resultVar, expr->getStartLoc()));
     } else {
       auto *capture = captureExpr(expr, newBody);
       // A reference to the synthesized variable is passed as an argument
@@ -245,7 +269,12 @@ protected:
     for (auto element : braceStmt->getElements()) {
       if (auto unsupported =
               transformBraceElement(element, newBody, buildBlockArguments)) {
-        return failTransform(*unsupported);
+        // When in code completion mode, simply ignore unsported constructs to
+        // get results for anything that's unrelated to the unsupported
+        // constructs.
+        if (!ctx.CompletionCallback) {
+          return failTransform(*unsupported);
+        }
       }
     }
 
@@ -732,6 +761,7 @@ protected:
   UNSUPPORTED_STMT(Throw)
   UNSUPPORTED_STMT(Return)
   UNSUPPORTED_STMT(Yield)
+  UNSUPPORTED_STMT(Then)
   UNSUPPORTED_STMT(Discard)
   UNSUPPORTED_STMT(Defer)
   UNSUPPORTED_STMT(Guard)
@@ -882,9 +912,8 @@ private:
 
 } // end anonymous namespace
 
-llvm::Optional<BraceStmt *> TypeChecker::applyResultBuilderBodyTransform(
-    FuncDecl *func, Type builderType,
-    bool ClosuresInResultBuilderDontParticipateInInference) {
+llvm::Optional<BraceStmt *>
+TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func, Type builderType) {
   // Pre-check the body: pre-check any expressions in it and look
   // for return statements.
   //
@@ -940,10 +969,6 @@ llvm::Optional<BraceStmt *> TypeChecker::applyResultBuilderBodyTransform(
   }
 
   ConstraintSystemOptions options = ConstraintSystemFlags::AllowFixes;
-  if (ClosuresInResultBuilderDontParticipateInInference) {
-    options |= ConstraintSystemFlags::
-        ClosuresInResultBuildersDontParticipateInInference;
-  }
   auto resultInterfaceTy = func->getResultInterfaceType();
   auto resultContextType = func->mapTypeIntoContext(resultInterfaceTy);
 
@@ -984,6 +1009,9 @@ llvm::Optional<BraceStmt *> TypeChecker::applyResultBuilderBodyTransform(
   // Solve the constraint system.
   if (cs.getASTContext().CompletionCallback) {
     SmallVector<Solution, 4> solutions;
+    cs.Options |= ConstraintSystemFlags::AllowFixes;
+    cs.Options |= ConstraintSystemFlags::SuppressDiagnostics;
+    cs.Options |= ConstraintSystemFlags::ForCodeCompletion;
     cs.solveForCodeCompletion(solutions);
 
     SyntacticElementTarget funcTarget(func);
@@ -1152,7 +1180,7 @@ ConstraintSystem::matchResultBuilder(AnyFunctionRef fn, Type builderType,
     auto *body = transform.apply(fn.getBody());
 
     if (auto unsupported = transform.getUnsupportedElement()) {
-      assert(!body);
+      assert(!body || getASTContext().CompletionCallback);
 
       // If we aren't supposed to attempt fixes, fail.
       if (!shouldAttemptFixes()) {

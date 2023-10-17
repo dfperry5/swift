@@ -17,6 +17,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/ModuleLoader.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/PrefixMapper.h"
 
 namespace swift {
 class ModuleFile;
@@ -33,6 +34,15 @@ enum class ModuleLoadingMode {
   PreferSerialized,
   OnlyInterface,
   OnlySerialized
+};
+
+/// How a dependency should be loaded.
+///
+/// \sa getTransitiveLoadingBehavior
+enum class ModuleLoadingBehavior {
+  Required,
+  Optional,
+  Ignored
 };
 
 /// Helper type used to pass and compute the sets of related filenames used by
@@ -232,9 +242,13 @@ public:
 
   virtual void verifyAllModules() override;
 
-  virtual llvm::Optional<const ModuleDependencyInfo *>
-  getModuleDependencies(StringRef moduleName, ModuleDependenciesCache &cache,
+  virtual llvm::SmallVector<std::pair<ModuleDependencyID, ModuleDependencyInfo>, 1>
+  getModuleDependencies(StringRef moduleName, StringRef moduleOutputPath,
+                        llvm::IntrusiveRefCntPtr<llvm::cas::CachingOnDiskFileSystem> CacheFS,
+                        const llvm::DenseSet<clang::tooling::dependencies::ModuleID> &alreadySeenClangModules,
+                        clang::tooling::dependencies::DependencyScanningTool &clangScanningTool,
                         InterfaceSubContextDelegate &delegate,
+                        llvm::TreePathPrefixMapper *mapper,
                         bool isTestableImport) override;
 };
 

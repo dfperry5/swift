@@ -678,6 +678,7 @@ SILDeserializer::readSILFunctionChecked(DeclID FID, SILFunction *existingFn,
     fn->setIsAlwaysWeakImported(isWeakImported);
     fn->setClassSubclassScope(SubclassScope(subclassScope));
     fn->setHasCReferences(bool(hasCReferences));
+    fn->setIsStaticallyLinked(MF->getAssociatedModule()->isStaticLibrary());
 
     llvm::VersionTuple available;
     DECODE_VER_TUPLE(available);
@@ -1493,6 +1494,18 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
                                                     elementType);
     break;
   }
+  case SILInstructionKind::TuplePackExtractInst: {
+    assert(RecordKind == SIL_PACK_ELEMENT_GET);
+    auto elementType =
+        getSILType(MF->getType(TyID), (SILValueCategory)TyCategory, Fn);
+    auto tupleType =
+        getSILType(MF->getType(TyID2), (SILValueCategory)TyCategory2, Fn);
+    auto tuple = getLocalValue(ValID2, tupleType);
+    auto indexType = SILType::getPackIndexType(MF->getContext());
+    auto index = getLocalValue(ValID3, indexType);
+    ResultInst = Builder.createTuplePackExtract(Loc, index, tuple, elementType);
+    break;
+  }
 
 #define ONEOPERAND_ONETYPE_INST(ID)                                            \
   case SILInstructionKind::ID##Inst:                                           \
@@ -1938,6 +1951,15 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
                       getSILType(Ty2, (SILValueCategory)TyCategory2, Fn)));
     break;
   }
+  case SILInstructionKind::BeginDeallocRefInst: {
+    auto Ty = MF->getType(TyID);
+    auto Ty2 = MF->getType(TyID2);
+    ResultInst = Builder.createBeginDeallocRef(
+        Loc,
+        getLocalValue(ValID, getSILType(Ty, (SILValueCategory)TyCategory, Fn)),
+        getLocalValue(ValID2, getSILType(Ty2, (SILValueCategory)TyCategory2, Fn)));
+    break;
+  }
   case SILInstructionKind::CopyBlockWithoutEscapingInst: {
     auto Ty = MF->getType(TyID);
     auto Ty2 = MF->getType(TyID2);
@@ -2081,12 +2103,16 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
         (Atomicity)Attr);                                                      \
     break;
 
+    UNARY_INSTRUCTION(UnownedCopyValue)
+    UNARY_INSTRUCTION(WeakCopyValue)
 #define UNCHECKED_REF_STORAGE(Name, ...)                                       \
   UNARY_INSTRUCTION(StrongCopy##Name##Value)
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
   REFCOUNTING_INSTRUCTION(Name##Retain)                                        \
   REFCOUNTING_INSTRUCTION(Name##Release)                                       \
   REFCOUNTING_INSTRUCTION(StrongRetain##Name)                                  \
+  UNARY_INSTRUCTION(StrongCopy##Name##Value)
+#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                          \
   UNARY_INSTRUCTION(StrongCopy##Name##Value)
 #include "swift/AST/ReferenceStorage.def"
   REFCOUNTING_INSTRUCTION(RetainValue)
@@ -2099,7 +2125,6 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
   REFCOUNTING_INSTRUCTION(UnmanagedReleaseValue)
   REFCOUNTING_INSTRUCTION(AutoreleaseValue)
   REFCOUNTING_INSTRUCTION(UnmanagedAutoreleaseValue)
-  REFCOUNTING_INSTRUCTION(SetDeallocating)
   UNARY_INSTRUCTION(DeinitExistentialAddr)
   UNARY_INSTRUCTION(DeinitExistentialValue)
   UNARY_INSTRUCTION(EndBorrow)
@@ -2112,6 +2137,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
   UNARY_INSTRUCTION(EndLifetime)
   UNARY_INSTRUCTION(CopyBlock)
   UNARY_INSTRUCTION(LoadBorrow)
+  UNARY_INSTRUCTION(EndInitLetRef)
   REFCOUNTING_INSTRUCTION(StrongRetain)
   REFCOUNTING_INSTRUCTION(StrongRelease)
   UNARY_INSTRUCTION(IsUnique)
@@ -2310,11 +2336,11 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     ResultInst = Builder.createMarkUninitialized(Loc, Val, Kind);
     break;
   }
-  case SILInstructionKind::MarkMustCheckInst: {
-    using CheckKind = MarkMustCheckInst::CheckKind;
+  case SILInstructionKind::MarkUnresolvedNonCopyableValueInst: {
+    using CheckKind = MarkUnresolvedNonCopyableValueInst::CheckKind;
     auto Ty = MF->getType(TyID);
     auto CKind = CheckKind(Attr);
-    ResultInst = Builder.createMarkMustCheckInst(
+    ResultInst = Builder.createMarkUnresolvedNonCopyableValueInst(
         Loc,
         getLocalValue(ValID, getSILType(Ty, (SILValueCategory)TyCategory, Fn)),
         CKind);
@@ -2342,9 +2368,9 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     SILValue op = getLocalValue(
         ValID, getSILType(MF->getType(TyID), (SILValueCategory)TyCategory, Fn));
     auto accessKind = SILAccessKind(Attr & 0x3);
-    auto enforcement = SILAccessEnforcement((Attr >> 2) & 0x3);
-    bool noNestedConflict = (Attr >> 4) & 0x01;
-    bool fromBuiltin = (Attr >> 5) & 0x01;
+    auto enforcement = SILAccessEnforcement((Attr >> 2) & 0x07);
+    bool noNestedConflict = (Attr >> 5) & 0x01;
+    bool fromBuiltin = (Attr >> 6) & 0x01;
     ResultInst = Builder.createBeginAccess(Loc, op, accessKind, enforcement,
                                            noNestedConflict, fromBuiltin);
     break;
@@ -2384,9 +2410,9 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
         getLocalValue(ValID2, getSILType(MF->getType(TyID2),
                                          (SILValueCategory)TyCategory2, Fn));
     auto accessKind = SILAccessKind(Attr & 0x3);
-    auto enforcement = SILAccessEnforcement((Attr >> 2) & 0x03);
-    bool noNestedConflict = (Attr >> 4) & 0x01;
-    bool fromBuiltin = (Attr >> 5) & 0x01;
+    auto enforcement = SILAccessEnforcement((Attr >> 2) & 0x07);
+    bool noNestedConflict = (Attr >> 5) & 0x01;
+    bool fromBuiltin = (Attr >> 6) & 0x01;
     ResultInst = Builder.createBeginUnpairedAccess(
         Loc, source, buffer, accessKind, enforcement, noNestedConflict,
         fromBuiltin);
@@ -2396,8 +2422,8 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     SILValue op = getLocalValue(
         ValID, getSILType(MF->getType(TyID), (SILValueCategory)TyCategory, Fn));
     bool aborted = Attr & 0x1;
-    auto enforcement = SILAccessEnforcement((Attr >> 1) & 0x03);
-    bool fromBuiltin = (Attr >> 3) & 0x01;
+    auto enforcement = SILAccessEnforcement((Attr >> 1) & 0x07);
+    bool fromBuiltin = (Attr >> 4) & 0x01;
     ResultInst = Builder.createEndUnpairedAccess(Loc, op, enforcement, aborted,
                                                  fromBuiltin);
     break;
@@ -2867,19 +2893,20 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn,
     // Format: the cast kind, a typed value, a BasicBlock ID for success,
     // a BasicBlock ID for failure. Uses SILOneTypeValuesLayout.
     bool isExact = ListOfValues[0] != 0;
-    SILType opTy = getSILType(MF->getType(ListOfValues[2]),
-                              (SILValueCategory)ListOfValues[3], Fn);
-    SILValue op = getLocalValue(ListOfValues[1], opTy);
+    CanType sourceFormalType = MF->getType(ListOfValues[1])->getCanonicalType();
+    SILType opTy = getSILType(MF->getType(ListOfValues[3]),
+                              (SILValueCategory)ListOfValues[4], Fn);
+    SILValue op = getLocalValue(ListOfValues[2], opTy);
     SILType targetLoweredType =
         getSILType(MF->getType(TyID), (SILValueCategory)TyCategory, Fn);
-    CanType targetFormalType =
-        MF->getType(ListOfValues[4])->getCanonicalType();
-    auto *successBB = getBBForReference(Fn, ListOfValues[5]);
-    auto *failureBB = getBBForReference(Fn, ListOfValues[6]);
+    CanType targetFormalType = MF->getType(ListOfValues[5])->getCanonicalType();
+    auto *successBB = getBBForReference(Fn, ListOfValues[6]);
+    auto *failureBB = getBBForReference(Fn, ListOfValues[7]);
 
     ResultInst =
-        Builder.createCheckedCastBranch(Loc, isExact, op, targetLoweredType,
-                                        targetFormalType, successBB, failureBB,
+        Builder.createCheckedCastBranch(Loc, isExact, op, sourceFormalType, 
+                                        targetLoweredType, targetFormalType, 
+                                        successBB, failureBB,
                                         forwardingOwnership);
     break;
   }

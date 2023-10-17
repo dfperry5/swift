@@ -11,8 +11,7 @@ func foo() -> Int {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr3fooSiyF : $@convention(thin) () -> Int
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_value {{%[0-9]+}} : $Builtin.Int1, case {{%[0-9]+}}: [[TRUEBB:bb[0-9]+]], case {{%[0-9]+}}: [[FALSEBB:bb[0-9]+]]
 //
 // CHECK:       [[TRUEBB]]:
@@ -29,7 +28,7 @@ func foo() -> Int {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 
 class C {}
@@ -45,8 +44,7 @@ func bar(_ x: C) -> C {
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr3baryAA1CCADF : $@convention(thin) (@guaranteed C) -> @owned C
 // CHECK:       bb0([[CPARAM:%[0-9]+]] : @guaranteed $C):
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $C
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*C
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $C
 // CHECK:       switch_value {{%[0-9]+}} : $Builtin.Int1, case {{%[0-9]+}}: [[TRUEBB:bb[0-9]+]], case {{%[0-9]+}}: [[FALSEBB:bb[0-9]+]]
 //
 // CHECK:       [[TRUEBB]]:
@@ -62,7 +60,7 @@ func bar(_ x: C) -> C {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [take] [[RESULT]] : $*C
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*C
+// CHECK:       dealloc_stack [[RESULT]] : $*C
 // CHECK:       return [[VAL]] : $C
 
 struct Err: Error {}
@@ -81,8 +79,7 @@ func baz(_ e: E) throws -> Int {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr3bazySiAA1EOKF : $@convention(thin) (E) -> (Int, @error any Error)
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_enum %0 : $E, case #E.a!enumelt: [[ABB:bb[0-9]+]], case #E.b!enumelt: [[BBB:bb[0-9]+]], default [[DEFBB:bb[0-9]+]]
 //
 // CHECK:       [[ABB]]:
@@ -102,7 +99,7 @@ func baz(_ e: E) throws -> Int {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 
 func qux() throws -> Int {
@@ -115,8 +112,7 @@ func qux() throws -> Int {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr3quxSiyKF : $@convention(thin) () -> (Int, @error any Error)
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_value {{%[0-9]+}} : $Builtin.Int1, case {{%[0-9]+}}: [[TRUEBB:bb[0-9]+]], case {{%[0-9]+}}: [[FALSEBB:bb[0-9]+]]
 //
 // CHECK:       [[FALSEBB]]:
@@ -128,11 +124,11 @@ func qux() throws -> Int {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 //
 // CHECK:       [[ERRORBB]]([[ERR:%[0-9]+]] : @owned $any Error):
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       throw [[ERR]] : $any Error
 
 func testFallthrough() throws -> Int {
@@ -146,8 +142,7 @@ func testFallthrough() throws -> Int {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr15testFallthroughSiyKF : $@convention(thin) () -> (Int, @error any Error)
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_value {{%[0-9]+}} : $Builtin.Int1, case {{%[0-9]+}}: [[TRUEBB:bb[0-9]+]], case {{%[0-9]+}}: [[FALSEBB:bb[0-9]+]]
 //
 // CHECK:       [[TRUEBB]]:
@@ -167,7 +162,7 @@ func testFallthrough() throws -> Int {
 // CHECK:       [[ONE:%[0-9]+]] = apply {{%[0-9]+}}([[ONE_BUILTIN]], {{%[0-9]+}}) : $@convention(method) (Builtin.IntLiteral, @thin Int.Type) -> Int
 // CHECK:       store [[ONE]] to [trivial] [[RESULT]] : $*Int
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 
 func testClosure() throws -> Int {
@@ -183,8 +178,7 @@ func testClosure() throws -> Int {
 }
 
 // CHECK-LABEL: sil private [ossa] @$s11switch_expr11testClosureSiyKFSiyKcfU_ : $@convention(thin) () -> (Int, @error any Error)
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_value {{%[0-9]+}} : $Builtin.Int1, case {{%[0-9]+}}: [[TRUEBB:bb[0-9]+]], case {{%[0-9]+}}: [[FALSEBB:bb[0-9]+]]
 //
 // CHECK:       [[FALSEBB]]:
@@ -196,11 +190,11 @@ func testClosure() throws -> Int {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 //
 // CHECK:       [[ERRORBB]]([[ERR:%[0-9]+]] : @owned $any Error):
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       throw [[ERR]] : $any Error
 
 func testVar1() -> Int {
@@ -275,8 +269,7 @@ func testNested(_ e: E) throws -> Int {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s11switch_expr10testNestedySiAA1EOKF : $@convention(thin) (E) -> (Int, @error any Error)
-// CHECK:       [[RESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[RESULT:%[0-9]+]] = mark_uninitialized [var] [[RESULT_STORAGE]] : $*Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_enum %0 : $E, case #E.a!enumelt: [[ABB:bb[0-9]+]], default [[DEFBB:bb[0-9]+]]
 //
 // CHECK:       [[ABB]]:
@@ -286,8 +279,7 @@ func testNested(_ e: E) throws -> Int {
 // CHECK:       br [[EXITBB:bb[0-9]+]]
 //
 // CHECK:       [[DEFBB]]({{.*}}):
-// CHECK:       [[NESTEDRESULT_STORAGE:%[0-9]+]] = alloc_stack $Int
-// CHECK:       [[NESTEDRESULT:%[0-9]+]] = mark_uninitialized [var] [[NESTEDRESULT_STORAGE]] : $*Int
+// CHECK:       [[NESTEDRESULT:%[0-9]+]] = alloc_stack $Int
 // CHECK:       switch_enum %0 : $E, case #E.b!enumelt: [[BBB:bb[0-9]+]], default [[NESTEDDEFBB:bb[0-9]+]]
 
 // CHECK:       [[BBB]]:
@@ -303,7 +295,7 @@ func testNested(_ e: E) throws -> Int {
 //
 // CHECK:       [[EXITBB]]:
 // CHECK:       [[VAL:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
-// CHECK:       dealloc_stack [[RESULT_STORAGE]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
 // CHECK:       return [[VAL]] : $Int
 
 func testPoundIf1() -> Int {
@@ -701,5 +693,85 @@ func testNeverSwitch13() {
 extension Never {
   init(value: Self) {
     self = switch value { case let v: v }
+  }
+}
+
+func testNever5() -> Int {
+  switch Bool.random() {
+  case true:
+    fatalError()
+  case false:
+    0
+  }
+}
+// CHECK-LABEL: sil hidden [ossa] @$s11switch_expr10testNever5SiyF : $@convention(thin) () -> Int
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $Int
+// CHECK:       switch_value {{.*}}, case {{%[0-9]+}}: [[BB_TRUE:bb[0-9]+]], case {{%[0-9]+}}: [[BB_FALSE:bb[0-9]+]]
+//
+// CHECK:       [[BB_TRUE]]:
+// CHECK:       function_ref fatalError(_:file:line:)
+// CHECK:       unreachable
+//
+// CHECK:       [[BB_FALSE]]:
+// CHECK:       store {{%[0-9]+}} to [trivial] [[RESULT]] : $*Int
+// CHECK:       [[RET:%[0-9]+]] = load [trivial] [[RESULT]] : $*Int
+// CHECK:       dealloc_stack [[RESULT]] : $*Int
+// CHECK:       return [[RET]]
+
+func never() -> Never { fatalError() }
+
+func testNever6() -> Int {
+  switch Bool.random() {
+  case true:
+    never()
+  case false:
+    0
+  }
+}
+
+func neverTuple() -> (Never, Int) { fatalError() }
+
+func testNever7() -> (Never, Int) {
+  switch Bool.random() {
+  case true:
+    neverTuple()
+  case false:
+    (never(), 0)
+  }
+}
+// CHECK-LABEL: sil hidden [ossa] @$s11switch_expr10testNever7s5NeverO_SityF : $@convention(thin) () -> (Never, Int)
+// CHECK:       [[RESULT:%[0-9]+]] = alloc_stack $(Never, Int)
+// CHECK:       switch_value {{.*}}, case {{%[0-9]+}}: [[BB_TRUE:bb[0-9]+]], case {{%[0-9]+}}: [[BB_FALSE:bb[0-9]+]]
+//
+// CHECK:       [[BB_TRUE]]:
+// CHECK:       [[ELT_0:%[0-9]+]] = tuple_element_addr [[RESULT]] : $*(Never, Int), 0
+// CHECK:       [[ELT_1:%[0-9]+]] = tuple_element_addr [[RESULT]] : $*(Never, Int), 1
+// CHECK:       ([[RET_0:%[0-9]+]], [[RET_1:%[0-9]+]]) = destructure_tuple {{%[0-9]+}} : $(Never, Int)
+// CHECK:       store [[RET_0]] to [trivial] [[ELT_0]] : $*Never
+// CHECK:       store [[RET_1]] to [trivial] [[ELT_1]] : $*Int
+// CHECK:       br [[BB_EXIT:bb[0-9]+]]
+//
+// CHECK:       [[BB_FALSE]]:
+// CHECK:       [[ELT_0:%[0-9]+]] = tuple_element_addr [[RESULT]] : $*(Never, Int), 0
+// CHECK:       [[ELT_1:%[0-9]+]] = tuple_element_addr [[RESULT]] : $*(Never, Int), 1
+// CHECK:       store {{%[0-9]+}} to [trivial] [[ELT_0]] : $*Never
+// CHECK:       store {{%[0-9]+}} to [trivial] [[ELT_1]] : $*Int
+// CHECK:       br [[BB_EXIT:bb[0-9]+]]
+//
+// CHECK:       [[BB_EXIT]]:
+// CHECK:       dealloc_stack [[RESULT]] : $*(Never, Int)
+// CHECK:       [[RET:%[0-9]+]] = tuple ({{%[0-9]+}} : $Never, {{%[0-9]+}} : $Int)
+// CHECK:       return [[RET]]
+
+func testCaptureList() -> Int {
+  let fn = { [x = switch Bool.random() { case true: 0 case false: 1 }] in x }
+  return fn()
+}
+
+// https://github.com/apple/swift/issues/68764
+func testConditionalCast<T>(_ x: Any, _ y: Int) -> T? {
+  switch y {
+  default:
+    x as? T
   }
 }

@@ -84,6 +84,9 @@ ERROR(require_const_initializer_for_const,none,
 ERROR(func_decl_without_brace,PointsToFirstBadToken,
       "expected '{' in body of function declaration", ())
 
+ERROR(func_decl_no_body_expected,PointsToFirstBadToken,
+      "unexpected body of function declaration", ())
+
 NOTE(convert_let_to_var,none,
      "change 'let' to 'var' to make it mutable", ())
 
@@ -201,6 +204,9 @@ ERROR(scanner_find_cycle, none,
 ERROR(scanner_arguments_invalid, none,
       "dependencies scanner cannot be configured with arguments: '%0'", (StringRef))
 
+ERROR(error_scanner_extra, none,
+      "failed inside dependency scanner: '%0'", (StringRef))
+
 WARNING(warn_scanner_deserialize_failed, none,
         "Failed to load module scanning dependency cache from: '%0', re-building scanner cache from scratch.", (StringRef))
 
@@ -221,19 +227,12 @@ ERROR(unknown_attribute,none,
 // MARK: macro diagnostics
 //------------------------------------------------------------------------------
 NOTE(in_macro_expansion,none,
-     "in expansion of macro %0 here", (DeclName))
+     "in expansion of macro %0%select{| on %kind1}1 here", (DeclName, const Decl *))
 ERROR(macro_experimental,none,
       "%0 macros are an experimental feature that is not enabled %select{|(%1)}1",
       (StringRef, StringRef))
 ERROR(ambiguous_macro_reference,none,
       "ambiguous reference to macro %0", (DeclName))
-
-//------------------------------------------------------------------------------
-// MARK: tuple conformances
-//------------------------------------------------------------------------------
-ERROR(experimental_tuple_extension,none,
-      "tuple extensions are experimental",
-      ())
 
 //------------------------------------------------------------------------------
 // MARK: bridged diagnostics

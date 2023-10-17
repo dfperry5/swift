@@ -14,7 +14,6 @@ target_sources(swiftSILOptimizer PRIVATE
   CopyPropagation.cpp
   DeadCodeElimination.cpp
   DeadObjectElimination.cpp
-  DeadStoreElimination.cpp
   DestroyHoisting.cpp
   Devirtualizer.cpp
   DifferentiabilityWitnessDevirtualizer.cpp
@@ -27,7 +26,6 @@ target_sources(swiftSILOptimizer PRIVATE
   PerformanceInliner.cpp
   PhiArgumentOptimizations.cpp
   PruneVTables.cpp
-  RedundantLoadElimination.cpp
   RedundantOverflowCheckRemoval.cpp
   SILCodeMotion.cpp
   SILLowerAggregateInstrs.cpp
@@ -39,4 +37,5 @@ target_sources(swiftSILOptimizer PRIVATE
   SpeculativeDevirtualizer.cpp
   StringOptimization.cpp
   TempLValueOpt.cpp
-  TempRValueElimination.cpp)
+  TempRValueElimination.cpp
+  VTableSpecializer.cpp)

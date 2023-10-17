@@ -124,14 +124,16 @@ ParserResult<Expr> Parser::parseExprAs() {
 /// parseExprArrow
 ///
 ///   expr-arrow:
-///     'async'? 'throws'? '->'
+///     'async'? ('throws' ('(' type ')')?)? '->'
 ParserResult<Expr> Parser::parseExprArrow() {
   SourceLoc asyncLoc, throwsLoc, arrowLoc;
   ParserStatus status;
 
+  TypeRepr *thrownTyRepr = nullptr;
   status |= parseEffectsSpecifiers(SourceLoc(),
                                    asyncLoc, /*reasync=*/nullptr,
-                                   throwsLoc, /*rethrows=*/nullptr);
+                                   throwsLoc, /*rethrows=*/nullptr,
+                                   thrownTyRepr);
   if (status.hasCodeCompletion() && !CodeCompletionCallbacks) {
     // Trigger delayed parsing, no need to continue.
     return status;
@@ -149,9 +151,15 @@ ParserResult<Expr> Parser::parseExprArrow() {
 
   parseEffectsSpecifiers(arrowLoc,
                          asyncLoc, /*reasync=*/nullptr,
-                         throwsLoc, /*rethrows=*/nullptr);
+                         throwsLoc, /*rethrows=*/nullptr,
+                         thrownTyRepr);
 
-  auto arrow = new (Context) ArrowExpr(asyncLoc, throwsLoc, arrowLoc);
+  Expr *thrownTy = nullptr;
+  if (thrownTyRepr) {
+    thrownTy = new (Context) TypeExpr(thrownTyRepr);
+  }
+
+  auto arrow = new (Context) ArrowExpr(asyncLoc, throwsLoc, thrownTy, arrowLoc);
   return makeParserResult(arrow);
 }
 
@@ -465,6 +473,44 @@ ParserResult<Expr> Parser::parseExprSequenceElement(Diag<> message,
     }
   }
 
+  // 'any' followed by another identifier is an existential type.
+  if (Tok.isContextualKeyword("any") &&
+      peekToken().is(tok::identifier) &&
+      !peekToken().isAtStartOfLine()) {
+    ParserResult<TypeRepr> ty = parseType();
+    auto *typeExpr = new (Context) TypeExpr(ty.get());
+    return makeParserResult(typeExpr);
+  }
+
+  // 'repeat' as an expression prefix is a pack expansion expression.
+  if (Tok.is(tok::kw_repeat)) {
+    SourceLoc repeatLoc = consumeToken();
+    auto patternExpr = parseExprImpl(
+        diag::expected_expr_after_repeat, isExprBasic);
+    if (patternExpr.isNull())
+      return patternExpr;
+
+    auto *expansion =
+        PackExpansionExpr::create(Context, repeatLoc, patternExpr.get(),
+                                  /*genericEnv*/ nullptr);
+    return makeParserResult(expansion);
+  }
+
+  // 'each' followed by another identifier is a pack element expr.
+  if (Tok.isContextualKeyword("each") &&
+      peekToken().isAny(tok::identifier, tok::kw_self, tok::dollarident,
+                        tok::code_complete) &&
+      !peekToken().isAtStartOfLine()) {
+    SourceLoc loc = consumeToken();
+    ParserResult<Expr> ref =
+        parseExprSequenceElement(diag::expected_expr_after_each, isExprBasic);
+    if (ref.isNull())
+      return ref;
+
+    auto *packRef = PackElementExpr::create(Context, loc, ref.get());
+    return makeParserResult(packRef);
+  }
+
   SourceLoc tryLoc;
   bool hadTry = consumeIf(tok::kw_try, tryLoc);
   llvm::Optional<Token> trySuffix;
@@ -546,24 +592,13 @@ ParserResult<Expr> Parser::parseExprUnary(Diag<> Message, bool isExprBasic) {
   // First check to see if we have the start of a regex literal `/.../`.
   tryLexRegexLiteral(/*forUnappliedOperator*/ false);
 
-  // 'repeat' as an expression prefix is a pack expansion expression.
-  if (Tok.is(tok::kw_repeat)) {
-    SourceLoc repeatLoc = consumeToken();
-    auto patternExpr = parseExpr(Message);
-    if (patternExpr.isNull())
-      return patternExpr;
-
-    auto *expansion =
-        PackExpansionExpr::create(Context, repeatLoc, patternExpr.get(),
-                                  /*genericEnv*/ nullptr);
-    return makeParserResult(expansion);
-  }
-
-  // Try parse an 'if' or 'switch' as an expression. Note we do this here in
-  // parseExprUnary as we don't allow postfix syntax to hang off such
+  // Try parse 'if', 'switch', and 'do' as expressions. Note we do this here
+  // in parseExprUnary as we don't allow postfix syntax to hang off such
   // expressions to avoid ambiguities such as postfix '.member', which can
   // currently be parsed as a static dot member for a result builder.
-  if (Tok.isAny(tok::kw_if, tok::kw_switch)) {
+  if (Tok.isAny(tok::kw_if, tok::kw_switch) ||
+      (Tok.is(tok::kw_do) &&
+       Context.LangOpts.hasFeature(Feature::DoExpressions))) {
     auto Result = parseStmt();
     Expr *E = nullptr;
     if (Result.isNonNull()) {
@@ -1491,9 +1526,20 @@ Parser::parseExprPostfixSuffix(ParserResult<Expr> Result, bool isExprBasic,
         return Result;
       }
 
-      if (CodeCompletionCallbacks && Result.isNonNull()) {
+      // FIXME: We should be able to remove the InBindingPattern checks once
+      // apple/swift#64280 is merged.
+      if (CodeCompletionCallbacks && Result.isNonNull() &&
+          InBindingPattern != PatternBindingState::ImplicitlyImmutable &&
+          InBindingPattern != PatternBindingState::InVar &&
+          InBindingPattern != PatternBindingState::InLet) {
+        // Don't do postfix completions when in a binding pattern. It doesn't
+        // make sense to offer completions eg. in
+        // if let myVar#^COMPLETE^# = someOptional {}
         bool hasSpace = Tok.getLoc() != getEndOfPreviousLoc();
-        CodeCompletionCallbacks->completePostfixExpr(Result.get(), hasSpace);
+        auto CCExpr =
+            new (Context) CodeCompletionExpr(Result.get(), Tok.getLoc());
+        CodeCompletionCallbacks->completePostfixExpr(CCExpr, hasSpace);
+        Result = makeParserResult(Result, CCExpr);
       }
       // Eat the code completion token because we handled it.
       consumeToken(tok::code_complete);
@@ -1702,28 +1748,6 @@ ParserResult<Expr> Parser::parseExprPrimary(Diag<> ID, bool isExprBasic) {
           InBindingPattern.getIntroducer().value_or(VarDecl::Introducer::Let);
       auto pattern = createBindingFromPattern(loc, name, introducer);
       return makeParserResult(new (Context) UnresolvedPatternExpr(pattern));
-    }
-
-    // 'any' followed by another identifier is an existential type.
-    if (Tok.isContextualKeyword("any") &&
-        peekToken().is(tok::identifier) &&
-        !peekToken().isAtStartOfLine()) {
-      ParserResult<TypeRepr> ty = parseType();
-      auto *typeExpr = new (Context) TypeExpr(ty.get());
-      return makeParserResult(typeExpr);
-    }
-
-    // 'each' followed by another identifier is a pack element expr.
-    if (Tok.isContextualKeyword("each") &&
-        peekToken().is(tok::identifier) &&
-        !peekToken().isAtStartOfLine()) {
-      SourceLoc loc = consumeToken();
-      ParserResult<Expr> ref = parseExpr(ID);
-      if (ref.isNull())
-        return ref;
-
-      auto *packRef = PackElementExpr::create(Context, loc, ref.get());
-      return makeParserResult(packRef);
     }
 
     LLVM_FALLTHROUGH;
@@ -2338,6 +2362,8 @@ ParserStatus Parser::parseFreestandingMacroExpansion(
       diagnose(leftAngleLoc, diag::while_parsing_as_left_angle_bracket);
   }
 
+  llvm::SaveAndRestore<bool> inMacroArgument(InFreestandingMacroArgument, true);
+
   if (Tok.isFollowingLParen()) {
     auto result = parseArgumentList(tok::l_paren, tok::r_paren, isExprBasic,
                                     /*allowTrailingClosure*/ true);
@@ -2507,7 +2533,7 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
     SmallVectorImpl<CaptureListEntry> &captureList,
     VarDecl *&capturedSelfDecl,
     ParameterList *&params,
-    SourceLoc &asyncLoc, SourceLoc &throwsLoc,
+    SourceLoc &asyncLoc, SourceLoc &throwsLoc, TypeExpr *&thrownType,
     SourceLoc &arrowLoc,
     TypeExpr *&explicitResultType, SourceLoc &inLoc) {
   // Clear out result parameters.
@@ -2516,6 +2542,7 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
   capturedSelfDecl = nullptr;
   params = nullptr;
   throwsLoc = SourceLoc();
+  thrownType = nullptr;
   arrowLoc = SourceLoc();
   explicitResultType = nullptr;
   inLoc = SourceLoc();
@@ -2523,15 +2550,22 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
   // Consume 'async', 'throws', and 'rethrows', but in any order.
   auto consumeEffectsSpecifiers = [&] {
     while (isEffectsSpecifier(Tok) ||
-           (Tok.is(tok::code_complete) && !Tok.isAtStartOfLine()))
+           (Tok.is(tok::code_complete) && !Tok.isAtStartOfLine())) {
+      bool isThrows = isThrowsEffectSpecifier(Tok);
+
       consumeToken();
+
+      if (isThrows && Tok.is(tok::l_paren))
+        skipSingle();
+    }
   };
 
   // If we have a leading token that may be part of the closure signature, do a
   // speculative parse to validate it and look for 'in'.
   if (Tok.isAny(
           tok::at_sign, tok::l_paren, tok::l_square, tok::identifier,
-          tok::kw__, tok::code_complete)) {
+          tok::kw__, tok::code_complete) ||
+      (Tok.is(tok::kw_throws) && peekToken().is(tok::l_paren))) {
     BacktrackingScope backtrack(*this);
 
     // Consume attributes.
@@ -2589,7 +2623,7 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
         consumeEffectsSpecifiers();
       }
     }
-    
+
     // Parse the 'in' at the end.
     if (Tok.isNot(tok::kw_in))
       return makeParserSuccess();
@@ -2801,9 +2835,12 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
       params = ParameterList::create(Context, elements);
     }
 
+    TypeRepr *thrownTypeRepr = nullptr;
+
     status |= parseEffectsSpecifiers(SourceLoc(),
                                      asyncLoc, /*reasync*/nullptr,
-                                     throwsLoc, /*rethrows*/nullptr);
+                                     throwsLoc, /*rethrows*/nullptr,
+                                     thrownTypeRepr);
 
     // Parse the optional explicit return type.
     if (Tok.is(tok::arrow)) {
@@ -2823,9 +2860,12 @@ ParserStatus Parser::parseClosureSignatureIfPresent(
         // Check for 'throws' and 'rethrows' after the type and correct it.
         parseEffectsSpecifiers(arrowLoc,
                                asyncLoc, /*reasync*/nullptr,
-                               throwsLoc, /*rethrows*/nullptr);
+                               throwsLoc, /*rethrows*/nullptr, thrownTypeRepr);
       }
     }
+
+    if (thrownTypeRepr)
+      thrownType = new (Context) TypeExpr(thrownTypeRepr);
   }
 
   // Parse the 'in'.
@@ -2927,17 +2967,18 @@ ParserResult<Expr> Parser::parseExprClosure() {
   ParameterList *params = nullptr;
   SourceLoc asyncLoc;
   SourceLoc throwsLoc;
+  TypeExpr *thrownType;
   SourceLoc arrowLoc;
   TypeExpr *explicitResultType;
   SourceLoc inLoc;
   Status |= parseClosureSignatureIfPresent(
       attributes, bracketRange, captureList, capturedSelfDecl, params, asyncLoc,
-      throwsLoc, arrowLoc, explicitResultType, inLoc);
+      throwsLoc, thrownType, arrowLoc, explicitResultType, inLoc);
 
   // Create the closure expression and enter its context.
   auto *closure = new (Context) ClosureExpr(
       attributes, bracketRange, capturedSelfDecl, params, asyncLoc, throwsLoc,
-      arrowLoc, inLoc, explicitResultType, CurDeclContext);
+      thrownType, arrowLoc, inLoc, explicitResultType, CurDeclContext);
   ParseFunctionBody cc(*this, closure);
 
   // Handle parameters.
@@ -3066,9 +3107,18 @@ Expr *Parser::parseExprAnonClosureArg() {
     diagnose(Loc, diag::anon_closure_arg_not_in_closure);
     return new (Context) ErrorExpr(Loc);
   }
-  // When the closure already has explicit parameters, offer their names as
-  // replacements.
+
+  // Check whether the closure already has explicit parameters.
   if (auto *params = closure->getParameters()) {
+    // If the explicit parameters are due to the anonymous parameters having
+    // already been set, retrieve the parameter from there.
+    if (closure->hasAnonymousClosureVars() && ArgNo < params->size()) {
+      return new (Context) DeclRefExpr(params->get(ArgNo), DeclNameLoc(Loc),
+                                       /*Implicit=*/false);
+    }
+
+    // If the closure already has an explicit parameter, offer its name as
+    // a replacement.
     if (ArgNo < params->size() && params->get(ArgNo)->hasName()) {
       auto paramName = params->get(ArgNo)->getNameStr();
       diagnose(Loc, diag::anon_closure_arg_in_closure_with_args_typo, paramName)
@@ -3320,38 +3370,8 @@ Parser::parseTrailingClosures(bool isExprBasic, SourceRange calleeRange,
   // Parse labeled trailing closures.
   while (true) {
     if (!isStartOfLabelledTrailingClosure(*this)) {
-      if (!Tok.is(tok::code_complete))
-        break;
-
-      // FIXME: Additional trailing closure completion on newline positions.
-      //   let foo = SomeThing {
-      //     ...
-      //   }
-      //   <HERE>
-      // This was previously enabled, but it failed to suggest 'foo' because
-      // the token was considered a part of the initializer.
-      if (Tok.isAtStartOfLine())
-        break;
-
-      // If the current completion mode doesn't support trailing closure
-      // completion, leave the token here and let "postfix completion" to
-      // handle it.
-      if (CodeCompletionCallbacks &&
-          !CodeCompletionCallbacks->canPerformCompleteLabeledTrailingClosure())
-        break;
-
-      // foo() {} <token>
-      auto CCExpr = new (Context) CodeCompletionExpr(Tok.getLoc());
-      if (CodeCompletionCallbacks) {
-        CodeCompletionCallbacks->completeLabeledTrailingClosure(
-            CCExpr, Tok.isAtStartOfLine());
-      }
-      consumeToken(tok::code_complete);
-      result.setHasCodeCompletionAndIsError();
-      closures.emplace_back(SourceLoc(), Identifier(), CCExpr);
-      continue;
+      break;
     }
-
     Identifier label;
     auto labelLoc = consumeArgumentLabel(label, /*diagnoseDollarPrefix=*/false);
     consumeToken(tok::colon);
@@ -3562,10 +3582,11 @@ ParserResult<Expr> Parser::parseExprCollection() {
 
       // If The next token is at the beginning of a new line and can never start
       // an element, break.
-      if (Tok.isAtStartOfLine() && (Tok.isAny(tok::r_brace, tok::pound_endif) ||
-                                    isStartOfSwiftDecl() || isStartOfStmt()))
+      if (Tok.isAtStartOfLine() &&
+          (Tok.isAny(tok::r_brace, tok::pound_endif) || isStartOfSwiftDecl() ||
+           isStartOfStmt(/*preferExpr*/ false))) {
         break;
-
+      }
       diagnose(Tok, diag::expected_separator, ",")
           .fixItInsertAfter(PreviousLoc, ",");
       Status.setIsParseError();

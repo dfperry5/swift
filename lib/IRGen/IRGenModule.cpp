@@ -196,6 +196,8 @@ static void sanityCheckStdlib(IRGenModule &IGM) {
   // Only run the sanity check when we're building the real stdlib.
   if (!lookupSimple(IGM.getSwiftModule(), { "String" })) return;
 
+  if (!IGM.ObjCInterop) return;
+
   checkPointerAuthAssociatedTypeDiscriminator(IGM, { "_ObjectiveCBridgeable", "_ObjectiveCType" }, SpecialPointerAuthDiscriminators::ObjectiveCTypeDiscriminator);
   checkPointerAuthWitnessDiscriminator(IGM, { "_ObjectiveCBridgeable", "_bridgeToObjectiveC" }, SpecialPointerAuthDiscriminators::bridgeToObjectiveCDiscriminator);
   checkPointerAuthWitnessDiscriminator(IGM, { "_ObjectiveCBridgeable", "_forceBridgeFromObjectiveC" }, SpecialPointerAuthDiscriminators::forceBridgeFromObjectiveCDiscriminator);
@@ -638,10 +640,6 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
                        {RelativeAddressTy, RelativeAddressTy, RelativeAddressTy,
                         RelativeAddressTy, Int32Ty});
 
-  RuntimeDiscoverableAttributeTy =
-    createStructType(*this, "swift.runtime_attr",
-                     {Int32Ty, RelativeAddressTy, Int32Ty});
-
   AsyncFunctionPointerTy = createStructType(*this, "swift.async_func_pointer",
                                             {RelativeAddressTy, Int32Ty}, true);
   SwiftContextTy = llvm::StructType::create(getLLVMContext(), "swift.context");
@@ -672,6 +670,15 @@ IRGenModule::IRGenModule(IRGenerator &irgen,
       *this, "swift.task_group_task_option", {
     SwiftTaskOptionRecordTy,    // Base option record
     SwiftTaskGroupPtrTy,        // Task group
+  });
+  SwiftResultTypeInfoTaskOptionRecordTy = createStructType(
+      *this, "swift.result_type_info_task_option", {
+    SwiftTaskOptionRecordTy,    // Base option record
+    SizeTy,
+    SizeTy,
+    Int8PtrTy,
+    Int8PtrTy,
+    Int8PtrTy,
   });
   ExecutorFirstTy = SizeTy;
   ExecutorSecondTy = SizeTy;
@@ -861,6 +868,15 @@ namespace RuntimeConstants {
     return RuntimeAvailability::AlwaysAvailable;
   }
 
+  RuntimeAvailability ConcurrencyDiscardingTaskGroupAvailability(ASTContext &context) {
+    auto featureAvailability =
+        context.getConcurrencyDiscardingTaskGroupAvailability();
+    if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
+      return RuntimeAvailability::ConditionallyAvailable;
+    }
+    return RuntimeAvailability::AlwaysAvailable;
+  }
+
   RuntimeAvailability DifferentiationAvailability(ASTContext &context) {
     auto featureAvailability = context.getDifferentiationAvailability();
     if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
@@ -882,6 +898,24 @@ namespace RuntimeConstants {
   ObjCIsUniquelyReferencedAvailability(ASTContext &context) {
     auto featureAvailability =
         context.getObjCIsUniquelyReferencedAvailability();
+    if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
+      return RuntimeAvailability::ConditionallyAvailable;
+    }
+    return RuntimeAvailability::AlwaysAvailable;
+  }
+
+  RuntimeAvailability SignedConformsToProtocolAvailability(ASTContext &context) {
+    auto featureAvailability =
+        context.getSignedConformsToProtocolAvailability();
+    if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
+      return RuntimeAvailability::ConditionallyAvailable;
+    }
+    return RuntimeAvailability::AlwaysAvailable;
+  }
+
+  RuntimeAvailability SignedDescriptorAvailability(ASTContext &context) {
+    auto featureAvailability =
+        context.getSignedDescriptorAvailability();
     if (!isDeploymentAvailabilityContainedIn(context, featureAvailability)) {
       return RuntimeAvailability::ConditionallyAvailable;
     }
@@ -1257,10 +1291,7 @@ bool IRGenerator::canEmitWitnessTableLazily(SILWitnessTable *wt) {
   if (wt->getLinkage() == SILLinkage::Shared)
     return true;
 
-  NominalTypeDecl *ConformingTy =
-    wt->getConformingType()->getNominalOrBoundGenericNominal();
-
-  switch (ConformingTy->getEffectiveAccess()) {
+  switch (wt->getConformingNominal()->getEffectiveAccess()) {
     case AccessLevel::Private:
     case AccessLevel::FilePrivate:
       return true;
@@ -1275,6 +1306,8 @@ bool IRGenerator::canEmitWitnessTableLazily(SILWitnessTable *wt) {
 }
 
 void IRGenerator::addLazyWitnessTable(const ProtocolConformance *Conf) {
+  assert(!SIL.getASTContext().LangOpts.hasFeature(Feature::Embedded));
+
   if (auto *wt = SIL.lookUpWitnessTable(Conf)) {
     // Add it to the queue if it hasn't already been put there.
     if (canEmitWitnessTableLazily(wt) &&
@@ -1439,21 +1472,33 @@ void IRGenModule::addLinkLibrary(const LinkLibrary &linkLib) {
   // emit it into the IR of debugger expressions.
   if (Context.LangOpts.DebuggerSupport)
     return;
-  
-  switch (linkLib.getKind()) {
-  case LibraryKind::Library: {
-    AutolinkEntries.emplace_back(linkLib);
-    break;
-  }
-  case LibraryKind::Framework: {
-    // If we're supposed to disable autolinking of this framework, bail out.
-    auto &frameworks = IRGen.Opts.DisableAutolinkFrameworks;
-    if (std::find(frameworks.begin(), frameworks.end(), linkLib.getName())
-          != frameworks.end())
-      return;
-    AutolinkEntries.emplace_back(linkLib);
-    break;
-  }
+
+  if (Context.LangOpts.hasFeature(Feature::Embedded))
+    return;
+
+  // '-disable-autolinking' means we will not auto-link
+  // any loaded library at all.
+  if (!IRGen.Opts.DisableAllAutolinking) {
+    switch (linkLib.getKind()) {
+    case LibraryKind::Library: {
+      auto &libraries = IRGen.Opts.DisableAutolinkLibraries;
+      if (llvm::find(libraries, linkLib.getName()) != libraries.end())
+	return;
+      AutolinkEntries.emplace_back(linkLib);
+      break;
+    }
+    case LibraryKind::Framework: {
+      // 'disable-autolink-frameworks' means we will not auto-link
+      // any loaded framework.
+      if (!IRGen.Opts.DisableFrameworkAutolinking) {
+	auto &frameworks = IRGen.Opts.DisableAutolinkFrameworks;
+	if (llvm::find(frameworks, linkLib.getName()) != frameworks.end())
+	  return;
+	AutolinkEntries.emplace_back(linkLib);
+      }
+      break;
+    }
+    }
   }
 
   if (linkLib.shouldForceLoad()) {
@@ -1908,6 +1953,16 @@ bool IRGenModule::shouldPrespecializeGenericMetadata() {
          canPrespecializeTarget;
 }
 
+bool IRGenModule::canUseObjCSymbolicReferences() {
+  if (!IRGen.Opts.EnableObjectiveCProtocolSymbolicReferences)
+    return false;
+  auto &context = getSwiftModule()->getASTContext();
+  auto deploymentAvailability =
+      AvailabilityContext::forDeploymentTarget(context);
+  return deploymentAvailability.isContainedIn(
+      context.getObjCSymbolicReferencesAvailability());
+}
+
 bool IRGenModule::canMakeStaticObjectsReadOnly() {
   // Unconditionally disable this until we can fix the metadata.
   // The trick of using the Empty array metadata for static arrays
@@ -1997,7 +2052,7 @@ const llvm::StringRef IRGenerator::getClangDataLayoutString() {
 }
 
 TypeExpansionContext IRGenModule::getMaximalTypeExpansionContext() const {
-  return TypeExpansionContext::maximal(getSwiftModule(),
+  return TypeExpansionContext::maximal(getSILModule().getAssociatedContext(),
                                        getSILModule().isWholeModule());
 }
 

@@ -214,7 +214,7 @@ enum class ForeignRepresentableKind : uint8_t {
 /// therefore, the result type is in covariant position relative to the function
 /// type.
 struct TypePosition final {
-  enum : uint8_t { Covariant, Contravariant, Invariant };
+  enum : uint8_t { Covariant, Contravariant, Invariant, Shape };
 
 private:
   decltype(Covariant) kind;
@@ -224,6 +224,7 @@ public:
 
   TypePosition flipped() const {
     switch (kind) {
+    case Shape:
     case Invariant:
       return *this;
     case Covariant:
@@ -314,6 +315,14 @@ public:
   Type transformWithPosition(
       TypePosition pos,
       llvm::function_ref<llvm::Optional<Type>(TypeBase *, TypePosition)> fn)
+      const;
+
+  /// Transform free pack element references, that is, those not captured by a
+  /// pack expansion.
+  ///
+  /// This is the 'map' counterpart to TypeBase::getTypeParameterPacks().
+  Type transformTypeParameterPacks(
+      llvm::function_ref<llvm::Optional<Type>(SubstitutableType *)> fn)
       const;
 
   /// Look through the given type and its children and apply fn to them.

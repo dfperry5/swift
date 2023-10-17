@@ -13,6 +13,7 @@
 // RUN:   -cas-plugin-option first-prefix=myfirst- -cas-plugin-option second-prefix=mysecond- \
 // RUN:   -cas-plugin-option upstream-path=%t/cas-upstream
 // Check the contents of the JSON output
+// RUN: %validate-json %t/deps.json &>/dev/null
 // RUN: %FileCheck -check-prefix CHECK -check-prefix CHECK_NO_CLANG_TARGET %s < %t/deps.json
 
 // Check the contents of the JSON output
@@ -31,6 +32,7 @@
 // RUN:   -cas-plugin-option first-prefix=myfirst- -cas-plugin-option second-prefix=mysecond- \
 // RUN:   -cas-plugin-option upstream-path=%t/cas-upstream
 // Check the contents of the JSON output
+// RUN: %validate-json %t/deps_clang_target.json &>/dev/null
 // RUN: %FileCheck -check-prefix CHECK_CLANG_TARGET %s < %t/deps_clang_target.json
 
 import C
@@ -46,10 +48,8 @@ import SubE
 // CHECK-NEXT: plugin_cas.swift
 // CHECK-NEXT: ],
 // CHECK-NEXT: "directDependencies": [
-// CHECK-DAG:     "swift": "A"
 // CHECK-DAG:     "clang": "C"
 // CHECK-DAG:     "swift": "E"
-// CHECK-DAG:     "swift": "F"
 // CHECK-DAG:     "swift": "G"
 // CHECK-DAG:     "swift": "SubE"
 // CHECK-DAG:     "swift": "Swift"
@@ -75,6 +75,10 @@ import SubE
 // CHECK: "moduleDependencies": [
 // CHECK-NEXT: "F"
 // CHECK-NEXT: ]
+
+// CHECK: "swiftOverlayDependencies": [
+// CHECK-DAG:     "swift": "A"
+// CHECK-DAG:     "swift": "F"
 
 /// --------Swift module A
 // CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}A-{{.*}}.swiftmodule",
@@ -138,20 +142,6 @@ import SubE
 // CHECK: "moduleInterfacePath"
 // CHECK-SAME: E.swiftinterface
 
-/// --------Swift module Swift
-// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}Swift-{{.*}}.swiftmodule",
-
-// CHECK: directDependencies
-// CHECK-NEXT: {
-// CHECK-NEXT: "clang": "SwiftShims"
-
-/// --------Clang module SwiftShims
-// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}SwiftShims-{{.*}}.pcm",
-// CHECK: "contextHash": "[[SHIMS_CONTEXT:.*]]",
-// CHECK: "-o"
-// CHECK-NEXT: SwiftShims-{{.*}}[[SHIMS_CONTEXT]].pcm
-// CHECK-NO-SEARCH-PATHS-NOT: "-prebuilt-module-cache-path"
-
 /// --------Clang module C
 // CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}C-{{.*}}.pcm",
 
@@ -184,3 +174,18 @@ import SubE
 // CHECK-MAKE-DEPS-SAME: Bridging.h
 // CHECK-MAKE-DEPS-SAME: BridgingOther.h
 // CHECK-MAKE-DEPS-SAME: module.modulemap
+
+/// --------Swift module Swift
+// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}Swift-{{.*}}.swiftmodule",
+
+// CHECK: directDependencies
+// CHECK-NEXT: {
+// CHECK-NEXT: "clang": "SwiftShims"
+
+/// --------Clang module SwiftShims
+// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}SwiftShims-{{.*}}.pcm",
+// CHECK: "contextHash": "[[SHIMS_CONTEXT:.*]]",
+// CHECK: "-o"
+// CHECK-NEXT: SwiftShims-{{.*}}[[SHIMS_CONTEXT]].pcm
+// CHECK-NO-SEARCH-PATHS-NOT: "-prebuilt-module-cache-path"
+

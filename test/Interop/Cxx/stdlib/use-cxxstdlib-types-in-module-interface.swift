@@ -3,8 +3,6 @@
 
 // RUN: %target-swift-ide-test -swift-version 5 -print-module -module-to-print=IncludesCxxStdlib -I %t/Inputs -source-filename=test.swift -enable-experimental-cxx-interop -tools-directory=%llvm_obj_root/bin -module-cache-path %t/cache | %FileCheck %s
 
-// REQUIRES: OS=macosx || OS=linux-gnu
-
 //--- Inputs/module.modulemap
 module IncludesCxxStdlib {
     header "header.h"
@@ -42,7 +40,7 @@ public:
     std::vector<SimplePOD * _Nullable> getMutPODPtrItems() const;
 };
 
-// CHECK: func getPODItems() -> std{{\.__1\.|\.}}vector<SimplePOD, allocator<SimplePOD>>
-// CHECK: func getFRTItems() -> std{{\.__1\.|\.}}vector<FRTType, allocator<FRTType>>
-// CHECK: func getPODPtrItems() -> std{{\.__1\.|\.}}vector<UnsafePointer<SimplePOD>, allocator<UnsafePointer<SimplePOD>>>
-// CHECK: func getMutPODPtrItems() -> std{{\.__1\.|\.}}vector<UnsafeMutablePointer<SimplePOD>, allocator<UnsafeMutablePointer<SimplePOD>>>
+// CHECK: func getPODItems() -> std{{\.__(ndk)?1\.|\.}}vector<SimplePOD, allocator<SimplePOD>>
+// CHECK: func getFRTItems() -> std{{\.__(ndk)?1\.|\.}}vector<FRTType, allocator<FRTType>>
+// CHECK: func getPODPtrItems() -> std{{\.__(ndk)?1\.|\.}}vector<UnsafePointer<SimplePOD>, allocator<UnsafePointer<SimplePOD>>>
+// CHECK: func getMutPODPtrItems() -> std{{\.__(ndk)?1\.|\.}}vector<UnsafeMutablePointer<SimplePOD>, allocator<UnsafeMutablePointer<SimplePOD>>>

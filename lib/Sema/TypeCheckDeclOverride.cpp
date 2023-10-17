@@ -35,7 +35,7 @@ static void adjustFunctionTypeForOverride(Type &type) {
   // with one returning Never?
   auto fnType = type->castTo<AnyFunctionType>();
   auto extInfo = fnType->getExtInfo();
-  extInfo = extInfo.withThrows(false);
+  extInfo = extInfo.withThrows(false, Type());
   if (!fnType->getExtInfo().isEqualTo(extInfo, useClangTypes(fnType)))
     type = fnType->withExtInfo(extInfo);
 }
@@ -338,8 +338,8 @@ diagnoseMismatchedOptionals(const ValueDecl *member,
 
   // Check the parameter types.
   auto checkParam = [&](const ParamDecl *decl, const ParamDecl *parentDecl) {
-    Type paramTy = decl->getType();
-    Type parentParamTy = parentDecl->getType();
+    Type paramTy = decl->getTypeInContext();
+    Type parentParamTy = parentDecl->getTypeInContext();
 
     auto *repr = decl->getTypeRepr();
     if (!repr)
@@ -594,8 +594,7 @@ static void diagnoseGeneralOverrideFailure(ValueDecl *decl,
     }
 
     auto diag = diags.diagnose(matchDecl, diag::overridden_near_match_here,
-                               matchDecl->getDescriptiveKind(),
-                               matchDecl->getName());
+                               matchDecl);
     if (attempt == OverrideCheckingAttempt::BaseName) {
       fixDeclarationName(diag, decl, matchDecl->getName());
     }
@@ -1212,9 +1211,7 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
         diagKind = diag::initializer_does_not_override;
       diags.diagnose(decl, diagKind, isClassContext);
       noteFixableMismatchedTypes(decl, baseDecl);
-      diags.diagnose(baseDecl, diag::overridden_near_match_here,
-                     baseDecl->getDescriptiveKind(),
-                     baseDecl->getName());
+      diags.diagnose(baseDecl, diag::overridden_near_match_here, baseDecl);
       emittedMatchError = true;
 
     } else if (!isa<AccessorDecl>(method) &&
@@ -1245,9 +1242,7 @@ bool OverrideMatcher::checkOverride(ValueDecl *baseDecl,
     if (attempt == OverrideCheckingAttempt::MismatchedTypes) {
       diags.diagnose(decl, diag::subscript_does_not_override, isClassContext);
       noteFixableMismatchedTypes(decl, baseDecl);
-      diags.diagnose(baseDecl, diag::overridden_near_match_here,
-                     baseDecl->getDescriptiveKind(),
-                     baseDecl->getName());
+      diags.diagnose(baseDecl, diag::overridden_near_match_here, baseDecl);
       emittedMatchError = true;
 
     } else if (mayHaveMismatchedOptionals) {
@@ -1516,6 +1511,7 @@ namespace  {
     UNINTERESTING_ATTR(Inlinable)
     UNINTERESTING_ATTR(Effects)
     UNINTERESTING_ATTR(Expose)
+    UNINTERESTING_ATTR(Extern)
     UNINTERESTING_ATTR(Final)
     UNINTERESTING_ATTR(MoveOnly)
     UNINTERESTING_ATTR(FixedLayout)
@@ -1534,6 +1530,7 @@ namespace  {
     UNINTERESTING_ATTR(Optional)
     UNINTERESTING_ATTR(Override)
     UNINTERESTING_ATTR(RawDocComment)
+    UNINTERESTING_ATTR(RawLayout)
     UNINTERESTING_ATTR(Required)
     UNINTERESTING_ATTR(Convenience)
     UNINTERESTING_ATTR(Semantics)
@@ -1581,8 +1578,7 @@ namespace  {
     UNINTERESTING_ATTR(ObjCMembers)
     UNINTERESTING_ATTR(ObjCRuntimeName)
     UNINTERESTING_ATTR(RestatedObjCConformance)
-    UNINTERESTING_ATTR(Initializes)
-    UNINTERESTING_ATTR(Accesses)
+    UNINTERESTING_ATTR(StorageRestrictions)
     UNINTERESTING_ATTR(Implements)
     UNINTERESTING_ATTR(StaticInitializeObjCMetadata)
     UNINTERESTING_ATTR(ClangImporterSynthesizedType)
@@ -1627,8 +1623,6 @@ namespace  {
 
     UNINTERESTING_ATTR(EagerMove)
     UNINTERESTING_ATTR(NoEagerMove)
-
-    UNINTERESTING_ATTR(RuntimeMetadata)
 
     UNINTERESTING_ATTR(MacroRole)
     UNINTERESTING_ATTR(LexicalLifetimes)
@@ -1687,11 +1681,9 @@ namespace  {
 
       // Complain.
       Diags.diagnose(Override, diag::override_swift3_objc_inference,
-                     Override->getDescriptiveKind(),
-                     Override->getName(),
-                     Base->getDeclContext()
-                       ->getSelfNominalTypeDecl()
-                       ->getName());
+                     Override, Base->getDeclContext()
+                                 ->getSelfNominalTypeDecl()
+                                 ->getName());
       Diags.diagnose(Base, diag::make_decl_objc, Base->getDescriptiveKind())
         .fixItInsert(Base->getAttributeInsertionLoc(false),
                      "@objc ");
@@ -1824,16 +1816,7 @@ static bool diagnoseOverrideForAvailability(ValueDecl *override,
     return false;
 
   auto &diags = override->getASTContext().Diags;
-  if (auto *accessor = dyn_cast<AccessorDecl>(override)) {
-    diags.diagnose(override, diag::override_accessor_less_available,
-                   accessor->getDescriptiveKind(),
-                   accessor->getStorage()->getBaseName());
-    diags.diagnose(base, diag::overridden_here);
-    return true;
-  }
-
-  diags.diagnose(override, diag::override_less_available,
-                 override->getBaseName());
+  diags.diagnose(override, diag::override_less_available, override);
   diags.diagnose(base, diag::overridden_here);
 
   return true;
@@ -1995,8 +1978,7 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
     bool baseCanBeObjC = canBeRepresentedInObjC(base);
     auto nominal = base->getDeclContext()->getSelfNominalTypeDecl();
     diags.diagnose(override, diag::override_decl_extension, baseCanBeObjC,
-                   !isa<ExtensionDecl>(base->getDeclContext()),
-                   override->getDescriptiveKind(), override->getName(),
+                   !isa<ExtensionDecl>(base->getDeclContext()), override,
                    nominal->getName());
     // If the base and the override come from the same module, try to fix
     // the base declaration. Otherwise we can wind up diagnosing into e.g. the

@@ -48,7 +48,8 @@ void ASTScopeImpl::unqualifiedLookup(
 const ASTScopeImpl *ASTScopeImpl::findStartingScopeForLookup(
     SourceFile *sourceFile, const SourceLoc loc) {
   auto *const fileScope = sourceFile->getScope().impl;
-  const auto *innermost = fileScope->findInnermostEnclosingScope(loc, nullptr);
+  const auto *innermost = fileScope->findInnermostEnclosingScope(
+      sourceFile->getParentModule(), loc, nullptr);
   ASTScopeAssert(innermost->getWasExpanded(),
                  "If looking in a scope, it must have been expanded.");
 
@@ -56,22 +57,23 @@ const ASTScopeImpl *ASTScopeImpl::findStartingScopeForLookup(
 }
 
 ASTScopeImpl *
-ASTScopeImpl::findInnermostEnclosingScope(SourceLoc loc,
+ASTScopeImpl::findInnermostEnclosingScope(ModuleDecl *parentModule,
+                                          SourceLoc loc,
                                           NullablePtr<raw_ostream> os) {
-  return findInnermostEnclosingScopeImpl(loc, os, getSourceManager(),
-                                         getScopeCreator());
+  return findInnermostEnclosingScopeImpl(parentModule, loc, os,
+                                         getSourceManager(), getScopeCreator());
 }
 
 ASTScopeImpl *ASTScopeImpl::findInnermostEnclosingScopeImpl(
-    SourceLoc loc, NullablePtr<raw_ostream> os, SourceManager &sourceMgr,
-    ScopeCreator &scopeCreator) {
+    ModuleDecl *parentModule, SourceLoc loc, NullablePtr<raw_ostream> os,
+    SourceManager &sourceMgr, ScopeCreator &scopeCreator) {
   if (!getWasExpanded())
     expandAndBeCurrent(scopeCreator);
-  auto child = findChildContaining(loc, sourceMgr);
+  auto child = findChildContaining(parentModule, loc, sourceMgr);
   if (!child)
     return this;
-  return child.get()->findInnermostEnclosingScopeImpl(loc, os, sourceMgr,
-                                                      scopeCreator);
+  return child.get()->findInnermostEnclosingScopeImpl(parentModule, loc, os,
+                                                      sourceMgr, scopeCreator);
 }
 
 /// If the \p loc is in a new buffer but \p range is not, consider the location
@@ -89,10 +91,10 @@ static SourceLoc translateLocForReplacedRange(SourceManager &sourceMgr,
 }
 
 NullablePtr<ASTScopeImpl>
-ASTScopeImpl::findChildContaining(SourceLoc loc,
+ASTScopeImpl::findChildContaining(ModuleDecl *parentModule,
+                                  SourceLoc loc,
                                   SourceManager &sourceMgr) const {
-  auto *moduleDecl = this->getSourceFile()->getParentModule();
-  auto *locSourceFile = moduleDecl->getSourceFileContainingLocation(loc);
+  auto *locSourceFile = parentModule->getSourceFileContainingLocation(loc);
 
   // Use binary search to find the child that contains this location.
   auto *const *child = llvm::lower_bound(
@@ -109,7 +111,7 @@ ASTScopeImpl::findChildContaining(SourceLoc loc,
         // Note that `scope->getSourceFile()` returns the root of the source tree,
         // not the source file containing the location of the ASTScope.
         auto scopeStart = scope->getSourceRangeOfThisASTNode().Start;
-        auto *scopeSourceFile = moduleDecl->getSourceFileContainingLocation(scopeStart);
+        auto *scopeSourceFile = parentModule->getSourceFileContainingLocation(scopeStart);
 
         if (scopeSourceFile != locSourceFile) {
           // To compare a source location that is possibly inside a macro expansion
@@ -191,8 +193,7 @@ void ASTScopeImpl::lookup(const NullablePtr<const ASTScopeImpl> limit,
   consumer.startingNextLookupStep();
 #endif
 
-  // Certain illegal nestings, e.g. protocol nestled inside a struct,
-  // require that lookup stop at the outer scope.
+  // Certain illegal nestings require that lookup stop at the outer scope.
   if (this == limit.getPtrOrNull()) {
 #ifndef NDEBUG
     consumer.finishingLookup("limit return");
@@ -556,13 +557,13 @@ GenericTypeOrExtensionScope::getLookupLimitForDecl() const {
 
 NullablePtr<const ASTScopeImpl>
 NominalTypeScope::getLookupLimitForDecl() const {
-  if (isa<ProtocolDecl>(decl)) {
-    // ProtocolDecl can only be legally nested in a SourceFile,
-    // so any other kind of Decl is illegal
-    return parentIfNotChildOfTopScope();
-  }
-  // AFAICT, a struct, decl, or enum can be nested inside anything
-  // but a ProtocolDecl.
+  // If a protocol is (invalidly) nested in a generic context,
+  // do not look in to those outer generic contexts,
+  // as types found there may contain implicitly inferred generic parameters.
+  if (isa<ProtocolDecl>(decl) && decl->getDeclContext()->isGenericContext())
+    return getLookupParent();
+
+  // Otherwise, nominals can be nested inside anything but a ProtocolDecl.
   return ancestorWithDeclSatisfying(
       [&](const Decl *const d) { return isa<ProtocolDecl>(d); });
 }
@@ -624,7 +625,8 @@ llvm::SmallVector<LabeledStmt *, 4>
 ASTScopeImpl::lookupLabeledStmts(SourceFile *sourceFile, SourceLoc loc) {
   // Find the innermost scope from which to start our search.
   auto *const fileScope = sourceFile->getScope().impl;
-  const auto *innermost = fileScope->findInnermostEnclosingScope(loc, nullptr);
+  const auto *innermost = fileScope->findInnermostEnclosingScope(
+      sourceFile->getParentModule(), loc, nullptr);
   ASTScopeAssert(innermost->getWasExpanded(),
                  "If looking in a scope, it must have been expanded.");
 
@@ -652,7 +654,8 @@ std::pair<CaseStmt *, CaseStmt *> ASTScopeImpl::lookupFallthroughSourceAndDest(
     SourceFile *sourceFile, SourceLoc loc) {
   // Find the innermost scope from which to start our search.
   auto *const fileScope = sourceFile->getScope().impl;
-  const auto *innermost = fileScope->findInnermostEnclosingScope(loc, nullptr);
+  const auto *innermost = fileScope->findInnermostEnclosingScope(
+      sourceFile->getParentModule(), loc, nullptr);
   ASTScopeAssert(innermost->getWasExpanded(),
                  "If looking in a scope, it must have been expanded.");
 
@@ -686,7 +689,8 @@ void ASTScopeImpl::lookupEnclosingMacroScope(
     return;
 
   auto *fileScope = sourceFile->getScope().impl;
-  auto *scope = fileScope->findInnermostEnclosingScope(loc, nullptr);
+  auto *scope = fileScope->findInnermostEnclosingScope(
+      sourceFile->getParentModule(), loc, nullptr);
   do {
     auto *freestanding = scope->getFreestandingMacro().getPtrOrNull();
     if (freestanding && consume(freestanding))
@@ -707,4 +711,31 @@ void ASTScopeImpl::lookupEnclosingMacroScope(
       return;
 
   } while ((scope = scope->getParent().getPtrOrNull()));
+}
+
+CatchNode ASTScopeImpl::lookupCatchNode(ModuleDecl *module, SourceLoc loc) {
+  auto sourceFile = module->getSourceFileContainingLocation(loc);
+  if (!sourceFile)
+    return nullptr;
+
+  auto *fileScope = sourceFile->getScope().impl;
+  const auto *innermost = fileScope->findInnermostEnclosingScope(
+      module, loc, nullptr);
+  ASTScopeAssert(innermost->getWasExpanded(),
+                 "If looking in a scope, it must have been expanded.");
+
+  // Look for a body scope that's the
+  const BraceStmtScope *innerBodyScope = nullptr;
+  for (auto scope = innermost; scope; scope = scope->getParent().getPtrOrNull()) {
+    // If we are at a catch node and in the body of the region from which that
+    // node catches thrown errors, we have our result.
+    auto caught = scope->getCatchNodeBody();
+    if (caught.first && caught.second == innerBodyScope) {
+      return caught.first;
+    }
+
+    innerBodyScope = scope->getAsBraceStmtScope().getPtrOrNull();
+  }
+
+  return nullptr;
 }

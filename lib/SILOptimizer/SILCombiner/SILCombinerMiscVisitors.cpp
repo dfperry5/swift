@@ -371,6 +371,18 @@ public:
     // anything other than the init_existential_addr/open_existential_addr
     // container.
 
+    // There is no interesting scenario where a non-copyable type should have
+    // its allocation eliminated. A destroy_addr cannot be removed because it
+    // may run the struct-deinit, and the lifetime cannot be shortened. A
+    // copy_addr [take] [init] cannot be replaced by a destroy_addr because the
+    // destination may hold a 'discard'ed value, which is never destroyed. This
+    // analysis assumes memory is deinitialized on all paths, which is not the
+    // case for discarded values. Eventually copyable types may also be
+    // discarded; to support that, we will leave a drop_deinit_addr in place.
+    if (ASI->getType().getASTType()->isNoncopyable()) {
+      LegalUsers = false;
+      return;
+    }
     for (auto *Op : getNonDebugUses(ASI)) {
       visit(Op->getUser());
 
@@ -733,32 +745,6 @@ SILInstruction *SILCombiner::visitAllocStackInst(AllocStackInst *AS) {
   return eraseInstFromFunction(*AS);
 }
 
-SILInstruction *SILCombiner::visitAllocRefInst(AllocRefInst *AR) {
-  // Check if the only uses are deallocating stack or deallocating.
-  SmallPtrSet<SILInstruction *, 16> ToDelete;
-  bool HasNonRemovableUses = false;
-  for (auto UI = AR->use_begin(), UE = AR->use_end(); UI != UE;) {
-    auto *Op = *UI;
-    ++UI;
-    auto *User = Op->getUser();
-    if (!isa<DeallocRefInst>(User) && !isa<SetDeallocatingInst>(User) &&
-        !isa<FixLifetimeInst>(User) && !isa<DeallocStackRefInst>(User)) {
-      HasNonRemovableUses = true;
-      break;
-    }
-    ToDelete.insert(User);
-  }
-
-  if (HasNonRemovableUses)
-    return nullptr;
-
-  // Remove the instruction and all its uses.
-  for (auto *I : ToDelete)
-    eraseInstFromFunction(*I);
-  eraseInstFromFunction(*AR);
-  return nullptr;
-}
-
 /// Returns the base address if \p val is an index_addr with constant index.
 static SILValue isConstIndexAddr(SILValue val, unsigned &index) {
   auto *IA = dyn_cast<IndexAddrInst>(val);
@@ -824,17 +810,47 @@ SILInstruction *SILCombiner::visitCondFailInst(CondFailInst *CFI) {
   if (!I->getValue().getBoolValue())
     return eraseInstFromFunction(*CFI);
 
-  // Remove any code that follows a (cond_fail 1) and set the block's
-  // terminator to unreachable.
+  // Remove non-lifetime-ending code that follows a (cond_fail 1) and set the
+  // block's terminator to unreachable.
 
-  // Nothing more to do here
+  // Are there instructions after this point to delete?
+
+  // First check if the next instruction is unreachable.
   if (isa<UnreachableInst>(std::next(SILBasicBlock::iterator(CFI))))
     return nullptr;
 
-  // Collect together all the instructions after this point
+  // Otherwise, check if the only instructions are unreachables and destroys of
+  // lexical values.
+
+  // Collect all instructions and, in OSSA, the values they define.
   llvm::SmallVector<SILInstruction *, 32> ToRemove;
-  for (auto Inst = CFI->getParent()->rbegin(); &*Inst != CFI; ++Inst)
-    ToRemove.push_back(&*Inst);
+  ValueSet DefinedValues(CFI->getFunction());
+  for (auto Iter = std::next(CFI->getIterator());
+       Iter != CFI->getParent()->end(); ++Iter) {
+    if (!CFI->getFunction()->hasOwnership()) {
+      ToRemove.push_back(&*Iter);
+      continue;
+    }
+
+    for (auto result : Iter->getResults()) {
+      DefinedValues.insert(result);
+    }
+    // Look for destroys of lexical values whose def isn't after the cond_fail.
+    if (auto *dvi = dyn_cast<DestroyValueInst>(&*Iter)) {
+      auto value = dvi->getOperand();
+      if (!DefinedValues.contains(value) && value->isLexical())
+        continue;
+    }
+    ToRemove.push_back(&*Iter);
+  }
+
+  unsigned instructionsToDelete = ToRemove.size();
+  // If the last instruction is an unreachable already, it needn't be deleted.
+  if (isa<UnreachableInst>(ToRemove.back())) {
+    --instructionsToDelete;
+  }
+  if (instructionsToDelete == 0)
+    return nullptr;
 
   for (auto *Inst : ToRemove) {
     // Replace any still-remaining uses with undef and erase.
@@ -1863,49 +1879,37 @@ static bool isLiteral(SILValue val) {
 }
 
 SILInstruction *SILCombiner::visitMarkDependenceInst(MarkDependenceInst *mdi) {
-  auto base = lookThroughOwnershipInsts(mdi->getBase());
-
-  // Simplify the base operand of a MarkDependenceInst to eliminate unnecessary
-  // instructions that aren't adding value.
-  //
-  // Conversions to Optional.Some(x) often happen here, this isn't important
-  // for us, we can just depend on 'x' directly.
-  if (auto *eiBase = dyn_cast<EnumInst>(base)) {
-    if (eiBase->hasOperand()) {
-      auto *use = &mdi->getOperandRef(MarkDependenceInst::Base);
-      OwnershipReplaceSingleUseHelper helper(ownershipFixupContext,
-                                             use, eiBase->getOperand());
-      if (helper) {
-        helper.perform();
-        tryEliminateOnlyOwnershipUsedForwardingInst(eiBase,
-                                                    getInstModCallbacks());
+  if (!mdi->getFunction()->hasOwnership()) {
+    // Simplify the base operand of a MarkDependenceInst to eliminate
+    // unnecessary instructions that aren't adding value.
+    //
+    // Conversions to Optional.Some(x) often happen here, this isn't important
+    // for us, we can just depend on 'x' directly.
+    if (auto *eiBase = dyn_cast<EnumInst>(mdi->getBase())) {
+      if (eiBase->hasOperand()) {
+        mdi->setBase(eiBase->getOperand());
+        if (eiBase->use_empty()) {
+          eraseInstFromFunction(*eiBase);
+        }
         return mdi;
       }
     }
-  }
 
-  // Conversions from a class to AnyObject also happen a lot, we can just depend
-  // on the class reference.
-  if (auto *ier = dyn_cast<InitExistentialRefInst>(base)) {
-    auto *use = &mdi->getOperandRef(MarkDependenceInst::Base);
-    OwnershipReplaceSingleUseHelper helper(ownershipFixupContext,
-                                           use, ier->getOperand());
-    if (helper) {
-      helper.perform();
-      tryEliminateOnlyOwnershipUsedForwardingInst(ier, getInstModCallbacks());
+    // Conversions from a class to AnyObject also happen a lot, we can just
+    // depend on the class reference.
+    if (auto *ier = dyn_cast<InitExistentialRefInst>(mdi->getBase())) {
+      mdi->setBase(ier->getOperand());
+      if (ier->use_empty())
+        eraseInstFromFunction(*ier);
       return mdi;
     }
-  }
 
-  // Conversions from a class to AnyObject also happen a lot, we can just depend
-  // on the class reference.
-  if (auto *oeri = dyn_cast<OpenExistentialRefInst>(base)) {
-    auto *use = &mdi->getOperandRef(MarkDependenceInst::Base);
-    OwnershipReplaceSingleUseHelper helper(ownershipFixupContext,
-                                           use, oeri->getOperand());
-    if (helper) {
-      helper.perform();
-      tryEliminateOnlyOwnershipUsedForwardingInst(oeri, getInstModCallbacks());
+    // Conversions from a class to AnyObject also happen a lot, we can just
+    // depend on the class reference.
+    if (auto *oeri = dyn_cast<OpenExistentialRefInst>(mdi->getBase())) {
+      mdi->setBase(oeri->getOperand());
+      if (oeri->use_empty())
+        eraseInstFromFunction(*oeri);
       return mdi;
     }
   }
@@ -1914,17 +1918,14 @@ SILInstruction *SILCombiner::visitMarkDependenceInst(MarkDependenceInst *mdi) {
   // whose base is a trivial typed object. In such a case, the mark_dependence
   // does not have a meaning, so just eliminate it.
   {
-    SILType baseType = base->getType();
-    if (baseType.isObject()) {
-      if ((hasOwnership() && base->getOwnershipKind() == OwnershipKind::None) ||
-          baseType.isTrivial(*mdi->getFunction())) {
-        SILValue value = mdi->getValue();
-        replaceInstUsesWith(*mdi, value);
-        return eraseInstFromFunction(*mdi);
-      }
+    SILType baseType = mdi->getBase()->getType();
+    if (baseType.isObject() && baseType.isTrivial(*mdi->getFunction())) {
+      SILValue value = mdi->getValue();
+      mdi->replaceAllUsesWith(value);
+      return eraseInstFromFunction(*mdi);
     }
   }
-  
+
   if (isLiteral(mdi->getValue())) {
     // A literal lives forever, so no mark_dependence is needed.
     // This pattern can occur after StringOptimization when a utf8CString of

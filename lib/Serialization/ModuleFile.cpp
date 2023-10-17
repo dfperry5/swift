@@ -271,8 +271,10 @@ Status ModuleFile::associateWithFileContext(FileUnit *file, SourceLoc diagLoc,
   }
 
   StringRef SDKPath = ctx.SearchPathOpts.getSDKPath();
-  if (SDKPath.empty() ||
-      !Core->ModuleInputBuffer->getBufferIdentifier().startswith(SDKPath)) {
+  // In Swift 6 mode, we do not inherit search paths from loaded non-SDK modules.
+  if (!ctx.LangOpts.isSwiftVersionAtLeast(6) &&
+      (SDKPath.empty() ||
+       !Core->ModuleInputBuffer->getBufferIdentifier().startswith(SDKPath))) {
     for (const auto &searchPath : Core->SearchPaths) {
       ctx.addSearchPath(
         ctx.SearchPathOpts.SearchPathRemapper.remapPath(searchPath.Path),
@@ -496,20 +498,20 @@ void ModuleFile::getImportedModules(SmallVectorImpl<ImportedModule> &results,
         continue;
 
     } else if (dep.isImplementationOnly()) {
-      if (!filter.contains(ModuleDecl::ImportFilterKind::ImplementationOnly))
+      // Pretend we didn't have potentially optional imports if we weren't
+      // originally asked to load it.
+      if (!filter.contains(ModuleDecl::ImportFilterKind::ImplementationOnly) ||
+          !dep.isLoaded())
         continue;
-      if (!dep.isLoaded()) {
-        // Pretend we didn't have this import if we weren't originally asked to
-        // load it.
-        continue;
-      }
 
     } else if (dep.isInternalOrBelow()) {
-      if (!filter.contains(ModuleDecl::ImportFilterKind::InternalOrBelow))
+      if (!filter.contains(ModuleDecl::ImportFilterKind::InternalOrBelow) ||
+          !dep.isLoaded())
         continue;
 
     } else if (dep.isPackageOnly()) {
-      if (!filter.contains(ModuleDecl::ImportFilterKind::PackageOnly))
+      if (!filter.contains(ModuleDecl::ImportFilterKind::PackageOnly) ||
+          !dep.isLoaded())
         continue;
 
     } else {
@@ -722,9 +724,10 @@ void ModuleFile::loadDerivativeFunctionConfigurations(
     }
     auto derivativeGenSig = derivativeGenSigOrError.get();
     // NOTE(TF-1038): Result indices are currently unsupported in derivative
-    // registration attributes. In the meantime, always use `{0}` (wrt the
-    // first and only result).
-    auto resultIndices = IndexSubset::get(ctx, 1, {0});
+    // registration attributes. In the meantime, always use all results.
+    auto *resultIndices =
+      autodiff::getFunctionSemanticResultIndices(originalAFD,
+                                                 parameterIndices);
     results.insert({parameterIndices, resultIndices, derivativeGenSig});
   }
 }

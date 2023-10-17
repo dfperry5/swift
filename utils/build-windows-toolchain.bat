@@ -50,6 +50,8 @@ del /f /q "%UniversalCRTSdkDir%\Include\%UCRTVersion%\um\module.modulemap"
 del /f /q "%VCToolsInstallDir%\include\module.modulemap"
 del /f /q "%VCToolsInstallDir%\include\vcruntime.apinotes"
 
+call :FetchWiX || (exit /b)
+call :FetchX64Toolchain || (exit /b)
 call :CloneDependencies || (exit /b)
 call :CloneRepositories || (exit /b)
 
@@ -154,7 +156,7 @@ cmake ^
   -D CMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO" ^
   -D CMAKE_SHARED_LINKER_FLAGS="/INCREMENTAL:NO" ^
 
-  -D CMAKE_INSTALL_PREFIX=%BuildRoot%\Library\curl-7.77.0\usr ^
+  -D CMAKE_INSTALL_PREFIX=%BuildRoot%\Library\curl-8.4.0\usr ^
 
   -D BUILD_CURL_EXE=NO ^
   -D CMAKE_USE_OPENSSL=NO ^
@@ -186,6 +188,8 @@ cmake ^
 cmake --build "%BuildRoot%\curl" || (exit /b)
 cmake --build "%BuildRoot%\curl" --target install || (exit /b)
 
+path %BuildRoot%\toolchains\5.9.0\PFiles64\Swift\runtime-development\usr\bin;%BuildRoot%\toolchains\5.9.0\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin;%Path%
+
 :: Build Toolchain
 cmake ^
   -B "%BuildRoot%\1" ^
@@ -203,11 +207,17 @@ cmake ^
 
   -D CMAKE_INSTALL_PREFIX="%InstallRoot%" ^
 
+  -D CMAKE_Swift_COMPILER="%BuildRoot%/toolchains/5.9.0/Library/Developer/Toolchains/unknown-Asserts-development.xctoolchain/usr/bin/swiftc.exe" ^
+  -D CMAKE_Swift_FLAGS="-sdk %BuildRoot%/toolchains/5.9.0/Library/Developer/Platforms/Windows.platform/Developer/SDKs/Windows.sdk" ^
+
   -D LLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-windows-msvc ^
 
   -D PACKAGE_VENDOR="swift.org" ^
   -D CLANG_VENDOR="swift.org" ^
   -D CLANG_VENDOR_UTI="org.swift" ^
+  -D LLDB_PYTHON_EXE_RELATIVE_PATH=python.exe ^
+  -D LLDB_PYTHON_EXT_SUFFIX=.pyd ^
+  -D LLDB_PYTHON_RELATIVE_PATH=lib/site-packages ^
   -D LLVM_APPEND_VC_REV=NO ^
   -D LLVM_VERSION_SUFFIX="" ^
 
@@ -217,6 +227,7 @@ cmake ^
   -D SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING=YES ^
   -D SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION=YES ^
+  -D SWIFT_BUILD_SWIFT_SYNTAX=YES ^
 
   -D LLVM_EXTERNAL_SWIFT_SOURCE_DIR="%SourceRoot%\swift" ^
   -D LLVM_EXTERNAL_CMARK_SOURCE_DIR="%SourceRoot%\cmark" ^
@@ -225,6 +236,7 @@ cmake ^
   -D SWIFT_PATH_TO_LIBDISPATCH_SOURCE="%SourceRoot%\swift-corelibs-libdispatch" ^
   -D SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE="%SourceRoot%\swift-syntax" ^
   -D SWIFT_PATH_TO_STRING_PROCESSING_SOURCE=%SourceRoot%\swift-experimental-string-processing ^
+  -D SWIFT_PATH_TO_SWIFT_SDK="%BuildRoot%/toolchains/5.9.0/Library/Developer/Platforms/Windows.platform/Developer/SDKs/Windows.sdk" ^
 
   -G Ninja ^
   -S llvm-project\llvm || (exit /b)
@@ -307,7 +319,7 @@ cmake ^
 
   -D CMAKE_INSTALL_PREFIX=%SDKInstallRoot%\usr ^
 
-  -D CURL_DIR=%BuildRoot%\Library\curl-7.77.0\usr\lib\cmake\CURL ^
+  -D CURL_DIR=%BuildRoot%\Library\curl-8.4.0\usr\lib\cmake\CURL ^
   -D ICU_ROOT=%BuildRoot%\Library\icu-69.1\usr ^
   -D ICU_DATA_LIBRARY_RELEASE=%BuildRoot%\Library\icu-69.1\usr\lib\sicudt69.lib ^
   -D ICU_UC_LIBRARY_RELEASE=%BuildRoot%\Library\icu-69.1\usr\lib\sicuuc69.lib ^
@@ -729,6 +741,7 @@ cmake ^
   -D IndexStoreDB_DIR=%BuildRoot%\17\cmake\modules ^
   -D SwiftCollections_DIR=%BuildRoot%\13\cmake\modules ^
   -D SwiftSyntax_DIR=%BuildRoot%\18\cmake\modules ^
+  -D SwiftCrypto_DIR=%BuildRoot%\12\cmake\modules ^
 
   -G Ninja ^
   -S %SourceRoot%\sourcekit-lsp || (exit /b)
@@ -792,7 +805,7 @@ set "args=%args% --skip-repository swift-integration-tests"
 set "args=%args% --skip-repository swift-stress-tester"
 set "args=%args% --skip-repository swift-xcode-playground-support"
 
-call "%SourceRoot%\swift\utils\update-checkout.cmd" %args% --clone --skip-history --github-comment "%ghprbCommentBody%"
+call "%SourceRoot%\swift\utils\update-checkout.cmd" %args% --clone --reset-to-remote --skip-history --github-comment "%ghprbCommentBody%"
 
 goto :eof
 endlocal
@@ -810,7 +823,32 @@ git clone --quiet --no-tags --depth 1 --branch v1.2.11 https://github.com/madler
 git clone --quiet --no-tags --depth 1 --branch v2.9.12 https://github.com/gnome/libxml2
 git clone --quiet --no-tags --depth 1 --branch version-3.36.0 https://github.com/sqlite/sqlite
 git clone --quiet --no-tags --depth 1 --branch maint/maint-69 https://github.com/unicode-org/icu
-git clone --quiet --no-tags --depth 1 --branch curl-7_77_0 https://github.com/curl/curl
+git clone --quiet --no-tags --depth 1 --branch curl-8_4_0 https://github.com/curl/curl
+
+goto :eof
+endlocal
+
+:FetchWiX
+setlocal enableextensions enabledelayedexpansion
+
+if exist wix-4.0.1 goto :eof
+curl.exe -sL https://www.nuget.org/api/v2/package/wix/4.0.1 -o wix-4.0.1.zip
+md WiX-4.0.1
+cd WiX-4.0.1 || exit (/b)
+tar -xf ../wix-4.0.1.zip || exit (/b)
+
+goto :eof
+endlocal
+
+:FetchX64Toolchain
+setlocal enableextensions enabledelayedexpansion
+
+curl.exe -k -sOL "https://download.swift.org/swift-5.9-release/windows10/swift-5.9-RELEASE/swift-5.9-RELEASE-windows10.exe" || (exit /b)
+"WiX-4.0.1\tools\net6.0\any\wix.exe" burn extract swift-5.9-RELEASE-windows10.exe -o %BuildRoot%\toolchains || (exit /b)
+msiexec.exe /qn /a "%BuildRoot%\toolchains\a0" TARGETDIR="%BuildRoot%\toolchains\5.9.0\" || (exit /b)
+msiexec.exe /qn /a "%BuildRoot%\toolchains\a1" TARGETDIR="%BuildRoot%\toolchains\5.9.0\" || (exit /b)
+msiexec.exe /qn /a "%BuildRoot%\toolchains\a2" TARGETDIR="%BuildRoot%\toolchains\5.9.0\" || (exit /b)
+msiexec.exe /qn /a "%BuildRoot%\toolchains\a3" TARGETDIR="%BuildRoot%\toolchains\5.9.0\" || (exit /b)
 
 goto :eof
 endlocal
@@ -858,7 +896,7 @@ cmake ^
 
   -D CMAKE_INSTALL_PREFIX=%SDKInstallRoot%\usr ^
 
-  -D CURL_DIR=%BuildRoot%\Library\curl-7.77.0\usr\lib\cmake\CURL ^
+  -D CURL_DIR=%BuildRoot%\Library\curl-8.4.0\usr\lib\cmake\CURL ^
   -D ICU_ROOT=%BuildRoot%\Library\icu-69.1\usr ^
   -D ICU_DATA_LIBRARY_RELEASE=%BuildRoot%\Library\icu-69.1\usr\lib\sicudt69.lib ^
   -D ICU_I18N_LIBRARY_RELEASE=%BuildRoot%\Library\icu-69.1\usr\lib\sicuin69.lib ^
@@ -928,114 +966,50 @@ endlocal
 :PackageToolchain
 setlocal enableextensions enabledelayedexpansion
 
-:: Package bld.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\bld.wixproj ^
+:: Package Online Installer
+msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\bundle\installer.wixproj ^
+  -m ^
   -restore ^
+  -p:BundleFlavor=online ^
+  -p:BaseReleaseDownloadUrl=https://download.swift.org/development/windows ^
   -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\bld\ ^
-  -p:OutputPath=%PackageRoot%\bld\ ^
-  -p:RunWixToolsOutOfProc=true ^
+  -p:BaseOutputPath=%PackageRoot%\online\ ^
+  -p:VCRedistInstaller="%VCToolsRedistDir%\vc_redist.%VSCMD_ARG_TGT_ARCH%.exe" ^
+  -p:VSVersion=%VSCMD_VER% ^
   -p:DEVTOOLS_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
-  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain
-:: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\bld\bld.msi
-
-:: Package cli.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\cli.wixproj ^
-  -restore ^
-  -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\cli\ ^
-  -p:OutputPath=%PackageRoot%\cli\ ^
-  -p:RunWixToolsOutOfProc=true ^
-  -p:DEVTOOLS_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
-  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain
-:: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\cli\cli.msi
-
-:: Package dbg.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\dbg.wixproj ^
-  -restore ^
-  -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\dbg\ ^
-  -p:OutputPath=%PackageRoot%\dbg\ ^
-  -p:RunWixToolsOutOfProc=true ^
-  -p:DEVTOOLS_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
-  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain
-:: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\dbg\dbg.msi
-
-:: Package ide.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\ide.wixproj ^
-  -restore ^
-  -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\ide\ ^
-  -p:OutputPath=%PackageRoot%\ide\ ^
-  -p:RunWixToolsOutOfProc=true ^
-  -p:DEVTOOLS_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
-  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain
-:: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\ide\ide.msi
-
-:: Package sdk.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\sdk.wixproj ^
-  -restore ^
-  -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\sdk\ ^
-  -p:OutputPath=%PackageRoot%\sdk\ ^
-  -p:RunWixToolsOutOfProc=true ^
+  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
   -p:PLATFORM_ROOT=%PlatformRoot%\ ^
   -p:SDK_ROOT=%SDKInstallRoot%\
 :: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\sdk\sdk.msi
+:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\online\installer.exe
 
-:: Package runtime.msi
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\runtime.wixproj ^
+:: Package Offline Installer
+msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\bundle\installer.wixproj ^
+  -m ^
   -restore ^
+  -p:BundleFlavor=offline ^
   -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\runtime\ ^
-  -p:OutputPath=%PackageRoot%\runtime\ ^
-  -p:RunWixToolsOutOfProc=true ^
+  -p:BaseOutputPath=%PackageRoot%\offline\ ^
+  -p:VCRedistInstaller="%VCToolsRedistDir%\vc_redist.%VSCMD_ARG_TGT_ARCH%.exe" ^
+  -p:VSVersion=%VSCMD_VER% ^
+  -p:DEVTOOLS_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
+  -p:TOOLCHAIN_ROOT=%BuildRoot%\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain ^
+  -p:PLATFORM_ROOT=%PlatformRoot%\ ^
   -p:SDK_ROOT=%SDKInstallRoot%\
-:: TODO(compnerd) actually perform the code-signing
-:: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\runtime\runtime.msi
-
-:: Collate MSIs
-move %PackageRoot%\bld\bld.msi %PackageRoot% || (exit /b)
-move %PackageRoot%\cli\cli.msi %PackageRoot% || (exit /b)
-move %PackageRoot%\dbg\dbg.msi %PackageRoot% || (exit /b)
-move %PackageRoot%\ide\ide.msi %PackageRoot% || (exit /b)
-move %PackageRoot%\sdk\sdk.msi %PackageRoot% || (exit /b)
-move %PackageRoot%\runtime\runtime.msi %PackageRoot% || (exit /b)
-
-:: Build Installer
-msbuild %SourceRoot%\swift-installer-scripts\platforms\Windows\installer.wixproj ^
-  -restore ^
-  -p:Configuration=Release ^
-  -p:IntermediateOutputPath=%PackageRoot%\installer\ ^
-  -p:OutputPath=%PackageRoot%\installer\ ^
-  -p:RunWixToolsOutOfProc=true ^
-  -p:MSI_LOCATION=%PackageRoot%\
 :: TODO(compnerd) actually perform the code-signing
 :: signtool sign /f Apple_CodeSign.pfx /p Apple_CodeSign_Password /tr http://timestamp.digicert.com /fd sha256 %PackageRoot%\installer\installer.exe
 
 :: Stage Artifacts
-md %BuildRoot%\artifacts
+md %BuildRoot%\artifacts\online
+md %BuildRoot%\artifacts\offline
 
-:: Redistributable libraries for developers
-:: bld
-move %PackageRoot%\bld.msi %BuildRoot%\artifacts || (exit /b)
-:: cli
-move %PackageRoot%\cli.msi %BuildRoot%\artifacts || (exit /b)
-:: dbg
-move %PackageRoot%\dbg.msi %BuildRoot%\artifacts || (exit /b)
-:: ide
-move %PackageRoot%\ide.msi %BuildRoot%\artifacts || (exit /b)
-:: sdk
-move %PackageRoot%\sdk.msi %BuildRoot%\artifacts || (exit /b)
-:: runtime
-move %PackageRoot%\runtime.msi %BuildRoot%\artifacts || (exit /b)
-:: installer
-move %PackageRoot%\installer\installer.exe %BuildRoot%\artifacts || (exit /b)
+move %PackageRoot%\offline\Release\amd64\installer.exe %BuildRoot%\artifacts\offline || (exit /b)
+move %PackageRoot%\online\Release\amd64\*.cab %BuildRoot%\artifacts\online\ || (exit /b)
+move %PackageRoot%\online\Release\amd64\*.exe %BuildRoot%\artifacts\online\ || (exit /b)
+move %PackageRoot%\online\Release\amd64\*.msi %BuildRoot%\artifacts\online\ || (exit /b)
+
+:: Workaround for lack of control over Jenkins ...
+copy %BuildRoot%\artifacts\offline\installer.exe %BuildRoot%\artifacts\
 
 goto :eof
 endlocal

@@ -160,7 +160,7 @@ public:
     RefCounting op;
     op.kind = RefCountingKind::SinglePayloadEnumFN;
     op.singlePayloadEnumFN.tagFn = tagFn;
-    op.singlePayloadEnumSimple.extraTagByteCount = extraTagByteCount;
+    op.singlePayloadEnumFN.extraTagByteCount = extraTagByteCount;
     op.singlePayloadEnumFN.payload = payload;
     refCountings.push_back(op);
   }
@@ -360,12 +360,19 @@ public:
         break;
       }
 
+      case RefCountingKind::Existential: {
+        uint64_t op = (static_cast<uint64_t>(refCounting.kind) << 56) | skip;
+        B.addInt64(op);
+        refCountBytes += sizeof(uint64_t);
+        skip = refCounting.size - getFixedBufferSize(IGM).getValue();
+        break;
+      }
+
       default: {
         uint64_t op = (static_cast<uint64_t>(refCounting.kind) << 56) | skip;
         B.addInt64(op);
         refCountBytes += sizeof(uint64_t);
-
-        skip = refCounting.size;
+        skip = refCounting.size - IGM.getPointerSize().getValue();
         break;
       }
       }
@@ -389,9 +396,6 @@ public:
     B.fillPlaceholderWithInt(sizePlaceholder, IGM.SizeTy, refCountBytes);
 
     B.addInt64(skip);
-
-    // NUL terminator
-    B.addInt64(0);
   }
 };
 }
@@ -1734,7 +1738,7 @@ AlignedGroupEntry::layoutString(IRGenModule &IGM,
 
 bool AlignedGroupEntry::refCountString(IRGenModule &IGM, LayoutStringBuilder &B,
                                        GenericSignature genericSig) const {
-  if (!isFixedSize(IGM)) {
+  if (!isFixedSize(IGM) || ty.isMoveOnly()) {
     return false;
   }
 
@@ -2225,7 +2229,7 @@ bool EnumTypeLayoutEntry::buildSinglePayloadRefCountString(
   unsigned extraTagByteCount = 0;
   uint64_t zeroTagValue = 0;
   unsigned xiBitCount = 0;
-  unsigned xiOffset = 0;
+  unsigned xiBitOffset = 0;
   bool isSimple = true;
 
   auto &payloadTI = **cases[0]->getFixedTypeInfo();
@@ -2249,8 +2253,8 @@ bool EnumTypeLayoutEntry::buildSinglePayloadRefCountString(
         isSimple = false;
       } else {
         xiBitCount = std::min(64u, mask.countPopulation());
-        xiOffset = mask.countTrailingZeros();
-        zeroTagValue = lowValue.extractBitsAsZExtValue(xiBitCount, xiOffset);
+        xiBitOffset = mask.countTrailingZeros();
+        zeroTagValue = lowValue.extractBitsAsZExtValue(xiBitCount, xiBitOffset);
       }
     }
   }
@@ -2279,7 +2283,7 @@ bool EnumTypeLayoutEntry::buildSinglePayloadRefCountString(
 
   if (isSimple) {
     B.addSinglePayloadEnumSimple(zeroTagValue, xiTagValues, extraTagByteCount,
-                                 xiBitCount / 8, xiOffset, cases[0]);
+                                 xiBitCount / 8, xiBitOffset / 8, cases[0]);
   } else {
     auto tagFn = createFixedEnumLoadTag(IGM, *this);
     B.addSinglePayloadEnumFN(tagFn, extraTagByteCount, cases[0]);
@@ -2401,7 +2405,6 @@ bool EnumTypeLayoutEntry::refCountString(IRGenModule &IGM,
 
     auto *accessor = createMetatypeAccessorFunction(IGM, ty, genericSig);
     B.addFixedEnumRefCount(accessor);
-    B.addSkip(fixedSize(IGM)->getValue());
     return true;
   }
   }

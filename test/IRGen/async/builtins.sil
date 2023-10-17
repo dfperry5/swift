@@ -1,7 +1,7 @@
 // RUN: %target-swift-frontend -enable-objc-interop  -primary-file %s -emit-ir -sil-verify-all | %FileCheck %s -DINT=i%target-ptrsize --check-prefixes=CHECK,CHECK-objc,CHECK-%target-ptrsize
 // RUN: %target-swift-frontend -disable-objc-interop -primary-file %s -emit-ir -sil-verify-all | %FileCheck %s -DINT=i%target-ptrsize --check-prefixes=CHECK,CHECK-native,CHECK-%target-ptrsize
 
-// REQUIRES: concurrency
+// REQUIRES: concurrency, objc_codegen
 // XFAIL: CPU=arm64e
 
 sil_stage canonical
@@ -141,7 +141,7 @@ bb0:
 
 
 // CHECK-LABEL: define{{.*}} swiftcc void @testRunInline(
-// CHECK-SAME:      ptr noalias nocapture sret(%swift.opaque) [[RESULT:%[^,]+]],
+// CHECK-SAME:      ptr noalias sret(%swift.opaque) [[RESULT:%[^,]+]],
 // CHECK-SAME:      ptr [[CLOSURE:%[^,]+]],
 // CHECK-SAME:      ptr [[CLOSURE_CONTEXT:%[^,]+]],
 // CHECK-SAME:      ptr [[FUTURE_RESULT_TYPE:%[^,]+]])

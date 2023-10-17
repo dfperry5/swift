@@ -174,8 +174,8 @@ public:
   MemBehavior visitStrongReleaseInst(StrongReleaseInst *BI);
   MemBehavior visitReleaseValueInst(ReleaseValueInst *BI);
   MemBehavior visitDestroyValueInst(DestroyValueInst *DVI);
-  MemBehavior visitSetDeallocatingInst(SetDeallocatingInst *BI);
   MemBehavior visitBeginCOWMutationInst(BeginCOWMutationInst *BCMI);
+  MemBehavior visitDebugValueInst(DebugValueInst *dv);
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
   MemBehavior visit##Name##ReleaseInst(Name##ReleaseInst *BI);
 #include "swift/AST/ReferenceStorage.def"
@@ -256,9 +256,14 @@ MemBehavior MemoryBehaviorVisitor::visitStoreInst(StoreInst *SI) {
   // If the store dest cannot alias the pointer in question and we are not
   // releasing anything due to an assign, then the specified value cannot be
   // modified by the store.
-  if (!mayAlias(SI->getDest()) &&
-      SI->getOwnershipQualifier() != StoreOwnershipQualifier::Assign)
+  if (!mayAlias(SI->getDest())) {
+    if (SI->getOwnershipQualifier() == StoreOwnershipQualifier::Assign) {
+      // Consider side effects of the destructor
+      return AA->getMemoryEffectOnEscapedAddress(V, SI);
+    }
+
     return MemBehavior::None;
+  }
 
   // Otherwise, a store just writes.
   LLVM_DEBUG(llvm::dbgs() << "  Could not prove store does not alias inst. "
@@ -316,54 +321,50 @@ MemBehavior MemoryBehaviorVisitor::visitMarkUnresolvedMoveAddrInst(
 MemBehavior MemoryBehaviorVisitor::visitBuiltinInst(BuiltinInst *BI) {
   MemBehavior mb = BI->getMemoryBehavior();
   if (mb != MemBehavior::None) {
-    return AA->getMemoryBehaviorOfInst(V, BI);
+    return AA->getMemoryEffectOnEscapedAddress(V, BI);
   }
   return MemBehavior::None;
 }
 
 MemBehavior MemoryBehaviorVisitor::visitTryApplyInst(TryApplyInst *AI) {
-  return AA->getMemoryBehaviorOfInst(V, AI);
+  return AA->getMemoryEffectOnEscapedAddress(V, AI);
 }
 
 MemBehavior MemoryBehaviorVisitor::visitApplyInst(ApplyInst *AI) {
-  return AA->getMemoryBehaviorOfInst(V, AI);
+  return AA->getMemoryEffectOnEscapedAddress(V, AI);
 }
 
 MemBehavior MemoryBehaviorVisitor::visitBeginApplyInst(BeginApplyInst *AI) {
-  return AA->getMemoryBehaviorOfInst(V, AI);
+  return AA->getMemoryEffectOnEscapedAddress(V, AI);
 }
 
 MemBehavior MemoryBehaviorVisitor::visitEndApplyInst(EndApplyInst *EAI) {
-  return AA->getMemoryBehaviorOfInst(V, EAI->getBeginApply());
+  return AA->getMemoryEffectOnEscapedAddress(V, EAI->getBeginApply());
 }
 
 MemBehavior MemoryBehaviorVisitor::visitAbortApplyInst(AbortApplyInst *AAI) {
-  return AA->getMemoryBehaviorOfInst(V, AAI->getBeginApply());
+  return AA->getMemoryEffectOnEscapedAddress(V, AAI->getBeginApply());
 }
 
 MemBehavior
 MemoryBehaviorVisitor::visitStrongReleaseInst(StrongReleaseInst *SI) {
-  return AA->getMemoryBehaviorOfInst(V, SI);
+  return AA->getMemoryEffectOnEscapedAddress(V, SI);
 }
 
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
 MemBehavior \
 MemoryBehaviorVisitor::visit##Name##ReleaseInst(Name##ReleaseInst *SI) { \
-  return AA->getMemoryBehaviorOfInst(V, SI); \
+  return AA->getMemoryEffectOnEscapedAddress(V, SI); \
 }
 #include "swift/AST/ReferenceStorage.def"
 
 MemBehavior MemoryBehaviorVisitor::visitReleaseValueInst(ReleaseValueInst *SI) {
-  return AA->getMemoryBehaviorOfInst(V, SI);
+  return AA->getMemoryEffectOnEscapedAddress(V, SI);
 }
 
 MemBehavior
 MemoryBehaviorVisitor::visitDestroyValueInst(DestroyValueInst *DVI) {
-  return AA->getMemoryBehaviorOfInst(V, DVI);
-}
-
-MemBehavior MemoryBehaviorVisitor::visitSetDeallocatingInst(SetDeallocatingInst *SDI) {
-  return MemBehavior::None;
+  return AA->getMemoryEffectOnEscapedAddress(V, DVI);
 }
 
 MemBehavior MemoryBehaviorVisitor::
@@ -371,6 +372,15 @@ visitBeginCOWMutationInst(BeginCOWMutationInst *BCMI) {
   // begin_cow_mutation is defined to have side effects, because it has
   // dependencies with instructions which retain the buffer operand.
   // But it never interferes with any memory address.
+  return MemBehavior::None;
+}
+
+MemBehavior MemoryBehaviorVisitor::
+visitDebugValueInst(DebugValueInst *dv) {
+  SILValue op = dv->getOperand();
+  if (op->getType().isAddress() && mayAlias(op)) {
+    return MemBehavior::MayRead;
+  }
   return MemBehavior::None;
 }
 

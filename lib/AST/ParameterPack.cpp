@@ -25,6 +25,63 @@
 
 using namespace swift;
 
+/// FV(PackExpansionType(Pattern, Count), N) = FV(Pattern, N+1)
+/// FV(PackElementType(Param, M), N) = FV(Param, 0) if M >= N, {} otherwise
+/// FV(Param, N) = {Param}
+static Type transformTypeParameterPacksRec(
+    Type t, llvm::function_ref<llvm::Optional<Type>(SubstitutableType *)> fn,
+    unsigned expansionLevel) {
+  return t.transformWithPosition(
+      TypePosition::Invariant,
+      [&](TypeBase *t, TypePosition p) -> llvm::Optional<Type> {
+
+    // If we're already inside N levels of PackExpansionType,  and we're
+    // walking into another PackExpansionType, a type parameter pack
+    // reference now needs level (N+1) to be free.
+    if (auto *expansionType = dyn_cast<PackExpansionType>(t)) {
+      auto countType = expansionType->getCountType();
+      auto patternType = expansionType->getPatternType();
+      auto newPatternType = transformTypeParameterPacksRec(
+          patternType, fn, expansionLevel + 1);
+      if (patternType.getPointer() != newPatternType.getPointer())
+        return Type(PackExpansionType::get(patternType, countType));
+
+      return Type(expansionType);
+    }
+
+    // A PackElementType with level N reaches past N levels of
+    // nested PackExpansionType. So a type parameter pack reference
+    // therein is free if N is greater than or equal to our current
+    // expansion level.
+    if (auto *eltType = dyn_cast<PackElementType>(t)) {
+      if (eltType->getLevel() >= expansionLevel) {
+        return transformTypeParameterPacksRec(eltType->getPackType(), fn,
+                                              /*expansionLevel=*/0);
+      }
+
+      return Type(eltType);
+    }
+
+    // A bare type parameter pack is like a PackElementType with level 0.
+    if (auto *paramType = dyn_cast<SubstitutableType>(t)) {
+      if (expansionLevel == 0 &&
+          (isa<PackArchetypeType>(paramType) ||
+           paramType->isRootParameterPack())) {
+        return fn(paramType);
+      }
+
+      return Type(paramType);
+    }
+
+    return llvm::None;
+  });
+}
+
+Type Type::transformTypeParameterPacks(
+    llvm::function_ref<llvm::Optional<Type>(SubstitutableType *)> fn) const {
+  return transformTypeParameterPacksRec(*this, fn, /*expansionLevel=*/0);
+}
+
 namespace {
 
 /// Collects all unique pack type parameters referenced from the pattern type,
@@ -100,21 +157,16 @@ void TypeBase::walkPackReferences(
 
 void TypeBase::getTypeParameterPacks(
     SmallVectorImpl<Type> &rootParameterPacks) {
-  llvm::SmallSetVector<Type, 2> rootParameterPackSet;
-
   walkPackReferences([&](Type t) {
     if (auto *paramTy = t->getAs<GenericTypeParamType>()) {
       if (paramTy->isParameterPack())
-        rootParameterPackSet.insert(paramTy);
+        rootParameterPacks.push_back(paramTy);
     } else if (auto *archetypeTy = t->getAs<PackArchetypeType>()) {
-      rootParameterPackSet.insert(archetypeTy->getRoot());
+      rootParameterPacks.push_back(archetypeTy->getRoot());
     }
 
     return false;
   });
-
-  rootParameterPacks.append(rootParameterPackSet.begin(),
-                            rootParameterPackSet.end());
 }
 
 bool GenericTypeParamType::isParameterPack() const {
@@ -132,6 +184,12 @@ bool TypeBase::isParameterPack() {
 
   while (auto *memberTy = t->getAs<DependentMemberType>())
     t = memberTy->getBase();
+
+  return t->isRootParameterPack();
+}
+
+bool TypeBase::isRootParameterPack() {
+  Type t(this);
 
   return t->is<GenericTypeParamType>() &&
          t->castTo<GenericTypeParamType>()->isParameterPack();
@@ -221,14 +279,6 @@ bool CanTupleType::containsPackExpansionTypeImpl(CanTupleType tuple) {
   }
 
   return false;
-}
-
-bool TupleType::isSingleUnlabeledPackExpansion() const {
-  if (getNumElements() != 1)
-    return false;
-
-  const auto &elt = getElement(0);
-  return !elt.hasName() && elt.getType()->is<PackExpansionType>();
 }
 
 bool AnyFunctionType::containsPackExpansionType(ArrayRef<Param> params) {
@@ -382,8 +432,17 @@ PackType::getExpandedGenericArgs(ArrayRef<GenericTypeParamType *> params,
     auto arg = args[i];
 
     if (params[i]->isParameterPack()) {
-      auto argPackElements = arg->castTo<PackType>()->getElementTypes();
-      wrappedArgs.append(argPackElements.begin(), argPackElements.end());
+      // FIXME: A temporary fix to make it possible to debug expressions
+      // with partially resolved variadic generic types. The issue stems
+      // from the fact that `BoundGenericType` is allowed to have pack
+      // parameters directly represented by type variables, as soon as
+      // that is no longer the case this check should be removed.
+      if (arg->is<TypeVariableType>()) {
+        wrappedArgs.push_back(arg);
+      } else {
+        auto argPackElements = arg->castTo<PackType>()->getElementTypes();
+        wrappedArgs.append(argPackElements.begin(), argPackElements.end());
+      }
       continue;
     }
 

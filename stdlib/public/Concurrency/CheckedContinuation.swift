@@ -19,6 +19,7 @@ internal func logFailedCheck(_ message: UnsafeRawPointer)
 /// Implementation class that holds the `UnsafeContinuation` instance for
 /// a `CheckedContinuation`.
 @available(SwiftStdlib 5.1, *)
+@_unavailableInEmbedded
 internal final class CheckedContinuationCanary: @unchecked Sendable {
   // The instance state is stored in tail-allocated raw memory, so that
   // we can atomically check the continuation state.
@@ -119,6 +120,7 @@ internal final class CheckedContinuationCanary: @unchecked Sendable {
 /// you can replace one with the other in most circumstances,
 /// without making other changes.
 @available(SwiftStdlib 5.1, *)
+@_unavailableInEmbedded
 public struct CheckedContinuation<T, E: Error>: Sendable {
   private let canary: CheckedContinuationCanary
   
@@ -187,6 +189,7 @@ public struct CheckedContinuation<T, E: Error>: Sendable {
 }
 
 @available(SwiftStdlib 5.1, *)
+@_unavailableInEmbedded
 extension CheckedContinuation {
   /// Resume the task awaiting the continuation by having it either
   /// return normally or throw an error based on the state of the given
@@ -256,7 +259,7 @@ extension CheckedContinuation {
 ///
 /// The body of the closure executes synchronously on the calling task, and once it returns
 /// the calling task is suspended. It is possible to immediately resume the task, or escape the
-/// continuation in order to complete it afterwards, which will them resume suspended task.
+/// continuation in order to complete it afterwards, which will then resume the suspended task.
 ///
 /// You must invoke the continuation's `resume` method exactly once.
 ///
@@ -281,6 +284,7 @@ extension CheckedContinuation {
 @available(SwiftStdlib 5.1, *)
 @_unsafeInheritExecutor // ABI compatibility with Swift 5.1
 @inlinable
+@_unavailableInEmbedded
 public func withCheckedContinuation<T>(
     function: String = #function,
     _ body: (CheckedContinuation<T, Never>) -> Void
@@ -294,7 +298,7 @@ public func withCheckedContinuation<T>(
 ///
 /// The body of the closure executes synchronously on the calling task, and once it returns
 /// the calling task is suspended. It is possible to immediately resume the task, or escape the
-/// continuation in order to complete it afterwards, which will them resume suspended task.
+/// continuation in order to complete it afterwards, which will then resume the suspended task.
 ///
 /// If `resume(throwing:)` is called on the continuation, this function throws that error.
 ///
@@ -321,6 +325,7 @@ public func withCheckedContinuation<T>(
 @available(SwiftStdlib 5.1, *)
 @_unsafeInheritExecutor // ABI compatibility with Swift 5.1
 @inlinable
+@_unavailableInEmbedded
 public func withCheckedThrowingContinuation<T>(
     function: String = #function,
     _ body: (CheckedContinuation<T, Error>) -> Void
@@ -330,3 +335,50 @@ public func withCheckedThrowingContinuation<T>(
   }
 }
 
+#if _runtime(_ObjC)
+
+// Intrinsics used by SILGen to create, resume, or fail checked continuations.
+@available(SwiftStdlib 5.1, *)
+@_alwaysEmitIntoClient
+internal func _createCheckedContinuation<T>(
+  _ continuation: __owned UnsafeContinuation<T, Never>
+) -> CheckedContinuation<T, Never> {
+  return CheckedContinuation(continuation: continuation)
+}
+
+@available(SwiftStdlib 5.1, *)
+@_alwaysEmitIntoClient
+internal func _createCheckedThrowingContinuation<T>(
+  _ continuation: __owned UnsafeContinuation<T, Error>
+) -> CheckedContinuation<T, Error> {
+  return CheckedContinuation(continuation: continuation)
+}
+
+@available(SwiftStdlib 5.1, *)
+@_alwaysEmitIntoClient
+internal func _resumeCheckedContinuation<T>(
+  _ continuation: CheckedContinuation<T, Never>,
+  _ value: __owned T
+) {
+  continuation.resume(returning: value)
+}
+
+@available(SwiftStdlib 5.1, *)
+@_alwaysEmitIntoClient
+internal func _resumeCheckedThrowingContinuation<T>(
+  _ continuation: CheckedContinuation<T, Error>,
+  _ value: __owned T
+) {
+  continuation.resume(returning: value)
+}
+
+@available(SwiftStdlib 5.1, *)
+@_alwaysEmitIntoClient
+internal func _resumeCheckedThrowingContinuationWithError<T>(
+  _ continuation: CheckedContinuation<T, Error>,
+  _ error: __owned Error
+) {
+  continuation.resume(throwing: error)
+}
+
+#endif

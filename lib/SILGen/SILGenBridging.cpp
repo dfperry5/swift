@@ -243,11 +243,11 @@ emitBridgeObjectiveCToNative(SILGenFunction &SGF, SILLocation loc,
   ResultPlanPtr resultPlan =
       ResultPlanBuilder::computeResultPlan(SGF, calleeTypeInfo, loc, context);
   ArgumentScope argScope(SGF, loc);
-  RValue result =
-      SGF.emitApply(std::move(resultPlan), std::move(argScope), loc,
-                    ManagedValue::forUnmanaged(witnessRef), subs,
-                    {objcValue, ManagedValue::forUnmanaged(metatypeValue)},
-                    calleeTypeInfo, ApplyOptions(), context, llvm::None);
+  RValue result = SGF.emitApply(
+      std::move(resultPlan), std::move(argScope), loc,
+      ManagedValue::forObjectRValueWithoutOwnership(witnessRef), subs,
+      {objcValue, ManagedValue::forObjectRValueWithoutOwnership(metatypeValue)},
+      calleeTypeInfo, ApplyOptions(), context, llvm::None);
   return std::move(result).getAsSingleValue(SGF, loc);
 }
 
@@ -308,20 +308,21 @@ static ManagedValue emitManagedParameter(SILGenFunction &SGF, SILLocation loc,
   case ParameterConvention::Direct_Guaranteed:
     // If we have a guaranteed parameter, the object should not need to be
     // retained or have a cleanup.
-    return ManagedValue::forUnmanaged(value);
+    return ManagedValue::forBorrowedObjectRValue(value);
 
   case ParameterConvention::Direct_Unowned:
     // We need to independently retain the value.
-    return SGF.emitManagedRetain(loc, value, valueTL);
+    return SGF.emitManagedCopy(loc, value, valueTL);
 
   case ParameterConvention::Indirect_Inout:
     return ManagedValue::forLValue(value);
 
   case ParameterConvention::Indirect_In_Guaranteed:
     if (valueTL.isLoadable()) {
-      return SGF.B.createLoadBorrow(loc, ManagedValue::forUnmanaged(value));
+      return SGF.B.createLoadBorrow(
+          loc, ManagedValue::forBorrowedAddressRValue(value));
     } else {
-      return ManagedValue::forUnmanaged(value);
+      return ManagedValue::forBorrowedAddressRValue(value);
     }
 
   case ParameterConvention::Indirect_In:
@@ -681,7 +682,7 @@ static ManagedValue emitNativeToCBridgedNonoptionalValue(SILGenFunction &SGF,
       // when they are converted to an object via objc_metatype_to_object.
       assert(!v.hasCleanup() &&
              "Metatypes are trivial and thus should not have cleanups");
-      return ManagedValue::forUnmanaged(native);
+      return ManagedValue::forObjectRValueWithoutOwnership(native);
     }
   }
 
@@ -904,7 +905,7 @@ static void buildBlockToFuncThunkBody(SILGenFunction &SGF,
   // Add the block argument.
   SILValue blockV =
       entry->createFunctionArgument(SILType::getPrimitiveObjectType(blockTy));
-  ManagedValue block = ManagedValue::forUnmanaged(blockV);
+  ManagedValue block = ManagedValue::forBorrowedObjectRValue(blockV);
 
   CanType formalResultType = formalFuncTy.getResult();
 
@@ -1098,7 +1099,7 @@ static ManagedValue emitCBridgedToNativeValue(
       // when they are converted to an object via objc_metatype_to_object.
       assert(!v.hasCleanup() && "Metatypes are trivial and should not have "
                                 "cleanups");
-      return ManagedValue::forUnmanaged(native);
+      return ManagedValue::forUnmanagedOwnedValue(native);
     }
   }
 
@@ -1553,7 +1554,7 @@ void SILGenFunction::emitNativeToForeignThunk(SILDeclRef thunk) {
   SILDeclRef native = thunk.asForeign(false);
 
   if (thunk.hasDecl()) {
-    if (shouldLowerToUnavailableCodeStub(thunk.getDecl()))
+    if (thunk.getDecl()->requiresUnavailableDeclABICompatibilityStubs())
       emitApplyOfUnavailableCodeReached();
   }
 
@@ -2068,7 +2069,7 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
   auto nativeFnTy = F.getLoweredFunctionType();
   assert(nativeFnTy == nativeCI.SILFnType);
 
-  if (shouldLowerToUnavailableCodeStub(fd))
+  if (fd->requiresUnavailableDeclABICompatibilityStubs())
     emitApplyOfUnavailableCodeReached();
 
   // Use the same generic environment as the native entry point.
@@ -2080,7 +2081,7 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
   auto foreignFnTy = foreignCI.SILFnType;
 
   // Find the foreign error/async convention and 'self' parameter index.
-  bool hasError = false;
+  llvm::Optional<Type> thrownErrorType;
   llvm::Optional<ForeignAsyncConvention> foreignAsync;
   if (nativeFnTy->isAsync()) {
     foreignAsync = fd->getForeignAsyncConvention();
@@ -2088,7 +2089,7 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
   }
   llvm::Optional<ForeignErrorConvention> foreignError;
   if (nativeFnTy->hasErrorResult()) {
-    hasError = true;
+    thrownErrorType = nativeFnTy->getErrorResult().getInterfaceType();
     foreignError = fd->getForeignErrorConvention();
     assert((foreignError || foreignAsync)
            && "couldn't find foreign error or async convention for foreign error!");
@@ -2132,8 +2133,8 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
 
   // Set up the throw destination if necessary.
   CleanupLocation cleanupLoc(fd);
-  if (hasError) {
-    prepareRethrowEpilog(cleanupLoc);
+  if (thrownErrorType) {
+    prepareRethrowEpilog(*thrownErrorType, cleanupLoc);
   }
 
   SILValue result;
@@ -2180,7 +2181,7 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
           break;
         case ParameterConvention::Direct_Guaranteed:
         case ParameterConvention::Direct_Unowned:
-          param = emitManagedRetain(fd, paramValue);
+          param = emitManagedCopy(fd, paramValue);
           break;
         case ParameterConvention::Indirect_Inout:
         case ParameterConvention::Indirect_InoutAliasable:
@@ -2242,13 +2243,15 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
         auto bridged = emitNativeToBridgedValue(fd, param, nativeFormalType,
                                                 foreignFormalType,
                                                 foreignLoweredTy);
-        if (foreignParam.getConvention() == ParameterConvention::Indirect_In ||
-            foreignParam.getConvention() == ParameterConvention::Indirect_In_Guaranteed) {
+        if (useLoweredAddresses() &&
+            (foreignParam.getConvention() == ParameterConvention::Indirect_In ||
+             foreignParam.getConvention() ==
+                 ParameterConvention::Indirect_In_Guaranteed)) {
           auto temp = emitTemporaryAllocation(fd, bridged.getType());
           bridged.forwardInto(*this, fd, temp);
           bridged = emitManagedBufferWithCleanup(temp);
         }
-        
+
         if (memberStatus.isInstance() && isSelf) {
           // Fill in the `self` space.
           args[memberStatus.getSelfIndex()] = bridged;
@@ -2295,8 +2298,8 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
     ArgumentScope argScope(*this, fd);
     ManagedValue resultMV =
         emitApply(std::move(resultPlan), std::move(argScope), fd,
-                  ManagedValue::forUnmanaged(fn), subs, args, calleeTypeInfo,
-                  ApplyOptions(), context, llvm::None)
+                  ManagedValue::forObjectRValueWithoutOwnership(fn), subs, args,
+                  calleeTypeInfo, ApplyOptions(), context, llvm::None)
             .getAsSingleValue(*this, fd);
 
     if (indirectResult) {

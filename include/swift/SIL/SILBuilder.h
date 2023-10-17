@@ -551,6 +551,13 @@ public:
       PartialApplyInst::OnStackKind OnStack =
           PartialApplyInst::OnStackKind::NotOnStack,
       const GenericSpecializationInformation *SpecializationInfo = nullptr) {
+    assert(OnStack == PartialApplyInst::OnStackKind::OnStack ||
+           llvm::all_of(Args,
+                        [](SILValue value) {
+                          return value->getOwnershipKind().isCompatibleWith(
+                              OwnershipKind::Owned);
+                        }) &&
+               "Must have an owned compatible object");
     return insert(PartialApplyInst::create(
         getSILDebugLocation(Loc), Fn, Args, Subs, CalleeConvention, *F,
         SpecializationInfo, OnStack));
@@ -900,6 +907,8 @@ public:
   EndBorrowInst *createEndBorrow(SILLocation loc, SILValue borrowedValue) {
     assert(!SILArgument::isTerminatorResult(borrowedValue) &&
                "terminator results do not have end_borrow");
+    assert(!isa<SILFunctionArgument>(borrowedValue) &&
+           "Function arguments should never have an end_borrow");
     return insert(new (getModule())
                       EndBorrowInst(getSILDebugLocation(loc), borrowedValue));
   }
@@ -956,13 +965,15 @@ public:
   }
 
   AssignOrInitInst *createAssignOrInit(SILLocation Loc,
+                                       VarDecl *Property,
                                        SILValue Self,
                                        SILValue Src,
                                        SILValue Initializer,
                                        SILValue Setter,
                                        AssignOrInitInst::Mode Mode) {
-    return insert(new (getModule()) AssignOrInitInst(
-        getSILDebugLocation(Loc), Self, Src, Initializer, Setter, Mode));
+    return insert(new (getModule())
+                      AssignOrInitInst(getSILDebugLocation(Loc), Property, Self,
+                                       Src, Initializer, Setter, Mode));
   }
 
   StoreBorrowInst *createStoreBorrow(SILLocation Loc, SILValue Src,
@@ -1059,20 +1070,49 @@ public:
         getSILDebugLocation(Loc), ArgumentsSpecification, getModule()));
   }
 
-#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
-  Load##Name##Inst *createLoad##Name(SILLocation Loc, \
-                                     SILValue src, \
-                                     IsTake_t isTake) { \
-    return insert(new (getModule()) \
-      Load##Name##Inst(getSILDebugLocation(Loc), src, isTake)); \
-  } \
-  Store##Name##Inst *createStore##Name(SILLocation Loc, \
-                                       SILValue value, \
-                                       SILValue dest, \
-                                       IsInitialization_t isInit) { \
-    return insert(new (getModule()) \
-      Store##Name##Inst(getSILDebugLocation(Loc), value, dest, isInit)); \
+  UnownedCopyValueInst *createUnownedCopyValue(SILLocation Loc,
+                                               SILValue operand) {
+    assert(!getFunction().getModule().useLoweredAddresses());
+    auto type = operand->getType()
+                    .getReferenceStorageType(getFunction().getASTContext(),
+                                             ReferenceOwnership::Unowned)
+                    .getObjectType();
+    return insert(new (getModule()) UnownedCopyValueInst(
+        getSILDebugLocation(Loc), operand, type));
   }
+
+  WeakCopyValueInst *createWeakCopyValue(SILLocation Loc, SILValue operand) {
+    assert(!getFunction().getModule().useLoweredAddresses());
+    auto type = operand->getType()
+                    .getReferenceStorageType(getFunction().getASTContext(),
+                                             ReferenceOwnership::Weak)
+                    .getObjectType();
+    return insert(new (getModule()) WeakCopyValueInst(getSILDebugLocation(Loc),
+                                                      operand, type));
+  }
+
+#define COPYABLE_STORAGE_HELPER(Name)                                          \
+  StrongCopy##Name##ValueInst *createStrongCopy##Name##Value(                  \
+      SILLocation Loc, SILValue operand) {                                     \
+    auto type = getFunction().getLoweredType(                                  \
+        operand->getType().getASTType().getReferenceStorageReferent());        \
+    return insert(new (getModule()) StrongCopy##Name##ValueInst(               \
+        getSILDebugLocation(Loc), operand, type));                             \
+  }
+
+#define LOADABLE_STORAGE_HELPER(Name)                                          \
+  Load##Name##Inst *createLoad##Name(SILLocation Loc, SILValue src,            \
+                                     IsTake_t isTake) {                        \
+    return insert(new (getModule()) Load##Name##Inst(getSILDebugLocation(Loc), \
+                                                     src, isTake));            \
+  }                                                                            \
+  Store##Name##Inst *createStore##Name(SILLocation Loc, SILValue value,        \
+                                       SILValue dest,                          \
+                                       IsInitialization_t isInit) {            \
+    return insert(new (getModule()) Store##Name##Inst(                         \
+        getSILDebugLocation(Loc), value, dest, isInit));                       \
+  }
+
 #define LOADABLE_REF_STORAGE_HELPER(Name)                                      \
   Name##ToRefInst *create##Name##ToRef(SILLocation Loc, SILValue op,           \
                                        SILType ty) {                           \
@@ -1083,41 +1123,45 @@ public:
                                        SILType ty) {                           \
     return insert(new (getModule())                                            \
                       RefTo##Name##Inst(getSILDebugLocation(Loc), op, ty));    \
-  }                                                                            \
-  StrongCopy##Name##ValueInst *createStrongCopy##Name##Value(                  \
-      SILLocation Loc, SILValue operand) {                                     \
-    auto type = getFunction().getLoweredType(                                  \
-        operand->getType().getASTType().getReferenceStorageReferent());        \
-    return insert(new (getModule()) StrongCopy##Name##ValueInst(               \
-        getSILDebugLocation(Loc), operand, type));                             \
   }
 
-#define ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
-  LOADABLE_REF_STORAGE_HELPER(Name) \
-  StrongRetain##Name##Inst *createStrongRetain##Name(SILLocation Loc, \
-                                                     SILValue Operand, \
-                                                     Atomicity atomicity) { \
-    return insert(new (getModule()) \
-      StrongRetain##Name##Inst(getSILDebugLocation(Loc), Operand, atomicity)); \
-  } \
-  Name##RetainInst *create##Name##Retain(SILLocation Loc, SILValue Operand, \
-                                         Atomicity atomicity) { \
-    return insert(new (getModule()) \
-      Name##RetainInst(getSILDebugLocation(Loc), Operand, atomicity)); \
-  } \
-  Name##ReleaseInst *create##Name##Release(SILLocation Loc, \
-                                           SILValue Operand, \
-                                           Atomicity atomicity) { \
-    return insert(new (getModule()) \
-      Name##ReleaseInst(getSILDebugLocation(Loc), Operand, atomicity)); \
+#define RETAINABLE_STORAGE_HELPER(Name)                                        \
+  StrongRetain##Name##Inst *createStrongRetain##Name(                          \
+      SILLocation Loc, SILValue Operand, Atomicity atomicity) {                \
+    return insert(new (getModule()) StrongRetain##Name##Inst(                  \
+        getSILDebugLocation(Loc), Operand, atomicity));                        \
+  }                                                                            \
+  Name##RetainInst *create##Name##Retain(SILLocation Loc, SILValue Operand,    \
+                                         Atomicity atomicity) {                \
+    return insert(new (getModule()) Name##RetainInst(getSILDebugLocation(Loc), \
+                                                     Operand, atomicity));     \
+  }                                                                            \
+  Name##ReleaseInst *create##Name##Release(SILLocation Loc, SILValue Operand,  \
+                                           Atomicity atomicity) {              \
+    return insert(new (getModule()) Name##ReleaseInst(                         \
+        getSILDebugLocation(Loc), Operand, atomicity));                        \
   }
-#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
-  NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, "...") \
-  ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, "...")
-#define UNCHECKED_REF_STORAGE(Name, ...) \
+
+#define ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                         \
+  COPYABLE_STORAGE_HELPER(Name)                                                \
+  LOADABLE_REF_STORAGE_HELPER(Name)                                            \
+  RETAINABLE_STORAGE_HELPER(Name)
+#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                      \
+  COPYABLE_STORAGE_HELPER(Name)                                                \
+  LOADABLE_REF_STORAGE_HELPER(Name)                                            \
+  LOADABLE_STORAGE_HELPER(Name)                                                \
+  RETAINABLE_STORAGE_HELPER(Name)
+#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                          \
+  COPYABLE_STORAGE_HELPER(Name)                                                \
+  LOADABLE_STORAGE_HELPER(Name)
+#define UNCHECKED_REF_STORAGE(Name, ...)                                       \
+  COPYABLE_STORAGE_HELPER(Name)                                                \
   LOADABLE_REF_STORAGE_HELPER(Name)
 #include "swift/AST/ReferenceStorage.def"
+#undef LOADABLE_STORAGE_HELPER
 #undef LOADABLE_REF_STORAGE_HELPER
+#undef COPYABLE_STORAGE_HELPER
+#undef RETAINABLE_STORAGE_HELPER
 
   CopyAddrInst *createCopyAddr(SILLocation Loc, SILValue srcAddr,
                                SILValue destAddr, IsTake_t isTake,
@@ -1395,11 +1439,11 @@ public:
         getSILDebugLocation(loc), srcAddr, takeAddr));
   }
 
-  MarkMustCheckInst *
-  createMarkMustCheckInst(SILLocation loc, SILValue src,
-                          MarkMustCheckInst::CheckKind kind) {
-    return insert(new (getModule())
-                      MarkMustCheckInst(getSILDebugLocation(loc), src, kind));
+  MarkUnresolvedNonCopyableValueInst *createMarkUnresolvedNonCopyableValueInst(
+      SILLocation loc, SILValue src,
+      MarkUnresolvedNonCopyableValueInst::CheckKind kind) {
+    return insert(new (getModule()) MarkUnresolvedNonCopyableValueInst(
+        getSILDebugLocation(loc), src, kind));
   }
 
   MarkUnresolvedReferenceBindingInst *createMarkUnresolvedReferenceBindingInst(
@@ -1548,11 +1592,17 @@ public:
                       getSILDebugLocation(Loc), operand, atomicity));
   }
 
-  SetDeallocatingInst *createSetDeallocating(SILLocation Loc,
-                                            SILValue operand,
-                                            Atomicity atomicity) {
-    return insert(new (getModule()) SetDeallocatingInst(
-        getSILDebugLocation(Loc), operand, atomicity));
+  BeginDeallocRefInst *createBeginDeallocRef(SILLocation Loc,
+                                             SILValue reference,
+                                             SILValue allocation) {
+    return insert(new (getModule()) BeginDeallocRefInst(
+        getSILDebugLocation(Loc), reference, allocation));
+  }
+
+  EndInitLetRefInst *createEndInitLetRef(SILLocation Loc,
+                                             SILValue operand) {
+    return insert(new (getModule()) EndInitLetRefInst(
+        getSILDebugLocation(Loc), operand));
   }
 
   ObjectInst *createObject(SILLocation Loc, SILType Ty,
@@ -1704,20 +1754,10 @@ public:
       ArrayRef<std::pair<EnumElementDecl *, SILValue>> CaseValues,
       llvm::Optional<ArrayRef<ProfileCounter>> CaseCounts = llvm::None,
       ProfileCounter DefaultCount = ProfileCounter()) {
-    return createSelectEnum(Loc, Operand, Ty, DefaultValue, CaseValues,
-                            CaseCounts, DefaultCount,
-                            Operand->getOwnershipKind());
-  }
-
-  SelectEnumInst *createSelectEnum(
-      SILLocation Loc, SILValue Operand, SILType Ty, SILValue DefaultValue,
-      ArrayRef<std::pair<EnumElementDecl *, SILValue>> CaseValues,
-      llvm::Optional<ArrayRef<ProfileCounter>> CaseCounts,
-      ProfileCounter DefaultCount, ValueOwnershipKind forwardingOwnershipKind) {
     assert(isLoadableOrOpaque(Ty));
     return insert(SelectEnumInst::create(
         getSILDebugLocation(Loc), Operand, Ty, DefaultValue, CaseValues,
-        getModule(), CaseCounts, DefaultCount, forwardingOwnershipKind));
+        getModule(), CaseCounts, DefaultCount));
   }
 
   SelectEnumAddrInst *createSelectEnumAddr(
@@ -2113,6 +2153,16 @@ public:
     return insert(TuplePackElementAddrInst::create(getFunction(),
                               getSILDebugLocation(loc),
                               packIndex, tupleAddr, elementType));
+  }
+
+  TuplePackExtractInst *createTuplePackExtract(SILLocation loc,
+                                               SILValue packIndex,
+                                               SILValue tuple,
+                                               SILType elementType) {
+    assert(!getFunction().getModule().useLoweredAddresses());
+    return insert(TuplePackExtractInst::create(
+        getFunction(), getSILDebugLocation(loc), packIndex, tuple, elementType,
+        tuple->getOwnershipKind()));
   }
 
   ProjectBlockStorageInst *createProjectBlockStorage(SILLocation Loc,
@@ -2575,17 +2625,18 @@ public:
   }
 
   CheckedCastBranchInst *
-  createCheckedCastBranch(SILLocation Loc, bool isExact, SILValue op,
-                          SILType destLoweredTy, CanType destFormalTy,
-                          SILBasicBlock *successBB,
+  createCheckedCastBranch(SILLocation Loc, bool isExact, SILValue op, 
+                          CanType srcFormalTy, SILType destLoweredTy, 
+                          CanType destFormalTy, SILBasicBlock *successBB,
                           SILBasicBlock *failureBB,
                           ProfileCounter Target1Count = ProfileCounter(),
                           ProfileCounter Target2Count = ProfileCounter());
 
   CheckedCastBranchInst *
-  createCheckedCastBranch(SILLocation Loc, bool isExact, SILValue op,
-                          SILType destLoweredTy, CanType destFormalTy,
-                          SILBasicBlock *successBB, SILBasicBlock *failureBB,
+  createCheckedCastBranch(SILLocation Loc, bool isExact, SILValue op, 
+                          CanType srcFormalTy, SILType destLoweredTy, 
+                          CanType destFormalTy, SILBasicBlock *successBB, 
+                          SILBasicBlock *failureBB,
                           ValueOwnershipKind forwardingOwnershipKind,
                           ProfileCounter Target1Count = ProfileCounter(),
                           ProfileCounter Target2Count = ProfileCounter());

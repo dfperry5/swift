@@ -1146,6 +1146,15 @@ static bool canDevirtualizeWitnessMethod(ApplySite applySite, bool isMandatory) 
 
   auto *wmi = cast<WitnessMethodInst>(applySite.getCallee());
 
+  // Handle vanishing tuples: don't devirtualize a call to a tuple conformance
+  // if the lookup type can possibly be unwrapped after substitution.
+  if (auto tupleType = dyn_cast<TupleType>(wmi->getLookupType())) {
+    if (tupleType->containsPackExpansionType() &&
+        tupleType->getNumScalarElements() <= 1) {
+      return false;
+    }
+  }
+
   std::tie(f, wt) = applySite.getModule().lookUpFunctionInWitnessTable(
       wmi->getConformance(), wmi->getMember(), SILModule::LinkingMode::LinkAll);
 
@@ -1201,7 +1210,18 @@ static bool canDevirtualizeWitnessMethod(ApplySite applySite, bool isMandatory) 
   if (!interfaceTy->hasTypeParameter())
     return true;
 
-  auto *const selfGP = wmi->getLookupProtocol()->getProtocolSelfType();
+  auto subs = getWitnessMethodSubstitutions(f->getModule(), applySite,
+                                            f, wmi->getConformance());
+  CanSILFunctionType substCalleTy = f->getLoweredFunctionType()->substGenericArgs(
+      f->getModule(), subs,
+      applySite.getFunction()->getTypeExpansionContext());
+  CanSILFunctionType applySubstCalleeTy = applySite.getSubstCalleeType();
+
+  // If the function types match, there is no problem.
+  if (substCalleTy == applySubstCalleeTy)
+    return true;
+
+  auto selfGP = wmi->getLookupProtocol()->getSelfInterfaceType();
   auto isSelfRootedTypeParameter = [selfGP](Type T) -> bool {
     if (!T->hasTypeParameter())
       return false;

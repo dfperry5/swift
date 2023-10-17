@@ -28,6 +28,7 @@
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/TypeDifferenceVisitor.h"
+#include "swift/Basic/Compiler.h"
 #include "swift/Basic/Dwarf.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/Basic/Version.h"
@@ -47,7 +48,10 @@
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Lex/HeaderSearchOptions.h"
+#include "clang/Lex/Preprocessor.h"
 #include "clang/Serialization/ASTReader.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Config/config.h"
 #include "llvm/IR/Constants.h"
@@ -98,10 +102,11 @@ public:
 };
 
 static bool equalWithoutExistentialTypes(Type t1, Type t2) {
-  auto withoutExistentialTypes = [](Type type) -> Type {
+  static Type (*withoutExistentialTypes)(Type) = [](Type type) -> Type {
     return type.transform([](Type type) -> Type {
-      if (auto existential = type->getAs<ExistentialType>())
-        return existential->getConstraintType();
+      if (auto existential = type->getAs<ExistentialType>()) {
+        return withoutExistentialTypes(existential->getConstraintType());
+      }
       return type;
     });
   };
@@ -402,7 +407,7 @@ public:
     auto *CS = DS->InlinedCallSite;
     if (!CS)
       return nullptr;
- 
+
     auto CachedInlinedAt = InlinedAtCache.find(CS);
     if (CachedInlinedAt != InlinedAtCache.end())
       return cast<llvm::MDNode>(CachedInlinedAt->second);
@@ -414,7 +419,7 @@ public:
     // Pretend transparent functions don't exist.
     if (!Scope)
       return createInlinedAt(CS);
-    auto InlinedAt = llvm::DILocation::get(
+    auto InlinedAt = llvm::DILocation::getDistinct(
         IGM.getLLVMContext(), L.line, L.column, Scope, createInlinedAt(CS));
     InlinedAtCache.insert({CS, llvm::TrackingMDNodeRef(InlinedAt)});
     return InlinedAt;
@@ -767,6 +772,13 @@ private:
     uint64_t Signature =
       Desc.getSignature() ? Desc.getSignature().truncatedValue() : ~1ULL;
 
+    // Clang modules using fmodule-file-home-is-cwd should have their
+    // include path set to the working directory.
+    auto &HSI =
+        CI.getClangPreprocessor().getHeaderSearchInfo().getHeaderSearchOpts();
+    StringRef IncludePath =
+        HSI.ModuleFileHomeIsCwd ? Opts.DebugCompilationDir : Desc.getPath();
+
     // Handle Clang modules.
     if (ClangModule) {
       llvm::DIModule *Parent = nullptr;
@@ -787,11 +799,11 @@ private:
                                    ClangModule->Parent);
       }
       return getOrCreateModule(ClangModule, Parent, Desc.getModuleName(),
-                               Desc.getPath(), Signature, Desc.getASTFile());
+                               IncludePath, Signature, Desc.getASTFile());
     }
     // Handle PCH.
     return getOrCreateModule(Desc.getASTFile().bytes_begin(), nullptr,
-                             Desc.getModuleName(), Desc.getPath(), Signature,
+                             Desc.getModuleName(), IncludePath, Signature,
                              Desc.getASTFile());
   };
 
@@ -1306,7 +1318,7 @@ private:
     }
     // FIXME: assert that SizeInBits == OffsetInBits.
     SizeInBits = OffsetInBits;
-   
+
     auto FwdDecl = llvm::TempDINode(DBuilder.createReplaceableCompositeType(
         llvm::dwarf::DW_TAG_structure_type, MangledName, Scope, MainFile, 0,
         llvm::dwarf::DW_LANG_Swift, SizeInBits, AlignInBits, Flags,
@@ -1559,7 +1571,7 @@ private:
       return createPointerSizedStruct(Scope,
                                       MangledName,
                                       MainFile, 0, Flags, MangledName);
-      
+
     case TypeKind::BuiltinTuple:
       llvm_unreachable("BuiltinTupleType should not show up here");
 
@@ -1816,7 +1828,7 @@ private:
     return true;
   }
 #endif
-  
+
   llvm::DIType *getOrCreateType(DebugTypeInfo DbgTy) {
     // Is this an empty type?
     if (DbgTy.isNull())
@@ -2467,6 +2479,19 @@ IRGenDebugInfoImpl::emitFunction(const SILDebugScope *DS, llvm::Function *Fn,
       /*IsLocalToUnit=*/Fn ? Fn->hasInternalLinkage() : true,
       /*IsDefinition=*/true, /*IsOptimized=*/Opts.shouldOptimize());
 
+  // When the function is a method, we want a DW_AT_declaration there.
+  // Because there's no good way to cross the CU boundary to insert a nested
+  // DISubprogram definition in one CU into a type defined in another CU when
+  // doing LTO builds.
+  if (Rep == SILFunctionTypeRepresentation::Method) {
+    llvm::DISubprogram::DISPFlags SPFlags = llvm::DISubprogram::toSPFlags(
+        /*IsLocalToUnit=*/Fn ? Fn->hasInternalLinkage() : true,
+        /*IsDefinition=*/false, /*IsOptimized=*/Opts.shouldOptimize());
+    Decl = DBuilder.createMethod(Scope, Name, LinkageName, File, Line, DIFnTy,
+                                 0, 0, nullptr, Flags, SPFlags,
+                                 TemplateParameters, Error);
+  }
+
   // Construct the DISubprogram.
   llvm::DISubprogram *SP = DBuilder.createFunction(
       Scope, Name, LinkageName, File, Line, DIFnTy, ScopeLine, Flags, SPFlags,
@@ -2985,11 +3010,6 @@ void IRGenDebugInfoImpl::emitGlobalVariableDeclaration(
   if (Opts.DebugInfoLevel <= IRGenDebugInfoLevel::LineTables)
     return;
 
-  if (swift::TypeBase *ty = DbgTy.getType()) {
-    if (MetatypeType *metaTy = dyn_cast<MetatypeType>(ty))
-      ty = metaTy->getInstanceType().getPointer();
-  }
-
   llvm::DIType *DITy = getOrCreateType(DbgTy);
   VarDecl *VD = nullptr;
   if (Loc)
@@ -3033,7 +3053,7 @@ void IRGenDebugInfoImpl::emitTypeMetadata(IRGenFunction &IGF,
     return;
 
   llvm::SmallString<8> Buf;
-  static const char *Tau = u8"\u03C4";
+  static const char *Tau = SWIFT_UTF8("\u03C4");
   llvm::raw_svector_ostream OS(Buf);
   OS << '$' << Tau << '_' << Depth << '_' << Index;
   uint64_t PtrWidthInBits = CI.getTargetInfo().getPointerWidth(0);

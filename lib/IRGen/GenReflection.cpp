@@ -266,7 +266,7 @@ getTypeRefByFunction(IRGenModule &IGM,
 
         // If a type is noncopyable, lie about the resolved type unless the
         // runtime is sufficiently aware of noncopyable types.
-        if (substT->isPureMoveOnly()) {
+        if (substT->isNoncopyable()) {
           // Darwin-based platforms have ABI stability, and we want binaries
           // that use noncopyable types nongenerically today to be forward
           // compatible with a future OS runtime that supports noncopyable
@@ -279,11 +279,28 @@ getTypeRefByFunction(IRGenModule &IGM,
           llvm::Instruction *br = nullptr;
           llvm::BasicBlock *supportedBB = nullptr;
           if (useForwardCompatibility) {
-            auto runtimeSupportsNoncopyableTypesSymbol
-              = IGM.Module.getOrInsertGlobal("swift_runtimeSupportsNoncopyableTypes",
-                                             IGM.Int8Ty);
-            cast<llvm::GlobalVariable>(runtimeSupportsNoncopyableTypesSymbol)
-              ->setLinkage(llvm::GlobalValue::ExternalWeakLinkage);
+            llvm::Value *runtimeSupportsNoncopyableTypesSymbol = nullptr;
+
+            // This is weird. When building the stdlib, we don't have access to
+            // the swift_runtimeSupportsNoncopyableTypes symbol in the Swift.o,
+            // so we'll emit an adrp + ldr to resolve the GOT address. However,
+            // this symbol is defined as an abolsute in the runtime object files
+            // to address 0x0 right now and ld doesn't quite understand how to
+            // fixup this GOT address when merging the runtime and stdlib. Just
+            // unconditionally fail the branch.
+            //
+            // Note: When the value of this symbol changes, this MUST be
+            // updated.
+            if (IGM.getSwiftModule()->isStdlibModule()) {
+              runtimeSupportsNoncopyableTypesSymbol
+                  = llvm::ConstantInt::get(IGM.Int8Ty, 0);
+            } else {
+              runtimeSupportsNoncopyableTypesSymbol
+                  = IGM.Module.getOrInsertGlobal(
+                      "swift_runtimeSupportsNoncopyableTypes", IGM.Int8Ty);
+              cast<llvm::GlobalVariable>(runtimeSupportsNoncopyableTypesSymbol)
+                  ->setLinkage(llvm::GlobalValue::ExternalWeakLinkage);
+            }
               
             auto runtimeSupportsNoncopyableTypes
               = IGF.Builder.CreateIsNotNull(runtimeSupportsNoncopyableTypesSymbol,
@@ -374,7 +391,7 @@ getTypeRefImpl(IRGenModule &IGM,
     // noncopyable, use a function to emit the type ref which will look for a
     // signal from future runtimes whether they support noncopyable types before
     // exposing their metadata to them.
-    if (type->isPureMoveOnly()) {
+    if (type->isNoncopyable()) {
       IGM.IRGen.noteUseOfTypeMetadata(type);
       return getTypeRefByFunction(IGM, sig, type);
     }
@@ -853,9 +870,9 @@ private:
     if (hasPayload && (decl->isIndirect() || enumDecl->isIndirect()))
       flags.setIsIndirectCase();
 
-    Type interfaceType = Lowering::shouldSkipLowering(decl)
-                             ? nullptr
-                             : decl->getArgumentInterfaceType();
+    Type interfaceType = decl->isAvailableDuringLowering()
+                             ? decl->getArgumentInterfaceType()
+                             : nullptr;
 
     addField(flags, interfaceType, decl->getBaseIdentifier().str());
   }
@@ -1674,13 +1691,15 @@ void IRGenModule::emitFieldDescriptor(const NominalTypeDecl *D) {
       needsFieldDescriptor = false;
   }
 
-  // If the type has custom @_alignment, emit a fixed record with the
-  // alignment since remote mirrors will need to treat the type as opaque.
+  // If the type has custom @_alignment, @_rawLayout, or other manual layout
+  // attributes, emit a fixed record with the size and alignment since the
+  // remote mirrors will need to treat the type as opaque.
   //
   // Note that we go on to also emit a field descriptor in this case,
   // since in-process reflection only cares about the types of the fields
   // and does not independently re-derive the layout.
-  if (D->getAttrs().hasAttribute<AlignmentAttr>()) {
+  if (D->getAttrs().hasAttribute<AlignmentAttr>()
+      || D->getAttrs().hasAttribute<RawLayoutAttr>()) {
     auto &TI = getTypeInfoForUnlowered(T);
     if (isa<FixedTypeInfo>(TI)) {
       needsOpaqueDescriptor = true;

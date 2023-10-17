@@ -2568,6 +2568,10 @@ static void eraseExistingTypeContextDescriptor(IRGenModule &IGM,
 void irgen::emitLazyTypeContextDescriptor(IRGenModule &IGM,
                                           NominalTypeDecl *type,
                                           RequireMetadata_t requireMetadata) {
+  if (type->getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
+    return;
+  }
+
   eraseExistingTypeContextDescriptor(IGM, type);
 
   bool hasLayoutString = false;
@@ -2581,16 +2585,17 @@ void irgen::emitLazyTypeContextDescriptor(IRGenModule &IGM,
     auto genericSig =
         lowered.getNominalOrBoundGenericNominal()->getGenericSignature();
     hasLayoutString = !!typeLayoutEntry->layoutString(IGM, genericSig);
+
+    if (!hasLayoutString &&
+        IGM.Context.LangOpts.hasFeature(
+            Feature::LayoutStringValueWitnessesInstantiation) &&
+        IGM.getOptions().EnableLayoutStringValueWitnessesInstantiation) {
+      hasLayoutString |= needsSingletonMetadataInitialization(IGM, type) ||
+                         (type->isGenericContext() && !isa<FixedTypeInfo>(ti));
+    }
   }
 
   if (auto sd = dyn_cast<StructDecl>(type)) {
-    if (IGM.Context.LangOpts.hasFeature(Feature::LayoutStringValueWitnessesInstantiation) &&
-        IGM.getOptions().EnableLayoutStringValueWitnessesInstantiation) {
-      hasLayoutString |= requiresForeignTypeMetadata(type) ||
-        needsSingletonMetadataInitialization(IGM, type) ||
-        (type->isGenericContext() && !isa<FixedTypeInfo>(ti));
-    }
-
     StructContextDescriptorBuilder(IGM, sd, requireMetadata,
                                    hasLayoutString).emit();
   } else if (auto ed = dyn_cast<EnumDecl>(type)) {
@@ -2981,6 +2986,117 @@ static void emitInitializeFieldOffsetVectorWithLayoutString(
                                 IGM.getPointerSize() * numFields);
 }
 
+static void emitInitializeRawLayoutOld(IRGenFunction &IGF, SILType likeType,
+                                       int32_t count, SILType T,
+                                       llvm::Value *metadata,
+                                       MetadataDependencyCollector *collector) {
+  auto &IGM = IGF.IGM;
+
+  // This is the list of field type layouts that we're going to pass to the init
+  // function. This will only ever hold 1 field which is the temporary one we're
+  // going to build up from our like type's layout.
+  auto fieldLayouts = IGF.createAlloca(
+                          llvm::ArrayType::get(IGM.TypeLayoutTy->getPointerTo(), 1),
+                          IGM.getPointerAlignment(), "fieldLayouts");
+  IGF.Builder.CreateLifetimeStart(fieldLayouts, IGM.getPointerSize());
+
+  // We're going to pretend that this is our field offset vector for the init to
+  // write to. We don't actually have fields, so we don't want to write a field
+  // offset in our metadata.
+  auto fieldOffsets = IGF.createAlloca(IGM.Int32Ty, Alignment(4), "fieldOffsets");
+  IGF.Builder.CreateLifetimeStart(fieldOffsets, Size(4));
+
+  // We need to make a temporary type layout with most of the same information
+  // from the type we're like.
+  auto ourTypeLayout = IGF.createAlloca(IGM.TypeLayoutTy, 
+                                        IGM.getPointerAlignment(),
+                                        "ourTypeLayout");
+  IGF.Builder.CreateLifetimeStart(ourTypeLayout, IGM.getPointerSize());
+
+  // Put our temporary type layout in the list of layouts we're using to
+  // initialize.
+  IGF.Builder.CreateStore(ourTypeLayout.getAddress(), fieldLayouts);
+
+  // Get the like type's type layout.
+  auto likeTypeLayout = emitTypeLayoutRef(IGF, likeType, collector);
+
+  // Grab the size, stride, and alignmentMask out of the layout.
+  auto loadedTyLayout = IGF.Builder.CreateLoad(
+      Address(likeTypeLayout, IGM.TypeLayoutTy, IGM.getPointerAlignment()),
+      "typeLayout");
+  auto size = IGF.Builder.CreateExtractValue(loadedTyLayout, 0, "size");
+  auto stride = IGF.Builder.CreateExtractValue(loadedTyLayout, 1, "stride");
+  auto flags = IGF.Builder.CreateExtractValue(loadedTyLayout, 2, "flags");
+  auto xi = IGF.Builder.CreateExtractValue(loadedTyLayout, 3, "xi");
+
+  // This will zero out the other bits.
+  auto alignMask = IGF.Builder.CreateAnd(flags,
+                                         ValueWitnessFlags::AlignmentMask,
+                                         "alignMask");
+
+  // Set the isNonPOD bit. This is important because older runtimes will attempt
+  // to replace various vwt functions with more optimized ones. In this case, we
+  // want to preserve the fact that noncopyable types have unreachable copy vwt
+  // functions.
+  auto vwtFlags = IGF.Builder.CreateOr(alignMask,
+                                       ValueWitnessFlags::IsNonPOD,
+                                       "vwtFlags");
+
+  // Count is only ever -1 if we're not an array like layout.
+  if (count != -1) {
+    stride = IGF.Builder.CreateMul(stride, IGM.getSize(Size(count)));
+    size = stride;
+  }
+
+  llvm::Value *resultAgg = llvm::UndefValue::get(IGM.TypeLayoutTy);
+  resultAgg = IGF.Builder.CreateInsertValue(resultAgg, size, 0);
+  resultAgg = IGF.Builder.CreateInsertValue(resultAgg, stride, 1);
+  resultAgg = IGF.Builder.CreateInsertValue(resultAgg, vwtFlags, 2);
+  resultAgg = IGF.Builder.CreateInsertValue(resultAgg, xi, 3);
+
+  IGF.Builder.CreateStore(resultAgg, ourTypeLayout);
+
+  StructLayoutFlags fnFlags = StructLayoutFlags::Swift5Algorithm;
+
+  // Call swift_initStructMetadata().
+  IGF.Builder.CreateCall(IGM.getInitStructMetadataFunctionPointer(),
+                         {metadata, IGM.getSize(Size(uintptr_t(fnFlags))),
+                          IGM.getSize(Size(1)), fieldLayouts.getAddress(),
+                          fieldOffsets.getAddress()});
+
+  IGF.Builder.CreateLifetimeEnd(ourTypeLayout, IGM.getPointerSize());
+  IGF.Builder.CreateLifetimeEnd(fieldOffsets, Size(4));
+  IGF.Builder.CreateLifetimeEnd(fieldLayouts, IGM.getPointerSize());
+}
+
+static void emitInitializeRawLayout(IRGenFunction &IGF, SILType likeType,
+                                    int32_t count, SILType T,
+                                    llvm::Value *metadata,
+                                    MetadataDependencyCollector *collector) {
+  // If our deployment target doesn't contain the new swift_initRawStructMetadata,
+  // emit a call to the swift_initStructMetadata tricking it into thinking
+  // we have a single field.
+  auto deploymentAvailability =
+      AvailabilityContext::forDeploymentTarget(IGF.IGM.Context);
+  auto initRawAvail = IGF.IGM.Context.getInitRawStructMetadataAvailability();
+
+  if (!IGF.IGM.Context.LangOpts.DisableAvailabilityChecking &&
+      !deploymentAvailability.isContainedIn(initRawAvail) &&
+      !IGF.IGM.getSwiftModule()->isStdlibModule()) {
+    emitInitializeRawLayoutOld(IGF, likeType, count, T, metadata, collector);
+    return;
+  }
+
+  auto &IGM = IGF.IGM;
+  auto likeTypeLayout = emitTypeLayoutRef(IGF, likeType, collector);
+  StructLayoutFlags flags = StructLayoutFlags::Swift5Algorithm;
+
+  // Call swift_initRawStructMetadata().
+  IGF.Builder.CreateCall(IGM.getInitRawStructMetadataFunctionPointer(),
+                         {metadata, IGM.getSize(Size(uintptr_t(flags))),
+                          likeTypeLayout, IGM.getInt32(count)});
+}
+
 static void emitInitializeValueMetadata(IRGenFunction &IGF,
                                         NominalTypeDecl *nominalDecl,
                                         llvm::Value *metadata,
@@ -2994,9 +3110,32 @@ static void emitInitializeValueMetadata(IRGenFunction &IGF,
         IGM.getOptions().EnableLayoutStringValueWitnesses &&
         IGM.getOptions().EnableLayoutStringValueWitnessesInstantiation;
 
-  if (isa<StructDecl>(nominalDecl)) {
+  if (auto sd = dyn_cast<StructDecl>(nominalDecl)) {
     auto &fixedTI = IGM.getTypeInfo(loweredTy);
     if (isa<FixedTypeInfo>(fixedTI)) return;
+
+    // Use a different runtime function to initialize the value witness table
+    // if the struct has a raw layout. The existing swift_initStructMetadata
+    // is the wrong thing for these types.
+    if (auto rawLayout = nominalDecl->getAttrs().getAttribute<RawLayoutAttr>()) {
+      SILType loweredLikeType;
+      int32_t count = -1;
+
+      if (auto likeType = rawLayout->getResolvedScalarLikeType(sd)) {
+        loweredLikeType = IGM.getLoweredType(AbstractionPattern::getOpaque(),
+                                             *likeType);
+      } else if (auto likeArray = rawLayout->getResolvedArrayLikeTypeAndCount(sd)) {
+        auto likeType = likeArray->first;
+        loweredLikeType = IGM.getLoweredType(AbstractionPattern::getOpaque(),
+                                             likeType);
+
+        count = likeArray->second;
+      }
+
+      emitInitializeRawLayout(IGF, loweredLikeType, count, loweredTy, metadata,
+                              collector);
+      return;
+    }
 
     if (useLayoutStrings) {
       emitInitializeFieldOffsetVectorWithLayoutString(IGF, loweredTy, metadata,
@@ -3634,6 +3773,14 @@ namespace {
         FieldLayout(fieldLayout),
         MetadataLayout(IGM.getClassMetadataLayout(theClass)) {}
 
+    ClassMetadataBuilderBase(IRGenModule &IGM, ClassDecl *theClass,
+                             ConstantStructBuilder &builder,
+                             const ClassLayout &fieldLayout,
+                             SILVTable *vtable)
+      : super(IGM, theClass, vtable), B(builder),
+        FieldLayout(fieldLayout),
+        MetadataLayout(IGM.getClassMetadataLayout(theClass)) {}
+
   public:
     const ClassLayout &getFieldLayout() const { return FieldLayout; }
 
@@ -3811,6 +3958,20 @@ namespace {
     }
 
     void addDestructorFunction() {
+      if (IGM.Context.LangOpts.hasFeature(Feature::Embedded)) {
+        auto dtorRef =
+            SILDeclRef(Target->getDestructor(), SILDeclRef::Kind::Deallocator);
+        auto entry = VTable->getEntry(IGM.getSILModule(), dtorRef);
+        if (llvm::Constant *ptr = IGM.getAddrOfSILFunction(
+                entry->getImplementation(), NotForDefinition)) {
+          B.addSignedPointer(ptr, IGM.getOptions().PointerAuth.HeapDestructors,
+                             PointerAuthEntity::Special::HeapDestructor);
+        } else {
+          B.addNullPointer(IGM.FunctionPtrTy);
+        }
+        return;
+      }
+
       if (asImpl().getFieldLayout().hasObjCImplementation())
         return;
 
@@ -4064,6 +4225,12 @@ namespace {
                               ConstantStructBuilder &builder,
                               const ClassLayout &fieldLayout)
       : super(IGM, theClass, builder, fieldLayout) {}
+
+    FixedClassMetadataBuilder(IRGenModule &IGM, ClassDecl *theClass,
+                              ConstantStructBuilder &builder,
+                              const ClassLayout &fieldLayout,
+                              SILVTable *vtable)
+      : super(IGM, theClass, builder, fieldLayout, vtable) {}
 
     void addFieldOffset(VarDecl *var) {
       if (asImpl().getFieldLayout().hasObjCImplementation())
@@ -4829,6 +4996,76 @@ void irgen::emitClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
   }
 }
 
+static void emitEmbeddedVTable(IRGenModule &IGM, CanType classTy,
+                               SILVTable *vtable) {
+  SILType classType = SILType::getPrimitiveObjectType(classTy);
+  auto &classTI = IGM.getTypeInfo(classType).as<ClassTypeInfo>();
+
+  auto &fragileLayout =
+      classTI.getClassLayout(IGM, classType, /*forBackwardDeployment=*/true);
+
+  ClassDecl *classDecl = classType.getClassOrBoundGenericClass();
+  auto strategy = IGM.getClassMetadataStrategy(classDecl);
+  assert(strategy == ClassMetadataStrategy::FixedOrUpdate ||
+         strategy == ClassMetadataStrategy::Fixed);
+
+  ConstantInitBuilder initBuilder(IGM);
+  auto init = initBuilder.beginStruct();
+  init.setPacked(true);
+
+  assert(vtable);
+
+  FixedClassMetadataBuilder builder(IGM, classDecl, init, fragileLayout,
+                                    vtable);
+  builder.layout();
+  bool canBeConstant = builder.canBeConstant();
+
+  StringRef section{};
+  auto var = IGM.defineTypeMetadata(classTy, /*isPattern*/ false, canBeConstant,
+                                    init.finishAndCreateFuture(), section);
+  (void)var;
+}
+
+void irgen::emitEmbeddedClassMetadata(IRGenModule &IGM, ClassDecl *classDecl,
+                                      const ClassLayout &fragileLayout) {
+  PrettyStackTraceDecl stackTraceRAII("emitting metadata for", classDecl);
+  assert(!classDecl->isForeign());
+  CanType declaredType = classDecl->getDeclaredType()->getCanonicalType();
+  SILVTable *vtable = IGM.getSILModule().lookUpVTable(classDecl);
+  emitEmbeddedVTable(IGM, declaredType, vtable);
+}
+
+void irgen::emitLazyClassMetadata(IRGenModule &IGM, CanType classTy) {
+  // Might already be emitted, skip if that's the case.
+  auto entity =
+      LinkEntity::forTypeMetadata(classTy, TypeMetadataAddress::AddressPoint);
+  auto *existingVar = cast<llvm::GlobalVariable>(
+      IGM.getAddrOfLLVMVariable(entity, ConstantInit(), DebugTypeInfo()));
+  if (!existingVar->isDeclaration()) {
+    return;
+  }
+
+  auto &context = classTy->getNominalOrBoundGenericNominal()->getASTContext();
+  PrettyStackTraceType stackTraceRAII(
+    context, "emitting lazy class metadata for", classTy);
+
+  SILType classType = SILType::getPrimitiveObjectType(classTy);
+  ClassDecl *classDecl = classType.getClassOrBoundGenericClass();
+  SILVTable *vtable = IGM.getSILModule().lookUpVTable(classDecl);
+  emitEmbeddedVTable(IGM, classTy, vtable);
+}
+
+void irgen::emitLazySpecializedClassMetadata(IRGenModule &IGM,
+                                             CanType classTy) {
+  auto &context = classTy->getNominalOrBoundGenericNominal()->getASTContext();
+  PrettyStackTraceType stackTraceRAII(
+    context, "emitting lazy specialized class metadata for", classTy);
+
+  SILType classType = SILType::getPrimitiveObjectType(classTy);
+  SILVTable *vtable = IGM.getSILModule().lookUpSpecializedVTable(classType);
+  emitEmbeddedVTable(IGM, classTy, vtable);
+}
+
 void irgen::emitSpecializedGenericClassMetadata(IRGenModule &IGM, CanType type,
                                                 ClassDecl &decl) {
   assert(decl.isGenericContext());
@@ -5487,6 +5724,26 @@ namespace {
       return emitValueWitnessTable(relativeReference);
     }
 
+    bool hasInstantiatedLayoutString() {
+      if (IGM.Context.LangOpts.hasFeature(
+              Feature::LayoutStringValueWitnessesInstantiation) &&
+          IGM.getOptions().EnableLayoutStringValueWitnessesInstantiation) {
+        return needsSingletonMetadataInitialization(IGM, Target);
+      }
+
+      return false;
+    }
+
+    bool hasLayoutString() {
+      if (!IGM.Context.LangOpts.hasFeature(
+              Feature::LayoutStringValueWitnesses) ||
+          !IGM.getOptions().EnableLayoutStringValueWitnesses) {
+        return false;
+      }
+
+      return hasInstantiatedLayoutString() || !!getLayoutString();
+    }
+
     llvm::Constant *emitLayoutString() {
       if (!IGM.Context.LangOpts.hasFeature(Feature::LayoutStringValueWitnesses) ||
           !IGM.getOptions().EnableLayoutStringValueWitnesses)
@@ -5521,7 +5778,7 @@ namespace {
 
     llvm::Constant *emitNominalTypeDescriptor() {
       auto descriptor = EnumContextDescriptorBuilder(
-                            IGM, Target, RequireMetadata, !!getLayoutString())
+                            IGM, Target, RequireMetadata, hasLayoutString())
                             .emit();
       return descriptor;
     }
@@ -5570,7 +5827,7 @@ namespace {
     }
 
     bool canBeConstant() {
-      return !HasUnfilledPayloadSize;
+      return !HasUnfilledPayloadSize && !hasInstantiatedLayoutString();
     }
   };
 
@@ -6280,6 +6537,7 @@ SpecialProtocol irgen::getSpecialProtocolID(ProtocolDecl *P) {
   case KnownProtocolKind::DistributedTargetInvocationEncoder:
   case KnownProtocolKind::DistributedTargetInvocationDecoder:
   case KnownProtocolKind::DistributedTargetInvocationResultHandler:
+  case KnownProtocolKind::CxxConvertibleToBool:
   case KnownProtocolKind::CxxConvertibleToCollection:
   case KnownProtocolKind::CxxDictionary:
   case KnownProtocolKind::CxxPair:
@@ -6288,8 +6546,11 @@ SpecialProtocol irgen::getSpecialProtocolID(ProtocolDecl *P) {
   case KnownProtocolKind::CxxSet:
   case KnownProtocolKind::CxxSequence:
   case KnownProtocolKind::CxxUniqueSet:
+  case KnownProtocolKind::CxxVector:
   case KnownProtocolKind::UnsafeCxxInputIterator:
+  case KnownProtocolKind::UnsafeCxxMutableInputIterator:
   case KnownProtocolKind::UnsafeCxxRandomAccessIterator:
+  case KnownProtocolKind::UnsafeCxxMutableRandomAccessIterator:
   case KnownProtocolKind::Executor:
   case KnownProtocolKind::SerialExecutor:
   case KnownProtocolKind::Sendable:
@@ -6308,6 +6569,10 @@ SpecialProtocol irgen::getSpecialProtocolID(ProtocolDecl *P) {
 /// that the ObjC runtime uses for uniquing.
 void IRGenModule::emitProtocolDecl(ProtocolDecl *protocol) {
   PrettyStackTraceDecl stackTraceRAII("emitting metadata for", protocol);
+
+  if (protocol->getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
+    return;
+  }
 
   // Marker protocols are never emitted.
   if (protocol->isMarkerProtocol())

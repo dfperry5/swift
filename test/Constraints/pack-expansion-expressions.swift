@@ -36,9 +36,9 @@ func coerceExpansion<each T>(_ value: repeat each T) {
 
 func localValuePack<each T>(_ t: repeat each T) -> (repeat each T, repeat each T) {
   let local = repeat each t
-  // expected-error@-1{{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument list}}
+  // expected-error@-1{{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument of a variadic type}}
   let localAnnotated: repeat each T = repeat each t
-  // expected-error@-1{{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument list}}
+  // expected-error@-1{{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument of a variadic type}}
 
   return (repeat each local, repeat each localAnnotated)
 }
@@ -59,7 +59,7 @@ extension P {
 
 
 func outerArchetype<each T, U>(t: repeat each T, u: U) where repeat each T: P {
-  let _: (repeat (each T.A, U)) = (repeat ((each t).value, u))
+  let _: (repeat ((each T).A, U)) = (repeat ((each t).value, u))
 }
 
 func sameElement<each T, U>(t: repeat each T, u: U) where repeat each T: P, repeat each T == U {
@@ -92,7 +92,7 @@ func sameShapeDiagnostics<each T, each U>(t: repeat each T, u: repeat each U) {
   _ = (repeat (Array<each T>(), each u)) // expected-error {{pack expansion requires that 'each T' and 'each U' have the same shape}}
 }
 
-func returnPackExpansionType<each T>(_ t: repeat each T) -> repeat each T { // expected-error {{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument list}}
+func returnPackExpansionType<each T>(_ t: repeat each T) -> repeat each T { // expected-error {{pack expansion 'repeat each T' can only appear in a function parameter list, tuple element, or generic argument of a variadic type}}
   fatalError()
 }
 
@@ -443,7 +443,7 @@ func test_no_unused_result_warning(arr: inout [Any]) {
   }
 }
 
-func test_partually_flattened_expansions() {
+func test_partially_flattened_expansions() {
   struct S<each T> {
     init() {}
 
@@ -478,11 +478,11 @@ do {
 
 // rdar://107675464 - misplaced `each` results in `type of expression is ambiguous without a type annotation`
 do {
-  func test_correct_each<each T: P>(_ value: repeat each T) -> (repeat each T.A) {
+  func test_correct_each<each T: P>(_ value: repeat each T) -> (repeat (each T).A) {
     return (repeat (each value).makeA()) // Ok
   }
 
-  func test_misplaced_each<each T: P>(_ value: repeat each T) -> (repeat each T.A) {
+  func test_misplaced_each<each T: P>(_ value: repeat each T) -> (repeat (each T).A) {
     return (repeat each value.makeA())
     // expected-error@-1 {{value pack 'each T' must be referenced with 'each'}} {{25-25=(each }} {{30-30=)}}
   }
@@ -602,5 +602,135 @@ func test_that_expansions_are_bound_early() {
     let _: Value<Data> = Value({
         equal($0.prop, i) // Ok
       })
+  }
+}
+
+do {
+  func test<T>(x: T) {}
+
+  // rdar://110711746 to make this valid
+  func caller1<each T>(x: repeat each T) {
+    _ = (repeat { test(x: each x) }()) // expected-error {{pack reference 'each T' can only appear in pack expansion}}
+  }
+
+  func caller2<each T>(x: repeat each T) {
+    _ = { (repeat test(x: each x)) }()
+  }
+}
+
+// https://github.com/apple/swift/issues/66393
+do {
+  struct S<each T> {
+    var property: (repeat each T) -> Void { // expected-note 4 {{'property' declared here}}
+      get {}
+    }
+
+    func method(_: repeat each T) {} // expected-note 4 {{'method' declared here}}
+  }
+  S<Int, Bool>().method((5, true))
+  // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+
+  S<Int, Bool>().method((5, true, 6))
+  // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+
+  S<Int, Bool>().property((5, true))
+  // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+
+  S<Int, Bool>().property((5, true, 6))
+  // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+
+  func foo<each U>(u: repeat each U) {
+    S<repeat each U>().property((3, 4, 5))
+    // expected-error@-1 {{value pack expansion at parameter #0 expects 1 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+
+    // FIXME: The count of 'repeat each U' is not statically known, but error suggests that it is 1.
+    S<repeat each U>().method((3, 4, 5))
+    // expected-error@-1 {{value pack expansion at parameter #0 expects 1 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+    // FIXME: Bad diagnostics
+    // expected-error@-3 {{pack expansion requires that 'each U' and '_' have the same shape}}
+    // expected-error@-4 {{pack expansion requires that 'each U' and '_.RawValue' have the same shape}}
+
+    // FIXME: The count of '(Int, Int), repeat each U' is not statically known, but error suggests that it is 2.
+    S<(Int, Int), repeat each U>().method((3, 4))
+    // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+    // FIXME: Duplicate diagnostics
+    // expected-error@-3 2 {{pack expansion requires that 'each U' and '' have the same shape}}
+
+    // FIXME: The count of '(Int, Int), repeat each U' is not statically known, but error suggests that it is 2.
+    S<(Int, Int), repeat each U>().property((3, 4))
+    // expected-error@-1 {{value pack expansion at parameter #0 expects 2 separate arguments; remove extra parentheses to change tuple into separate arguments}}
+  }
+}
+
+// rdar://110401127 - name lookup bug when abstract tuple stored property shadows a global
+do {
+  let c = [false, true]
+  _ = c
+
+  struct ZipCollection<each C> {
+    public let c: (repeat each C)
+
+    func makeTuple() -> (repeat each C) {
+      fatalError()
+    }
+
+    public func f() -> (repeat Optional<each C>) {
+      _ = (repeat each makeTuple())
+      _ = (repeat (each makeTuple()))
+    }
+  }
+}
+
+// rdar://112029630 - incorrect variadic generic overload ranking
+do {
+  func test1<T>(_: T...) {}
+  // expected-note@-1 {{found this candidate}}
+  func test1<each T>(_: repeat each T) {}
+  // expected-note@-1 {{found this candidate}}
+
+  test1(1, 2, 3) // expected-error {{ambiguous use of 'test1'}}
+  test1(1, "a") // Ok
+
+  func test2<each T>(_: repeat each T) {}
+  // expected-note@-1 {{found this candidate}}
+  func test2<each T>(vals: repeat each T) {}
+  // expected-note@-1 {{found this candidate}}
+
+  test2() // expected-error {{ambiguous use of 'test2'}}
+
+  func test_different_requirements<A: BinaryInteger & StringProtocol>(_ a: A) {
+    func test3<each T: BinaryInteger>(str: String, _: repeat each T) {}
+    // expected-note@-1 {{found this candidate}}
+    func test3<each U: StringProtocol>(str: repeat each U) {}
+    // expected-note@-1 {{found this candidate}}
+
+    test3(str: "", a, a)  // expected-error {{ambiguous use of 'test3'}}
+  }
+}
+
+// rdar://112095973 - single-element tuples are not unwrapped in member references
+do {
+  struct V<Value> {
+    let key: Int
+  }
+
+  struct S<each T> {
+    let data: (repeat V<each T>)
+  }
+
+  func test<U>(_ value: S<U>) {
+    _ = value.data.key // Ok
+  }
+}
+
+// rdar://110847476 - unrelated assignment and raw representable diagnostics
+do {
+  struct Test<each Base: AsyncSequence> {
+    let base: (repeat each Base)
+
+    init(base: repeat each Base) {
+      self.base = base
+      // expected-error@-1 {{pack reference 'each Base' can only appear in pack expansion}}
+    }
   }
 }

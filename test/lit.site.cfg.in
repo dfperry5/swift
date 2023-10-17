@@ -13,6 +13,7 @@
 import os
 import platform
 import sys
+import lit.util
 
 config.cmake = "@CMAKE_COMMAND@"
 config.llvm_src_root = "@LLVM_MAIN_SRC_DIR@"
@@ -135,8 +136,6 @@ if "@SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING@" == "TRUE":
     config.available_features.add('differentiable_programming')
 if "@SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY@" == "TRUE":
     config.available_features.add('concurrency')
-if "@SWIFT_BACK_DEPLOY_CONCURRENCY@" == "TRUE":
-    config.available_features.add('back_deploy_concurrency')
 if "@SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED@" == "TRUE":
     config.available_features.add('distributed')
 if "@SWIFT_STDLIB_STATIC_PRINT@" == "TRUE":
@@ -167,11 +166,11 @@ elif "@BOOTSTRAPPING_MODE@" == 'BOOTSTRAPPING':
 elif "@BOOTSTRAPPING_MODE@" == 'BOOTSTRAPPING-WITH-HOSTLIBS':
   config.available_features.add('bootstrapping_with_hostlibs_mode')
 
-if '@SWIFT_SWIFT_PARSER@' == 'TRUE':
+if '@SWIFT_BUILD_SWIFT_SYNTAX@' == 'TRUE':
   config.available_features.add('swift_swift_parser')
 
 # Let the main config do the real work.
 if config.test_exec_root is None:
-    config.test_exec_root = os.path.dirname(os.path.realpath(__file__))
+    config.test_exec_root = os.path.dirname(lit.util.abs_path_preserve_drive(__file__))
 lit_config.load_config(
     config, os.path.join(config.swift_src_root, "test", "lit.cfg"))

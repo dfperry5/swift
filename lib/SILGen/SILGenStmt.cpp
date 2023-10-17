@@ -419,16 +419,7 @@ void StmtEmitter::visitBraceStmt(BraceStmt *S) {
       if (isa<ThrowStmt>(S))
         StmtType = ThrowStmtType;
     } else if (auto *E = ESD.dyn_cast<Expr*>()) {
-      // Check to see if we have an initialization for a SingleValueStmtExpr
-      // active, and if so, use it for this expression branch. If the expression
-      // is uninhabited, we can skip this, and let unreachability checking
-      // handle it.
-      auto *init = SGF.getSingleValueStmtInit(E);
-      if (init && !E->getType()->isStructurallyUninhabited()) {
-        SGF.emitExprInto(E, init);
-      } else {
-        SGF.emitIgnoredExpr(E);
-      }
+      SGF.emitIgnoredExpr(E);
     } else {
       auto *D = ESD.get<Decl*>();
 
@@ -770,6 +761,12 @@ void StmtEmitter::visitReturnStmt(ReturnStmt *S) {
 }
 
 void StmtEmitter::visitThrowStmt(ThrowStmt *S) {
+  if (SGF.getASTContext().LangOpts.ThrowsAsTraps) {
+    SGF.B.createUnconditionalFail(S, "throw turned into a trap");
+    SGF.B.createUnreachable(S);
+    return;
+  }
+
   ManagedValue exn = SGF.emitRValueAsSingleValue(S->getSubExpr());
   SGF.emitThrow(S, exn, /* emit a call to willThrow */ true);
 }
@@ -792,7 +789,7 @@ void StmtEmitter::visitDiscardStmt(DiscardStmt *S) {
   // restriction until we get discard implemented the way we want.
   for (auto *varDecl : nominal->getStoredProperties()) {
     assert(varDecl->hasStorage());
-    auto varType = varDecl->getType();
+    auto varType = varDecl->getTypeInContext();
     auto &varTypeLowering = SGF.getTypeLowering(varType);
     if (!varTypeLowering.isTrivial()) {
       diagnose(getASTContext(),
@@ -832,6 +829,28 @@ void StmtEmitter::visitYieldStmt(YieldStmt *S) {
   FullExpr fullExpr(SGF.Cleanups, CleanupLocation(S));
 
   SGF.emitYield(S, sources, origTypes, SGF.CoroutineUnwindDest);
+}
+
+void StmtEmitter::visitThenStmt(ThenStmt *S) {
+  auto *E = S->getResult();
+
+  // If we have an uninhabited type, we may not be able to use it for
+  // initialization, since we allow the conversion of Never to any other type.
+  // Instead, emit an ignored expression with an unreachable.
+  if (E->getType()->isUninhabited()) {
+    SGF.emitIgnoredExpr(E);
+    SGF.B.createUnreachable(E);
+    return;
+  }
+
+  // Retrieve the initialization for the parent SingleValueStmtExpr. If we don't
+  // have an init, we don't care about the result, emit an ignored expr. This is
+  // the case if e.g the result is being converted to Void.
+  if (auto init = SGF.getSingleValueStmtInit(E)) {
+    SGF.emitExprInto(E, init.get());
+  } else {
+    SGF.emitIgnoredExpr(E);
+  }
 }
 
 void StmtEmitter::visitPoundAssertStmt(PoundAssertStmt *stmt) {
@@ -907,12 +926,10 @@ void StmtEmitter::visitDeferStmt(DeferStmt *S) {
   // If the defer is at the top-level code, insert 'mark_escape_inst'
   // to the top-level code to check initialization of any captured globals.
   FuncDecl *deferDecl = S->getTempDecl();
-  auto declCtxKind = deferDecl->getDeclContext()->getContextKind();
-  auto &sgm = SGF.SGM;
-  if (declCtxKind == DeclContextKind::TopLevelCodeDecl && sgm.TopLevelSGF &&
-      sgm.TopLevelSGF->B.hasValidInsertionPoint()) {
-    sgm.emitMarkFunctionEscapeForTopLevelCodeGlobals(
-        S, deferDecl->getCaptureInfo());
+  auto *Ctx = deferDecl->getDeclContext();
+  if (isa<TopLevelCodeDecl>(Ctx) && SGF.isEmittingTopLevelCode()) {
+      auto Captures = deferDecl->getCaptureInfo();
+      SGF.emitMarkFunctionEscapeForTopLevelCodeGlobals(S, std::move(Captures));
   }
   SGF.visitFuncDecl(deferDecl);
 
@@ -1094,12 +1111,7 @@ void StmtEmitter::visitDoStmt(DoStmt *S) {
 }
 
 void StmtEmitter::visitDoCatchStmt(DoCatchStmt *S) {
-  Type formalExnType = S->getCatches()
-                           .front()
-                           ->getCaseLabelItems()
-                           .front()
-                           .getPattern()
-                           ->getType();
+  Type formalExnType = S->getCaughtErrorType();
   auto &exnTL = SGF.getTypeLowering(formalExnType);
 
   // Create the throw destination at the end of the function.
@@ -1475,17 +1487,60 @@ void SILGenFunction::emitThrow(SILLocation loc, ManagedValue exnMV,
   assert(ThrowDest.isValid() &&
          "calling emitThrow with invalid throw destination!");
 
+  if (getASTContext().LangOpts.ThrowsAsTraps) {
+    B.createUnconditionalFail(loc, "throw turned into a trap");
+    B.createUnreachable(loc);
+    return;
+  }
+
   // Claim the exception value.  If we need to handle throwing
   // cleanups, the correct thing to do here is to recreate the
   // exception's cleanup when emitting each cleanup we branch through.
   // But for now we aren't bothering.
   SILValue exn = exnMV.forward(*this);
 
-  if (emitWillThrow) {
+  // Whether the thrown exception is already an Error existential box.
+  SILType existentialBoxType = SILType::getExceptionType(getASTContext());
+  bool isExistentialBox = exn->getType() == existentialBoxType;
+
+  // FIXME: Right now, we suppress emission of the willThrow builtin if the
+  // error isn't already the error existential, because swift_willThrow expects
+  // the existential box.
+  if (emitWillThrow && isExistentialBox) {
     // Generate a call to the 'swift_willThrow' runtime function to allow the
     // debugger to catch the throw event.
     B.createBuiltin(loc, SGM.getASTContext().getIdentifier("willThrow"),
                     SGM.Types.getEmptyTupleType(), {}, {exn});
+  }
+
+  // If we don't have an existential box, create one to jump to the throw
+  // destination.
+  SILBasicBlock &throwBB = *ThrowDest.getBlock();
+  if (!throwBB.getArguments().empty()) {
+    auto errorArg = throwBB.getArguments()[0];
+    SILType errorArgType = errorArg->getType();
+    if (exn->getType() != errorArgType) {
+      assert(errorArgType == existentialBoxType);
+
+      // FIXME: Callers should provide this conformance from places recorded in
+      // the AST.
+      ProtocolConformanceRef conformances[1] = {
+        getModule().getSwiftModule()->conformsToProtocol(
+          exn->getType().getASTType(), getASTContext().getErrorDecl())
+      };
+      exnMV = emitExistentialErasure(
+          loc,
+          exn->getType().getASTType(),
+          getTypeLowering(exn->getType()),
+          getTypeLowering(existentialBoxType),
+          getASTContext().AllocateCopy(conformances),
+          SGFContext(),
+          [&](SGFContext C) -> ManagedValue {
+            return ManagedValue::forForwardedRValue(*this, exn);
+          });
+
+      exn = exnMV.forward(*this);
+    }
   }
 
   // Branch to the cleanup destination.

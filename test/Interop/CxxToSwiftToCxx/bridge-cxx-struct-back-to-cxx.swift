@@ -20,6 +20,8 @@
 
 // RUN: %target-interop-build-clangxx -fsyntax-only -x c++-header %t/full-cxx-swift-cxx-bridging.h -std=gnu++20 -c -fmodules -fcxx-modules -I %t
 
+// XFAIL: OS=linux-android, OS=linux-androideabi
+
 //--- header.h
 
 struct Trivial {
@@ -37,7 +39,7 @@ namespace ns {
         T x;
 
         NonTrivialTemplate();
-        NonTrivialTemplate(const NonTrivialTemplate<T> &) = default;
+        NonTrivialTemplate(const NonTrivialTemplate<T> &other) : x(other.x) {}
         NonTrivialTemplate(NonTrivialTemplate<T> &&) = default;
         ~NonTrivialTemplate() {}
     };
@@ -46,6 +48,8 @@ namespace ns {
 
     struct NonTrivialImplicitMove {
         NonTrivialTemplate<int> member;
+
+        NonTrivialImplicitMove(const NonTrivialImplicitMove &other) : member(other.member) {}
     };
 
     #define IMMORTAL_REF                                \
@@ -77,6 +81,14 @@ namespace ns {
 }
 
 using SimpleTypedef = int;
+
+typedef struct { float column; } anonymousStruct;
+
+namespace ns {
+
+using anonStructInNS = struct { float row; };
+
+}
 
 //--- module.modulemap
 module CxxTest {
@@ -147,6 +159,12 @@ public func takeTrivial(_ x: Trivial) {
 public func takeTrivialInout(_ x: inout Trivial) {
 }
 
+@_expose(Cxx)
+public struct Strct {
+    public let transform: anonymousStruct
+    public let transform2: ns.anonStructInNS
+}
+
 // CHECK: #if __has_feature(objc_modules)
 // CHECK: #if __has_feature(objc_modules)
 // CHECK-NEXT: #if __has_warning("-Watimport-in-framework-header")
@@ -156,7 +174,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK-NEXT: #endif
 
 
-// CHECK: SWIFT_EXTERN void $s8UseCxxTy13retNonTrivialSo2nsO0031NonTrivialTemplateInt32_fbGJhubVyF(SWIFT_INDIRECT_RESULT void * _Nonnull) SWIFT_NOEXCEPT SWIFT_CALL; // retNonTrivial()
+// CHECK: SWIFT_EXTERN void $s8UseCxxTy13retNonTrivialSo2nsO0030NonTrivialTemplateCInt_hHAFhrbVyF(SWIFT_INDIRECT_RESULT void * _Nonnull) SWIFT_NOEXCEPT SWIFT_CALL; // retNonTrivial()
 // CHECK: SWIFT_EXTERN struct swift_interop_returnStub_UseCxxTy_uint32_t_0_4 $s8UseCxxTy10retTrivialSo0E0VyF(void) SWIFT_NOEXCEPT SWIFT_CALL; // retTrivial()
 
 // CHECK: ns::Immortal *_Nonnull retImmortal() noexcept SWIFT_SYMBOL({{.*}}) SWIFT_WARN_UNUSED_RESULT {
@@ -164,7 +182,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK-NEXT: }
 
 // CHECK:  ns::ImmortalTemplate<int> *_Nonnull retImmortalTemplate() noexcept SWIFT_SYMBOL({{.*}}) SWIFT_WARN_UNUSED_RESULT {
-// CHECK-NEXT: return _impl::$s8UseCxxTy19retImmortalTemplateSo2nsO0029ImmortalTemplateInt32_hEFAhqbVyF();
+// CHECK-NEXT: return _impl::$s8UseCxxTy19retImmortalTemplateSo2nsO0028ImmortalTemplateCInt_jBAGgnbVyF();
 // CHECK-NEXT: }
 
 // CHECK: } // end namespace
@@ -173,7 +191,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK-NEXT: namespace _impl {
 // CHECK-EMPTY:
 // CHECK-NEXT: // Type metadata accessor for NonTrivialTemplateInt
-// CHECK-NEXT: SWIFT_EXTERN swift::_impl::MetadataResponseTy $sSo2nsO0031NonTrivialTemplateInt32_fbGJhubVMa(swift::_impl::MetadataRequestTy) SWIFT_NOEXCEPT SWIFT_CALL;
+// CHECK-NEXT: SWIFT_EXTERN swift::_impl::MetadataResponseTy $sSo2nsO0030NonTrivialTemplateCInt_hHAFhrbVMa(swift::_impl::MetadataRequestTy) SWIFT_NOEXCEPT SWIFT_CALL;
 // CHECK-EMPTY:
 // CHECK-EMPTY:
 // CHECK-NEXT: } // namespace _impl
@@ -185,7 +203,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK-NEXT: template<>
 // CHECK-NEXT: struct TypeMetadataTrait<ns::NonTrivialTemplateInt> {
 // CHECK-NEXT:   static SWIFT_INLINE_THUNK void * _Nonnull getTypeMetadata() {
-// CHECK-NEXT:     return _impl::$sSo2nsO0031NonTrivialTemplateInt32_fbGJhubVMa(0)._0;
+// CHECK-NEXT:     return _impl::$sSo2nsO0030NonTrivialTemplateCInt_hHAFhrbVMa(0)._0;
 // CHECK-NEXT:   }
 // CHECK-NEXT: };
 // CHECK-NEXT: namespace _impl{
@@ -200,7 +218,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK: SWIFT_INLINE_THUNK ns::NonTrivialTemplate<int> retNonTrivial() noexcept SWIFT_SYMBOL({{.*}}) SWIFT_WARN_UNUSED_RESULT {
 // CHECK-NEXT: alignas(alignof(ns::NonTrivialTemplate<int>)) char storage[sizeof(ns::NonTrivialTemplate<int>)];
 // CHECK-NEXT: auto * _Nonnull storageObjectPtr = reinterpret_cast<ns::NonTrivialTemplate<int> *>(storage);
-// CHECK-NEXT: _impl::$s8UseCxxTy13retNonTrivialSo2nsO0031NonTrivialTemplateInt32_fbGJhubVyF(storage);
+// CHECK-NEXT: _impl::$s8UseCxxTy13retNonTrivialSo2nsO0030NonTrivialTemplateCInt_hHAFhrbVyF(storage);
 // CHECK-NEXT: ns::NonTrivialTemplate<int> result(static_cast<ns::NonTrivialTemplate<int> &&>(*storageObjectPtr));
 // CHECK-NEXT: storageObjectPtr->~NonTrivialTemplate();
 // CHECK-NEXT: return result;
@@ -268,7 +286,7 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK-NEXT: }
 
 // CHECK: void takeImmortalTemplate(ns::ImmortalTemplate<int> *_Nonnull x) noexcept SWIFT_SYMBOL({{.*}}) {
-// CHECK-NEXT:   return _impl::$s8UseCxxTy20takeImmortalTemplateyySo2nsO0029ImmortalTemplateInt32_hEFAhqbVF(x);
+// CHECK-NEXT:   return _impl::$s8UseCxxTy20takeImmortalTemplateyySo2nsO0028ImmortalTemplateCInt_jBAGgnbVF(x);
 // CHECK-NEXT: }
 
 // CHECK: SWIFT_INLINE_THUNK void takeNonTrivial2(const ns::NonTrivialTemplate<ns::TrivialinNS>& x) noexcept SWIFT_SYMBOL({{.*}}) {
@@ -282,3 +300,9 @@ public func takeTrivialInout(_ x: inout Trivial) {
 // CHECK: SWIFT_INLINE_THUNK void takeTrivialInout(Trivial& x) noexcept SWIFT_SYMBOL({{.*}}) {
 // CHECK-NEXT:   return _impl::$s8UseCxxTy16takeTrivialInoutyySo0E0VzF(swift::_impl::getOpaquePointer(x));
 // CHECK-NEXT: }
+
+// CHECK: SWIFT_INLINE_THUNK anonymousStruct Strct::getTransform() const {
+// CHECK-NEXT: alignas(alignof(anonymousStruct)) char storage[sizeof(anonymousStruct)];
+
+// CHECK: SWIFT_INLINE_THUNK ns::anonStructInNS Strct::getTransform2() const {
+// CHECK-NEXT: alignas(alignof(ns::anonStructInNS)) char storage[sizeof(ns::anonStructInNS)];

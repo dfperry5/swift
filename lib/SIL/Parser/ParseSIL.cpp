@@ -30,6 +30,7 @@
 #include "swift/SIL/AbstractionPattern.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/OwnershipUtils.h"
+#include "swift/SIL/ParseTestSpecification.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILDebugScope.h"
@@ -187,6 +188,8 @@ namespace swift {
 
     /// Data structures used to perform name lookup for local values.
     llvm::StringMap<ValueBase*> LocalValues;
+    llvm::StringMap<llvm::SmallVector<TestSpecificationInst *>>
+        TestSpecsWithRefs;
     llvm::StringMap<SourceLoc> ForwardRefLocalValues;
 
     Type performTypeResolution(TypeRepr *TyR, bool IsSILType,
@@ -799,12 +802,24 @@ void SILParser::setLocalValue(ValueBase *Value, StringRef Name,
                  Value->getType().getRawASTType());
       HadError = true;
     } else {
+      if (TestSpecsWithRefs.find(Name) != TestSpecsWithRefs.end()) {
+        for (auto *tsi : TestSpecsWithRefs[Name]) {
+          tsi->setValueForName(Name, Value);
+        }
+      }
+
       // Forward references only live here if they have a single result.
       Entry->replaceAllUsesWith(Value);
       ::delete cast<PlaceholderValue>(Entry);
     }
     Entry = Value;
     return;
+  }
+
+  if (TestSpecsWithRefs.find(Name) != TestSpecsWithRefs.end()) {
+    for (auto *tsi : TestSpecsWithRefs[Name]) {
+      tsi->setValueForName(Name, Value);
+    }
   }
 
   // Otherwise, just store it in our map.
@@ -1706,9 +1721,6 @@ bool SILParser::parseSILDeclRef(SILDeclRef &Result,
         ParseState = 1;
       } else if (!ParseState && Id.str() == "defaultarg") {
         Kind = SILDeclRef::Kind::IVarInitializer;
-        ParseState = 1;
-      } else if (!ParseState && Id.str() == "attrgenerator") {
-        Kind = SILDeclRef::Kind::RuntimeAttributeGenerator;
         ParseState = 1;
       } else if (!ParseState && Id.str() == "propertyinit") {
         Kind = SILDeclRef::Kind::StoredPropertyInitializer;
@@ -3594,6 +3606,17 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     ResultVal = B.createTuplePackElementAddr(InstLoc, index, tuple, elementType);
     break;
   }
+  case SILInstructionKind::TuplePackExtractInst: {
+    SILValue index, tuple;
+    SILType elementType;
+    if (parseValueRef(index, SILType::getPackIndexType(P.Context), InstLoc,
+                      B) ||
+        parseVerbatim("of") || parseTypedValueRef(tuple, B) ||
+        parseVerbatim("as") || parseSILType(elementType))
+      return true;
+    ResultVal = B.createTuplePackExtract(InstLoc, index, tuple, elementType);
+    break;
+  }
 
 #define UNARY_INSTRUCTION(ID)                                                  \
   case SILInstructionKind::ID##Inst:                                           \
@@ -3635,18 +3658,22 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     UNARY_INSTRUCTION(DestructureStruct)
     UNARY_INSTRUCTION(DestructureTuple)
     UNARY_INSTRUCTION(ExtractExecutor)
+    UNARY_INSTRUCTION(EndInitLetRef)
     REFCOUNTING_INSTRUCTION(UnmanagedReleaseValue)
     REFCOUNTING_INSTRUCTION(UnmanagedRetainValue)
     REFCOUNTING_INSTRUCTION(UnmanagedAutoreleaseValue)
     REFCOUNTING_INSTRUCTION(StrongRetain)
     REFCOUNTING_INSTRUCTION(StrongRelease)
     REFCOUNTING_INSTRUCTION(AutoreleaseValue)
-    REFCOUNTING_INSTRUCTION(SetDeallocating)
     REFCOUNTING_INSTRUCTION(ReleaseValue)
     REFCOUNTING_INSTRUCTION(RetainValue)
     REFCOUNTING_INSTRUCTION(ReleaseValueAddr)
     REFCOUNTING_INSTRUCTION(RetainValueAddr)
+    UNARY_INSTRUCTION(UnownedCopyValue)
+    UNARY_INSTRUCTION(WeakCopyValue)
 #define UNCHECKED_REF_STORAGE(Name, ...)                                       \
+  UNARY_INSTRUCTION(StrongCopy##Name##Value)
+#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                          \
   UNARY_INSTRUCTION(StrongCopy##Name##Value)
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
   REFCOUNTING_INSTRUCTION(StrongRetain##Name)                                  \
@@ -3750,7 +3777,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
   case SILInstructionKind::TestSpecificationInst: {
     // Parse the specification string.
     if (P.Tok.getKind() != tok::string_literal) {
-      P.diagnose(P.Tok, diag::expected_sil_test_specification_body);
+      P.diagnose(P.Tok, diag::expected_sil_specify_test_body);
       return true;
     }
     // Drop the double quotes.
@@ -3758,7 +3785,33 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     auto ArgumentsSpecification =
       P.Tok.getText().drop_front(numQuotes).drop_back(numQuotes).trim();
     P.consumeToken(tok::string_literal);
-    ResultVal = B.createTestSpecificationInst(InstLoc, ArgumentsSpecification);
+    auto *tsi = B.createTestSpecificationInst(InstLoc, ArgumentsSpecification);
+    SmallVector<StringRef, 4> components;
+    test::getTestSpecificationComponents(ArgumentsSpecification, components);
+    for (auto component : components) {
+      auto offset = 0;
+      size_t nameStart = StringRef::npos;
+      while ((nameStart = component.find_if([](char c) { return c == '%'; },
+                                            offset)) != StringRef::npos) {
+        auto nameEnd = component.find_if_not(
+            [](char c) { return clang::isAsciiIdentifierContinue(c); },
+            nameStart + 1);
+        if (nameEnd == StringRef::npos)
+          nameEnd = component.size();
+        auto name = component.substr(nameStart, nameEnd);
+        component = component.drop_front(nameEnd);
+        if (nameStart + 1 == nameEnd) {
+          continue;
+        }
+        auto *&entry = LocalValues[name];
+        if (entry) {
+          tsi->setValueForName(name, entry);
+        } else {
+          TestSpecsWithRefs[name].push_back(tsi);
+        }
+      }
+    }
+    ResultVal = tsi;
     break;
   }
 
@@ -3826,7 +3879,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     break;
   }
 
-  case SILInstructionKind::MarkMustCheckInst: {
+  case SILInstructionKind::MarkUnresolvedNonCopyableValueInst: {
     StringRef AttrName;
     if (!parseSILOptional(AttrName, *this)) {
       auto diag = diag::sil_markmustcheck_requires_attribute;
@@ -3834,7 +3887,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
       return true;
     }
 
-    using CheckKind = MarkMustCheckInst::CheckKind;
+    using CheckKind = MarkUnresolvedNonCopyableValueInst::CheckKind;
     CheckKind CKind =
         llvm::StringSwitch<CheckKind>(AttrName)
             .Case("consumable_and_assignable",
@@ -3857,7 +3910,7 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
     if (parseSILDebugLocation(InstLoc, B))
       return true;
 
-    auto *MVI = B.createMarkMustCheckInst(InstLoc, Val, CKind);
+    auto *MVI = B.createMarkUnresolvedNonCopyableValueInst(InstLoc, Val, CKind);
     ResultVal = MVI;
     break;
   }
@@ -4083,6 +4136,17 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
       return true;
 
     ResultVal = B.createMarkDependence(InstLoc, Val, Base, forwardingOwnership);
+    break;
+  }
+
+  case SILInstructionKind::BeginDeallocRefInst: {
+    SILValue allocation;
+    if (parseTypedValueRef(Val, B) || parseVerbatim("of") ||
+        parseTypedValueRef(allocation, B) ||
+        parseSILDebugLocation(InstLoc, B))
+      return true;
+
+    ResultVal = B.createBeginDeallocRef(InstLoc, Val, allocation);
     break;
   }
 
@@ -4489,6 +4553,9 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
         parseSILOptional(isExact, *this, "exact"))
       return true;
 
+    if (parseASTType(SourceType) || parseVerbatim("in"))
+      return true;
+
     if (parseTypedValueRef(Val, B) || parseVerbatim("to") ||
         parseASTType(TargetType) || parseConditionalBranchDestinations())
       return true;
@@ -4501,8 +4568,9 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
 
     auto opaque = Lowering::AbstractionPattern::getOpaque();
     ResultVal = B.createCheckedCastBranch(
-        InstLoc, isExact, Val, F->getLoweredType(opaque, TargetType),
-        TargetType, getBBForReference(SuccessBBName, SuccessBBLoc),
+        InstLoc, isExact, Val, SourceType,
+        F->getLoweredType(opaque, TargetType), TargetType,
+        getBBForReference(SuccessBBName, SuccessBBLoc),
         getBBForReference(FailureBBName, FailureBBLoc), forwardingOwnership);
     break;
   }
@@ -4745,12 +4813,15 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
   }
 
   case SILInstructionKind::AssignOrInitInst: {
+    ValueDecl *Prop;
     SILValue Self, Src, InitFn, SetFn;
     AssignOrInitInst::Mode Mode;
     llvm::SmallVector<unsigned, 2> assignments;
 
     if (parseAssignOrInitMode(Mode, *this) ||
         parseAssignOrInitAssignments(assignments, *this) ||
+        parseSILDottedPath(Prop) ||
+        P.parseToken(tok::comma, diag::expected_tok_in_sil_instr, ",") ||
         parseVerbatim("self") || parseTypedValueRef(Self, B) ||
         P.parseToken(tok::comma, diag::expected_tok_in_sil_instr, ",") ||
         parseVerbatim("value") || parseTypedValueRef(Src, B) ||
@@ -4761,7 +4832,8 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
         parseSILDebugLocation(InstLoc, B))
       return true;
 
-    auto *AI = B.createAssignOrInit(InstLoc, Self, Src, InitFn, SetFn, Mode);
+    auto *AI = B.createAssignOrInit(InstLoc, cast<VarDecl>(Prop), Self, Src,
+                                    InitFn, SetFn, Mode);
 
     for (unsigned index : assignments)
       AI->markAsInitialized(index);
@@ -5968,8 +6040,8 @@ bool SILParser::parseSpecificSILInstruction(SILBuilder &B,
 
       if (Opcode == SILInstructionKind::SelectEnumInst) {
         ResultVal = B.createSelectEnum(InstLoc, Val, ResultType, DefaultValue,
-                                       CaseValues, llvm::None, ProfileCounter(),
-                                       forwardingOwnership);
+                                       CaseValues, llvm::None,
+                                       ProfileCounter());
       } else
         ResultVal = B.createSelectEnumAddr(InstLoc, Val, ResultType,
                                            DefaultValue, CaseValues);
@@ -7377,7 +7449,7 @@ static llvm::Optional<VarDecl *> lookupGlobalDecl(Identifier GlobalName,
   // doesn't matter which declaration we use).
   for (ValueDecl *ValDecl : CurModuleResults) {
     auto *VD = cast<VarDecl>(ValDecl);
-    CanType DeclTy = VD->getType()->getCanonicalType();
+    CanType DeclTy = VD->getTypeInContext()->getCanonicalType();
     if (DeclTy == GlobalType.getASTType()
         && getDeclSILLinkage(VD) == GlobalLinkage) {
       return VD;

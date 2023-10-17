@@ -919,10 +919,10 @@ namespace {
             field.getTypeInfo().buildTypeLayoutEntry(IGM, fieldTy, useStructLayouts));
       }
 
-      if (fields.size() == 1 && isFixedSize() &&
-          getBestKnownAlignment() == *fields[0]->fixedAlignment(IGM)) {
-        return fields[0];
-      }
+      // if (fields.size() == 1 && isFixedSize() &&
+      //     getBestKnownAlignment() == *fields[0]->fixedAlignment(IGM)) {
+      //   return fields[0];
+      // }
 
       return IGM.typeLayoutCache.getOrCreateAlignedGroupEntry(
           fields, T, getBestKnownAlignment().getValue(), *this);
@@ -988,6 +988,35 @@ namespace {
 
       if (!areFieldsABIAccessible()) {
         return IGM.typeLayoutCache.getOrCreateResilientEntry(T);
+      }
+
+      auto decl = T.getASTType()->getStructOrBoundGenericStruct();
+      auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
+
+      // If we have a raw layout struct who is fixed size, it means the
+      // layout of the struct is fully concrete.
+      if (rawLayout) {
+        // Defer to this fixed type info for type layout if the raw layout
+        // specifies size and alignment.
+        if (rawLayout->getSizeAndAlignment()) {
+          return IGM.typeLayoutCache.getOrCreateTypeInfoBasedEntry(*this, T);
+        }
+
+        auto likeType = rawLayout->getResolvedLikeType(decl)->getCanonicalType();
+        SILType loweredLikeType = IGM.getLoweredType(likeType);
+
+        // The given struct type T that we're building is fully concrete, but
+        // our like type is still in terms of the potential archetype of the
+        // type.
+        auto subs = T.getASTType()->getContextSubstitutionMap(
+          IGM.getSwiftModule(), decl);
+
+        loweredLikeType = loweredLikeType.subst(IGM.getSILModule(), subs);
+
+        // Array like raw layouts are still handled correctly even though the
+        // type layout entry is only that of the like type.
+        return IGM.getTypeInfo(loweredLikeType)
+            .buildTypeLayoutEntry(IGM, loweredLikeType, useStructLayouts);
       }
 
       std::vector<TypeLayoutEntry *> fields;
@@ -1080,6 +1109,35 @@ namespace {
                           bool useStructLayouts) const override {
       if (!areFieldsABIAccessible()) {
         return IGM.typeLayoutCache.getOrCreateResilientEntry(T);
+      }
+
+      auto decl = T.getASTType()->getStructOrBoundGenericStruct();
+      auto rawLayout = decl->getAttrs().getAttribute<RawLayoutAttr>();
+
+      // If we have a raw layout struct who is non-fixed size, it means the
+      // layout of the struct is dependent on the archetype of the thing it's
+      // like.
+      if (rawLayout) {
+        // Note: We don't have to handle the size and alignment case here for
+        // raw layout because those are always fixed, so only dependent layouts
+        // will be non-fixed.
+
+        auto likeType = rawLayout->getResolvedLikeType(decl)->getCanonicalType();
+        SILType loweredLikeType = IGM.getLoweredType(likeType);
+
+        // The given struct type T that we're building may be in a generic
+        // environment that is different than that which was built our
+        // resolved rawLayout like type. Map our like type into the given
+        // environment.
+        auto subs = T.getASTType()->getContextSubstitutionMap(
+          IGM.getSwiftModule(), decl);
+
+        loweredLikeType = loweredLikeType.subst(IGM.getSILModule(), subs);
+
+        // Array like raw layouts are still handled correctly even though the
+        // type layout entry is only that of the like type.
+        return IGM.getTypeInfo(loweredLikeType)
+            .buildTypeLayoutEntry(IGM, loweredLikeType, useStructLayouts);
       }
 
       std::vector<TypeLayoutEntry *> fields;
@@ -1244,8 +1302,7 @@ namespace {
     }
 
     StructLayout performLayout(ArrayRef<const TypeInfo *> fieldTypes) {
-      return StructLayout(IGM, TheStruct->getAnyNominal(),
-                          LayoutKind::NonHeapObject,
+      return StructLayout(IGM, TheStruct, LayoutKind::NonHeapObject,
                           LayoutStrategy::Optimal, fieldTypes, StructTy);
     }
   };
@@ -1569,7 +1626,8 @@ const TypeInfo *irgen::getPhysicalStructFieldTypeInfo(IRGenModule &IGM,
 }
 
 void IRGenModule::emitStructDecl(StructDecl *st) {
-  if (!IRGen.hasLazyMetadata(st)) {
+  if (!IRGen.hasLazyMetadata(st) &&
+      !st->getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
     emitStructMetadata(*this, st);
     emitFieldDescriptor(st);
   }
@@ -1578,7 +1636,7 @@ void IRGenModule::emitStructDecl(StructDecl *st) {
 }
 
 void IRGenModule::maybeEmitOpaqueTypeDecl(OpaqueTypeDecl *opaque) {
-  if (Lowering::shouldSkipLowering(opaque))
+  if (!opaque->isAvailableDuringLowering())
     return;
 
   if (IRGen.Opts.EnableAnonymousContextMangledNames) {

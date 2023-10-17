@@ -1,5 +1,4 @@
 target_sources(swiftSIL PRIVATE
-  AddressWalker.cpp
   BasicBlockUtils.cpp
   BitDataflow.cpp
   DebugUtils.cpp
@@ -8,6 +7,7 @@ target_sources(swiftSIL PRIVATE
   FieldSensitivePrunedLiveness.cpp
   GenericSpecializationMangler.cpp
   InstructionUtils.cpp
+  InstWrappers.cpp
   LoopInfo.cpp
   MemAccessUtils.cpp
   MemoryLocations.cpp
@@ -22,4 +22,6 @@ target_sources(swiftSIL PRIVATE
   SILBridging.cpp
   SILInstructionWorklist.cpp
   SILRemarkStreamer.cpp
-  ValueUtils.cpp)
+  Test.cpp
+  ValueUtils.cpp
+)

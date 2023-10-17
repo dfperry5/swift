@@ -1,7 +1,12 @@
 // RUN: %empty-directory(%t)
+
 // RUN: %target-swift-frontend -emit-module -emit-module-path %t/OtherActors.swiftmodule -module-name OtherActors %S/Inputs/OtherActors.swift -disable-availability-checking
-// RUN: %target-typecheck-verify-swift -I %t  -disable-availability-checking -warn-concurrency -parse-as-library
+
+// RUN: %target-swift-frontend -I %t  -disable-availability-checking -warn-concurrency -parse-as-library -emit-sil -o /dev/null -verify %s
+// RUN: %target-swift-frontend -I %t  -disable-availability-checking -warn-concurrency -parse-as-library -emit-sil -o /dev/null -verify -enable-experimental-feature SendNonSendable %s
+
 // REQUIRES: concurrency
+// REQUIRES: asserts
 
 import OtherActors // expected-remark{{add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'OtherActors'}}{{1-1=@preconcurrency }}
 
@@ -147,10 +152,11 @@ func checkIsolationValueType(_ formance: InferredFromConformance,
   _ = await ext.point // expected-warning {{non-sendable type 'Point' in implicitly asynchronous access to main actor-isolated property 'point' cannot cross actor boundary}}
   _ = await formance.counter
   _ = await anno.point // expected-warning {{non-sendable type 'Point' in implicitly asynchronous access to global actor 'SomeGlobalActor'-isolated property 'point' cannot cross actor boundary}}
-  _ = anno.counter
+  // expected-warning@-1 {{non-sendable type 'NoGlobalActorValueType' passed in implicitly asynchronous call to global actor 'SomeGlobalActor'-isolated property 'point' cannot cross actor boundary}}
+  _ = anno.counter // expected-warning {{non-sendable type 'NoGlobalActorValueType' passed in call to main actor-isolated property 'counter' cannot cross actor boundary}}
 
   // these will always need an await
-  _ = await (formance as MainCounter).counter
+  _ = await (formance as MainCounter).counter // expected-warning {{non-sendable type 'any MainCounter' passed in implicitly asynchronous call to main actor-isolated property 'counter' cannot cross actor boundary}}
   _ = await ext[1]
   _ = await formance.ticker
   _ = await ext.polygon // expected-warning {{non-sendable type '[Point]' in implicitly asynchronous access to main actor-isolated property 'polygon' cannot cross actor boundary}}
@@ -159,6 +165,7 @@ func checkIsolationValueType(_ formance: InferredFromConformance,
 }
 
 // check for instance members that do not need global-actor protection
+// expected-note@+1 2 {{consider making struct 'NoGlobalActorValueType' conform to the 'Sendable' protocol}}
 struct NoGlobalActorValueType {
   @SomeGlobalActor var point: Point // expected-warning {{stored property 'point' within struct cannot have a global actor; this is an error in Swift 6}}
 
@@ -465,7 +472,7 @@ func testGlobalActorClosures() {
     return 17
   }
 
-  acceptConcurrentClosure { @SomeGlobalActor in 5 } // expected-warning 2{{converting function value of type '@SomeGlobalActor @Sendable () -> Int' to '@Sendable () -> Int' loses global actor 'SomeGlobalActor'}}
+  acceptConcurrentClosure { @SomeGlobalActor in 5 } // expected-warning {{converting function value of type '@SomeGlobalActor @Sendable () -> Int' to '@Sendable () -> Int' loses global actor 'SomeGlobalActor'}}
 }
 
 @available(SwiftStdlib 5.1, *)
@@ -1256,7 +1263,8 @@ actor Counter {
 class C2 { }
 
 @SomeGlobalActor
-class C3: C2 { } // it's okay to add a global actor to a nonisolated class.
+class C3: C2 { }
+// expected-warning@-1 {{global actor 'SomeGlobalActor'-isolated class 'C3' has different actor isolation from nonisolated superclass 'C2'; this is an error in Swift 6}}
 
 @GenericGlobalActor<U>
 class GenericSuper<U> { }
@@ -1436,6 +1444,8 @@ class None {
 // try to add inferred isolation while overriding
 @MainActor
 class MA_None1: None {
+// expected-warning@-1 {{main actor-isolated class 'MA_None1' has different actor isolation from nonisolated superclass 'None'; this is an error in Swift 6}}
+
   // FIXME: bad note, since the problem is a mismatch in overridden vs inferred isolation; this wont help.
   // expected-note@+1 {{add '@MainActor' to make instance method 'method()' part of global actor 'MainActor'}}
   override func method() {
@@ -1465,6 +1475,8 @@ class None_MADirect: MADirect {
 
 @SomeGlobalActor
 class SGA_MADirect: MADirect {
+// expected-warning@-1 {{global actor 'SomeGlobalActor'-isolated class 'SGA_MADirect' has different actor isolation from nonisolated superclass 'MADirect'; this is an error in Swift 6}}
+
   // inferred-SomeGlobalActor vs overridden-MainActor = mainactor
   override func method1() { beets_ma() }
 
@@ -1488,5 +1500,33 @@ extension MyActor {
         }
       }
     }
+  }
+}
+
+@MainActor
+class SuperWithNonisolatedInit {
+  static func isolatedToMainActor() {}
+
+  // expected-note@+1 2 {{mutation of this property is only permitted within the actor}}
+  var x: Int = 0 {
+    didSet {
+      SuperWithNonisolatedInit.isolatedToMainActor()
+    }
+  }
+
+  nonisolated init() {}
+}
+
+class OverridesNonsiolatedInit: SuperWithNonisolatedInit {
+  override nonisolated init() {
+    super.init()
+
+    // expected-error@+1 {{main actor-isolated property 'x' can not be mutated from a non-isolated context}}
+    super.x = 10
+  }
+
+  nonisolated func f() {
+    // expected-error@+1 {{main actor-isolated property 'x' can not be mutated from a non-isolated context}}
+    super.x = 10
   }
 }

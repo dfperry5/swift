@@ -39,29 +39,29 @@ func borrowConsumeVal(_ x: borrowing SingleElt, _ y: consuming SingleElt) {}
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -101,29 +101,29 @@ func testGlobalClosureCaptureVar() {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -165,29 +165,29 @@ func testLocalLetClosureCaptureVar() {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -227,29 +227,29 @@ func testLocalVarClosureCaptureVar() {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -286,7 +286,7 @@ func testInOutVarClosureCaptureVar(_ f: inout () -> ()) {
 // CHECK:   mark_function_escape [[PROJECT]]
 // CHECK:   [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[BOX_COPY]])
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[FUNC_PROJECT]]
-// CHECK:   [[MARK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[MARK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[MARK]]
 // CHECK:   assign [[PAI]] to [[UNWRAP]]
 // CHECK:   end_access [[ACCESS]]
@@ -297,29 +297,29 @@ func testInOutVarClosureCaptureVar(_ f: inout () -> ()) {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -361,22 +361,22 @@ func testConsumingEscapeClosureCaptureVar(_ f: consuming @escaping () -> ()) {
 // CHECK: bb0([[BOX:%.*]] : @closureCapture
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK: } // end sil function '$s16moveonly_closure27testGlobalClosureCaptureLetyyFyycfU_'
@@ -409,22 +409,22 @@ func testGlobalClosureCaptureLet() {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK: } // end sil function '$s16moveonly_closure026testLocalLetClosureCaptureE0yyFyycfU_'
@@ -455,22 +455,22 @@ func testLocalLetClosureCaptureLet() {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]
@@ -504,22 +504,22 @@ func testLocalVarClosureCaptureLet() {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]
@@ -551,7 +551,7 @@ func testInOutVarClosureCaptureLet(_ f: inout () -> ()) {
 // CHECK:   mark_function_escape [[PROJECT]]
 // CHECK:   [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[BOX_COPY]])
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[FUNC_PROJECT]]
-// CHECK:   [[MARK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[MARK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[MARK]]
 // CHECK:   assign [[PAI]] to [[UNWRAP]]
 // CHECK:   end_access [[ACCESS]]
@@ -561,22 +561,22 @@ func testInOutVarClosureCaptureLet(_ f: inout () -> ()) {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]
@@ -605,7 +605,7 @@ func testConsumingEscapeClosureCaptureLet(_ f: consuming @escaping () -> ()) {
 // CHECK-LABEL: sil hidden [ossa] @$s16moveonly_closure29testGlobalClosureCaptureInOutyyAA9SingleEltVzF : $@convention(thin) (@inout SingleElt) -> () {
 // CHECK: bb0([[ARG:%.*]] :
 // CHECK: [[GLOBAL:%.*]] = global_addr @$s16moveonly_closure25globalClosureCaptureInOutyycvp :
-// CHECK: [[MARKED:%.*]] = mark_must_check [consumable_and_assignable] [[ARG]]
+// CHECK: [[MARKED:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 // CHECK: [[CLOSURE:%.*]] = function_ref @$s16moveonly_closure29testGlobalClosureCaptureInOutyyAA9SingleEltVzFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> ()
 // CHECK: [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[MARKED]])
 // CHECK: [[ACCESS:%.*]] = begin_access [modify] [dynamic] [[GLOBAL]]
@@ -614,7 +614,8 @@ func testConsumingEscapeClosureCaptureLet(_ f: consuming @escaping () -> ()) {
 // CHECK: } // end sil function '$s16moveonly_closure29testGlobalClosureCaptureInOutyyAA9SingleEltVzF'
 
 // CHECK-LABEL: sil private [ossa] @$s16moveonly_closure29testGlobalClosureCaptureInOutyyAA9SingleEltVzFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> () {
-// CHECK: bb0([[PROJECT:%.*]] : @closureCapture
+// CHECK: bb0([[ARG:%.*]] : @closureCapture
+// CHECK:   [[PROJECT:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[ACCESS]]
@@ -651,13 +652,14 @@ func testGlobalClosureCaptureInOut(_ x: inout SingleElt) {
 }
 
 // CHECK-LABEL: sil hidden [ossa] @$s16moveonly_closure31testLocalLetClosureCaptureInOutyyAA9SingleEltVzF : $@convention(thin) (@inout SingleElt) -> () {
-// CHECK: [[MARKED:%.*]] = mark_must_check [consumable_and_assignable] [[ARG]]
+// CHECK: [[MARKED:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 // CHECK: [[CLOSURE:%.*]] = function_ref @$s16moveonly_closure31testLocalLetClosureCaptureInOutyyAA9SingleEltVzFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> ()
 // CHECK: [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[MARKED]])
 // CHECK: } // end sil function '$s16moveonly_closure31testLocalLetClosureCaptureInOutyyAA9SingleEltVzF'
 //
 // CHECK-LABEL: sil private [ossa] @$s16moveonly_closure31testLocalLetClosureCaptureInOutyyAA9SingleEltVzFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> () {
-// CHECK: bb0([[PROJECT:%.*]] : @closureCapture
+// CHECK: bb0([[ARG:%.*]] : @closureCapture
+// CHECK:   [[PROJECT:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[ACCESS]]
@@ -694,7 +696,7 @@ func testLocalLetClosureCaptureInOut(_ x: inout SingleElt) {
 
 // CHECK-LABEL: sil hidden [ossa] @$s16moveonly_closure31testLocalVarClosureCaptureInOutyyAA9SingleEltVzF : $@convention(thin) (@inout SingleElt) -> () {
 // CHECK: bb0([[ARG:%.*]] :
-// CHECK: [[MARKED:%.*]] = mark_must_check [consumable_and_assignable] [[ARG]]
+// CHECK: [[MARKED:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 // CHECK: [[FUNC_BOX:%.*]] = alloc_box ${ var @callee_guaranteed () -> () }
 // CHECK: [[FUNC_BOX_BORROW:%.*]] = begin_borrow [lexical] [[FUNC_BOX]]
 // CHECK: [[FUNC_PROJECT:%.*]] = project_box [[FUNC_BOX_BORROW]]
@@ -704,7 +706,8 @@ func testLocalLetClosureCaptureInOut(_ x: inout SingleElt) {
 // CHECK: } // end sil function '$s16moveonly_closure31testLocalVarClosureCaptureInOutyyAA9SingleEltVzF'
 //
 // CHECK-LABEL: sil private [ossa] @$s16moveonly_closure31testLocalVarClosureCaptureInOutyyAA9SingleEltVzFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> () {
-// CHECK: bb0([[PROJECT:%.*]] : @closureCapture
+// CHECK: bb0([[ARG:%.*]] : @closureCapture
+// CHECK:   [[PROJECT:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[ACCESS]]
@@ -743,7 +746,7 @@ func testLocalVarClosureCaptureInOut(_ x: inout SingleElt) {
 
 // CHECK-LABEL: sil hidden [ossa] @$s16moveonly_closure026testInOutVarClosureCapturedE0yyyycz_AA9SingleEltVztF : $@convention(thin) (@inout @callee_guaranteed () -> (), @inout SingleElt) -> () {
 // CHECK: bb0([[F:%.*]] : $*@callee_guaranteed () -> (), [[PROJECT:%.*]] : $*SingleElt):
-// CHECK: [[MARK:%.*]] = mark_must_check [consumable_and_assignable] [[PROJECT]]
+// CHECK: [[MARK:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[PROJECT]]
 // CHECK: [[CLOSURE:%.*]] = function_ref @$s16moveonly_closure026testInOutVarClosureCapturedE0yyyycz_AA9SingleEltVztFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> ()
 // CHECK: [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[MARK]])
 // CHECK: [[ACCESS:%.*]] = begin_access [modify] [unknown] [[F]]
@@ -752,7 +755,8 @@ func testLocalVarClosureCaptureInOut(_ x: inout SingleElt) {
 // CHECK: } // end sil function '$s16moveonly_closure026testInOutVarClosureCapturedE0yyyycz_AA9SingleEltVztF'
 //
 // CHECK-LABEL: sil private [ossa] @$s16moveonly_closure026testInOutVarClosureCapturedE0yyyycz_AA9SingleEltVztFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> () {
-// CHECK: bb0([[PROJECT:%.*]] : @closureCapture
+// CHECK: bb0([[ARG:%.*]] : @closureCapture
+// CHECK:   [[PROJECT:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[ACCESS]]
@@ -796,18 +800,19 @@ func testInOutVarClosureCaptureInOut(_ f: inout () -> (), _ x: inout SingleElt) 
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[FUNC_PROJECT]]
 // CHECK:   store [[FUNC_ARG]] to [init] [[UNWRAP]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [consumable_and_assignable] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[PROJECT]]
 // CHECK:   [[CLOSURE:%.*]] = function_ref @$s16moveonly_closure38testConsumingEscapeClosureCaptureInOutyyyycn_AA9SingleEltVztFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> ()
 // CHECK:   [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[CHECK]])
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[FUNC_PROJECT]]
-// CHECK:   [[MARK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[MARK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[MARK]]
 // CHECK:   assign [[PAI]] to [[UNWRAP]]
 // CHECK:   end_access [[ACCESS]]
 // CHECK: } // end sil function '$s16moveonly_closure38testConsumingEscapeClosureCaptureInOutyyyycn_AA9SingleEltVztF'
 //
 // CHECK-LABEL: sil private [ossa] @$s16moveonly_closure38testConsumingEscapeClosureCaptureInOutyyyycn_AA9SingleEltVztFyycfU_ : $@convention(thin) (@inout_aliasable SingleElt) -> () {
-// CHECK: bb0([[PROJECT:%.*]] : @closureCapture
+// CHECK: bb0([[ARG:%.*]] : @closureCapture
+// CHECK:   [[PROJECT:%.*]] = mark_unresolved_non_copyable_value [consumable_and_assignable] [[ARG]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[ACCESS]]
@@ -865,29 +870,29 @@ func testConsumingEscapeClosureCaptureInOut(_ f: consuming @escaping () -> (), _
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -925,29 +930,29 @@ func testGlobalClosureCaptureConsuming(_ x: consuming SingleElt) {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -1000,29 +1005,29 @@ func testLocalLetClosureCaptureConsuming2(_ x: consuming SingleElt) -> (() -> ()
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -1058,7 +1063,7 @@ func testLocalVarClosureCaptureConsuming(_ x: consuming SingleElt) {
 // CHECK:   mark_function_escape [[PROJECT]]
 // CHECK:   [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[BOX_COPY]])
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[FUNC_PROJECT]]
-// CHECK:   [[MARK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[MARK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[MARK]]
 // CHECK:   assign [[PAI]] to [[UNWRAP]]
 // CHECK:   end_access [[ACCESS]]
@@ -1069,29 +1074,29 @@ func testLocalVarClosureCaptureConsuming(_ x: consuming SingleElt) {
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   destroy_value [[LOADED]]
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[LOADED:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_access [[ACCESS]]
 //
 // CHECK:   [[READ_ACCESS:%.*]] = begin_access [read] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[READ_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[READ_ACCESS]]
 // CHECK:   [[LOADED_READ:%.*]] = load [copy] [[CHECK]]
 // CHECK:   [[DEINIT_ACCESS:%.*]] = begin_access [deinit] [unknown] [[PROJECT]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [assignable_but_not_consumable] [[DEINIT_ACCESS]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[DEINIT_ACCESS]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [take] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_access [[DEINIT_ACCESS]]
@@ -1130,22 +1135,22 @@ func testConsumingEscapeClosureCaptureConsuming(_ f: consuming @escaping () -> (
 // CHECK: bb0([[BOX:%.*]] : @closureCapture
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK: } // end sil function '$s16moveonly_closure29testGlobalClosureCaptureOwnedyyAA9SingleEltVnFyycfU_'
@@ -1176,22 +1181,22 @@ func testGlobalClosureCaptureOwned(_ x: __owned SingleElt) {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK: } // end sil function '$s16moveonly_closure31testLocalLetClosureCaptureOwnedyyAA9SingleEltVnFyycfU_'
@@ -1220,22 +1225,22 @@ func testLocalLetClosureCaptureOwned(_ x: __owned SingleElt) {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]
@@ -1267,22 +1272,22 @@ func testLocalVarClosureCaptureOwned(_ x: __owned SingleElt) {
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]
@@ -1312,7 +1317,7 @@ func testInOutVarClosureCaptureOwned(_ f: inout () -> (), _ x: __owned SingleElt
 // CHECK:   mark_function_escape [[PROJECT]]
 // CHECK:   [[PAI:%.*]] = partial_apply [callee_guaranteed] [[CLOSURE]]([[BOX_COPY]])
 // CHECK:   [[ACCESS:%.*]] = begin_access [modify] [unknown] [[FUNC_PROJECT]]
-// CHECK:   [[MARK:%.*]] = mark_must_check [assignable_but_not_consumable] [[ACCESS]]
+// CHECK:   [[MARK:%.*]] = mark_unresolved_non_copyable_value [assignable_but_not_consumable] [[ACCESS]]
 // CHECK:   [[UNWRAP:%.*]] = moveonlywrapper_to_copyable_addr [[MARK]]
 // CHECK:   assign [[PAI]] to [[UNWRAP]]
 // CHECK:   end_access [[ACCESS]]
@@ -1322,22 +1327,22 @@ func testInOutVarClosureCaptureOwned(_ f: inout () -> (), _ x: __owned SingleElt
 // CHECK: bb0([[BOX:%.*]] :
 // CHECK:   [[PROJECT:%.*]] = project_box [[BOX]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load_borrow [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 // CHECK:   end_borrow [[LOADED]]
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED]])
 //
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_READ:%.*]] = load_borrow [[CHECK]]
-// CHECK:   [[CHECK:%.*]] = mark_must_check [no_consume_or_assign] [[PROJECT]]
+// CHECK:   [[CHECK:%.*]] = mark_unresolved_non_copyable_value [no_consume_or_assign] [[PROJECT]]
 // CHECK:   [[LOADED_TAKE:%.*]] = load [copy] [[CHECK]]
 // CHECK:   apply {{%.*}}([[LOADED_READ]], [[LOADED_TAKE]])
 // CHECK:   end_borrow [[LOADED_READ]]

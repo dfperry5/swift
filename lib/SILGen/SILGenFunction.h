@@ -22,6 +22,7 @@
 #include "SILGen.h"
 #include "SILGenBuilder.h"
 #include "swift/AST/AnyFunctionRef.h"
+#include "swift/Basic/NoDiscard.h"
 #include "swift/Basic/ProfileCounter.h"
 #include "swift/Basic/Statistic.h"
 #include "swift/SIL/SILBuilder.h"
@@ -353,9 +354,10 @@ public:
   struct SingleValueStmtInitialization {
     /// The target expressions to be used for initialization.
     SmallPtrSet<Expr *, 4> Exprs;
-    Initialization *Init;
+    SILValue InitializationBuffer;
 
-    SingleValueStmtInitialization(Initialization *init) : Init(init) {}
+    SingleValueStmtInitialization(SILValue buffer)
+      : InitializationBuffer(buffer) {}
   };
 
   /// A stack of active SingleValueStmtExpr initializations that may be
@@ -593,7 +595,8 @@ public:
   /// Tracer object for counting SIL (and other events) caused by this instance.
   FrontendStatsTracer StatsTracer;
 
-  SILGenFunction(SILGenModule &SGM, SILFunction &F, DeclContext *DC);
+  SILGenFunction(SILGenModule &SGM, SILFunction &F, DeclContext *DC,
+                 bool IsEmittingTopLevelCode = false);
   ~SILGenFunction();
   
   /// Return a stable reference to the current cleanup.
@@ -692,6 +695,9 @@ public:
     return SGM.Types.getConstantInfo(context, constant);
   }
 
+  bool isEmittingTopLevelCode() { return IsEmittingTopLevelCode; }
+  void stopEmittingTopLevelCode() { IsEmittingTopLevelCode = false; }
+
   llvm::Optional<SILAccessEnforcement>
   getStaticEnforcement(VarDecl *var = nullptr);
   llvm::Optional<SILAccessEnforcement>
@@ -713,6 +719,8 @@ public:
                                       bool ForMetaInstruction = false);
 
 private:
+  bool IsEmittingTopLevelCode;
+
   const SILDebugScope *getOrCreateScope(SourceLoc SLoc);
   const SILDebugScope *getMacroScope(SourceLoc SLoc);
   const SILDebugScope *
@@ -741,7 +749,7 @@ public:
   /// Check to see if an initalization for a SingleValueStmtExpr is active, and
   /// if the provided expression is for one of its branches. If so, returns the
   /// initialization to use for the expression. Otherwise returns \c nullptr.
-  Initialization *getSingleValueStmtInit(Expr *E);
+  std::unique_ptr<Initialization> getSingleValueStmtInit(Expr *E);
 
   //===--------------------------------------------------------------------===//
   // Entry points for codegen
@@ -801,6 +809,22 @@ public:
   void emitMemberInitializers(DeclContext *dc, VarDecl *selfDecl,
                               NominalTypeDecl *nominal);
 
+  /// Generates code to initialize stored property from its
+  /// initializer.
+  ///
+  /// \param dc The DeclContext containing the current function.
+  /// \param selfDecl The 'self' declaration within the current function.
+  /// \param field The stored property that has to be initialized.
+  /// \param substitutions The substitutions to apply to initializer and setter.
+  void emitMemberInitializer(DeclContext *dc, VarDecl *selfDecl,
+                             PatternBindingDecl *field,
+                             SubstitutionMap substitutions);
+
+  void emitMemberInitializationViaInitAccessor(DeclContext *dc,
+                                               VarDecl *selfDecl,
+                                               PatternBindingDecl *member,
+                                               SubstitutionMap subs);
+
   /// Emit a method that initializes the ivars of a class.
   void emitIVarInitializer(SILDeclRef ivarInitializer);
 
@@ -812,6 +836,22 @@ public:
   /// with either argument (if property appears in `acesses` list`) or result
   /// value assignment.
   void emitInitAccessor(AccessorDecl *accessor);
+
+  /// Generates code to emit the given setter reference to the given base value.
+  SILValue emitApplyOfSetterToBase(SILLocation loc, SILDeclRef setter,
+                                   ManagedValue base,
+                                   SubstitutionMap substitutions);
+
+  /// Emit `assign_or_init` instruction that is going to either initialize
+  /// or assign the given value to the given field.
+  ///
+  /// \param loc The location to use for the instruction.
+  /// \param selfValue The 'self' value.
+  /// \param field The field to assign or initialize.
+  /// \param newValue the value to assign/initialize the field with.
+  /// \param substitutions The substitutions to apply to initializer and setter.
+  void emitAssignOrInit(SILLocation loc, ManagedValue selfValue, VarDecl *field,
+                        ManagedValue newValue, SubstitutionMap substitutions);
 
   /// Generates code to destroy the instance variables of a class.
   ///
@@ -883,6 +923,9 @@ public:
   /// Generate code to obtain the address of the given global variable.
   ManagedValue emitGlobalVariableRef(SILLocation loc, VarDecl *var,
                                      llvm::Optional<ActorIsolation> actorIso);
+
+  void emitMarkFunctionEscapeForTopLevelCodeGlobals(SILLocation Loc,
+                                                    CaptureInfo CaptureInfo);
 
   /// Generate a lazy global initializer.
   void emitLazyGlobalInitializer(PatternBindingDecl *binding,
@@ -1129,12 +1172,14 @@ public:
   /// \param directResultType  If given a value, the epilog block will be
   ///                    created with arguments for each direct result of this
   ///                    function, corresponding to the formal return type.
-  /// \param isThrowing  If true, create an error epilog block.
+  /// \param exnType  If not None, create an error epilog block with the given
+  ///                 exception type.
   /// \param L           The SILLocation which should be associated with
   ///                    cleanup instructions.
-  void prepareEpilog(llvm::Optional<Type> directResultType, bool isThrowing,
+  void prepareEpilog(llvm::Optional<Type> directResultType, 
+                     llvm::Optional<Type> exnType,
                      CleanupLocation L);
-  void prepareRethrowEpilog(CleanupLocation l);
+  void prepareRethrowEpilog(Type exnType, CleanupLocation l);
   void prepareCoroutineUnwindEpilog(CleanupLocation l);
   
   /// Branch to and emit the epilog basic block. This will fuse
@@ -1655,9 +1700,13 @@ public:
                                      Type resultType,
                                      RValue &&operand);
 
-  ManagedValue emitManagedRetain(SILLocation loc, SILValue v);
-  ManagedValue emitManagedRetain(SILLocation loc, SILValue v,
-                                 const TypeLowering &lowering);
+  ManagedValue emitManagedCopy(SILLocation loc, SILValue v);
+  ManagedValue emitManagedCopy(SILLocation loc, SILValue v,
+                               const TypeLowering &lowering);
+
+  ManagedValue emitManagedFormalEvaluationCopy(SILLocation loc, SILValue v);
+  ManagedValue emitManagedFormalEvaluationCopy(SILLocation loc, SILValue v,
+                                               const TypeLowering &lowering);
 
   ManagedValue emitManagedLoadCopy(SILLocation loc, SILValue v);
   ManagedValue emitManagedLoadCopy(SILLocation loc, SILValue v,
@@ -2210,7 +2259,7 @@ public:
   /// Used for emitting SILArguments of bare functions, such as thunks.
   void collectThunkParams(
       SILLocation loc, SmallVectorImpl<ManagedValue> &params,
-      SmallVectorImpl<SILArgument *> *indirectResultParams = nullptr);
+      SmallVectorImpl<ManagedValue> *indirectResultParams = nullptr);
 
   /// Build the type of a function transformation thunk.
   CanSILFunctionType buildThunkType(CanSILFunctionType &sourceType,
@@ -2468,6 +2517,13 @@ public:
                                              CanPackType formalPackType,
                                              unsigned componentIndex);
 
+  /// Enter a cleanup to destroy the preceding components of a pack,
+  /// leading up to (but not including) a particular component index.
+  CleanupHandle
+  enterDestroyPrecedingPackComponentsCleanup(SILValue addr,
+                                             CanPackType formalPackType,
+                                             unsigned componentIndex);
+
   /// Enter a cleanup to destroy the preceding values in a pack-expansion
   /// component of a tuple.
   ///
@@ -2719,7 +2775,8 @@ public:
   void emitDestroyPack(SILLocation loc,
                        SILValue packAddr,
                        CanPackType formalPackType,
-                       unsigned firstComponentIndex = 0);
+                       unsigned beginIndex,
+                       unsigned endIndex);
 
   /// Emit instructions to destroy a suffix of a tuple value.
   ///

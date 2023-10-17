@@ -56,9 +56,7 @@ QueryTypeSubstitutionMapOrIdentity::operator()(SubstitutableType *type) const {
   if (known != substitutions.end() && known->second)
     return known->second;
 
-  if (isa<PackArchetypeType>(type) ||
-      (isa<GenericTypeParamType>(type) &&
-       cast<GenericTypeParamType>(type)->isParameterPack())) {
+  if (isa<PackArchetypeType>(type) || type->isRootParameterPack()) {
     return PackType::getSingletonPackExpansion(type);
   }
 
@@ -89,8 +87,13 @@ FunctionType *GenericFunctionType::substGenericArgs(
 
   auto resultTy = substFn(getResult());
 
+  Type thrownError = getThrownError();
+  if (thrownError)
+    thrownError = substFn(thrownError);
+
   // Build the resulting (non-generic) function type.
-  return FunctionType::get(params, resultTy, getExtInfo());
+  return FunctionType::get(params, resultTy,
+                           getExtInfo().withThrows(isThrowing(), thrownError));
 }
 
 CanFunctionType
@@ -1043,8 +1046,8 @@ static bool canSubstituteTypeInto(Type ty, const DeclContext *dc,
 
     // In the same file any visibility is okay.
     if (!dc->isModuleContext() &&
-        typeDecl->getDeclContext()->getParentSourceFile() ==
-        dc->getParentSourceFile())
+        typeDecl->getDeclContext()->getOutermostParentSourceFile() ==
+        dc->getOutermostParentSourceFile())
       return true;
 
     return typeDecl->getEffectiveAccess() > AccessLevel::FilePrivate;

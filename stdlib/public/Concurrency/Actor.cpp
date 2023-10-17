@@ -1035,9 +1035,6 @@ static DefaultActor *asAbstract(DefaultActorImpl *actor) {
 static NonDefaultDistributedActorImpl *asImpl(NonDefaultDistributedActor *actor) {
   return reinterpret_cast<NonDefaultDistributedActorImpl*>(actor);
 }
-static NonDefaultDistributedActor *asAbstract(NonDefaultDistributedActorImpl *actor) {
-  return reinterpret_cast<NonDefaultDistributedActor*>(actor);
-}
 
 /*****************************************************************************/
 /******************** NEW DEFAULT ACTOR IMPLEMENTATION ***********************/
@@ -1775,7 +1772,8 @@ static bool isDefaultActorClass(const ClassMetadata *metadata) {
   assert(metadata->isTypeMetadata());
   while (true) {
     // Trust the class descriptor if it says it's a default actor.
-    if (metadata->getDescription()->isDefaultActor()) {
+    if (!metadata->isArtificialSubclass() &&
+        metadata->getDescription()->isDefaultActor()) {
       return true;
     }
 
@@ -1987,11 +1985,15 @@ static void swift_task_enqueueImpl(Job *job, ExecutorRef executor) {
     return swift_defaultActor_enqueue(job, executor.getDefaultActor());
   }
 
+#if SWIFT_CONCURRENCY_EMBEDDED
+  swift_unreachable("custom executors not supported in embedded Swift");
+#else
   // For main actor or actors with custom executors
   auto wtable = executor.getSerialExecutorWitnessTable();
   auto executorObject = executor.getIdentity();
   auto executorType = swift_getObjectType(executorObject);
   _swift_task_enqueueOnExecutor(job, executorObject, executorType, wtable);
+#endif
 }
 
 static void

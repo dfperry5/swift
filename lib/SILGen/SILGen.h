@@ -32,6 +32,7 @@ namespace swift {
 namespace Lowering {
   class TypeConverter;
   class SILGenFunction;
+  class CalleeTypeInfo;
 
 /// An enum to indicate whether a protocol method requirement is satisfied by
 /// a free function, as for an operator requirement.
@@ -51,10 +52,6 @@ public:
   
   /// The Swift module we are visiting.
   ModuleDecl *SwiftModule;
-  
-  /// TopLevelSGF - The SILGenFunction used to visit top-level code, or null if
-  /// the current source file is not a script source file.
-  SILGenFunction /*nullable*/ *TopLevelSGF;
 
   /// Mapping from SILDeclRefs to emitted SILFunctions.
   llvm::DenseMap<SILDeclRef, SILFunction*> emittedFunctions;
@@ -74,9 +71,6 @@ public:
   /// Mapping global VarDecls to their onceToken and onceFunc, respectively.
   llvm::DenseMap<VarDecl *, std::pair<SILGlobalVariable *,
                                       SILFunction *>> delayedGlobals;
-
-  /// The most recent declaration we considered for emission.
-  SILDeclRef lastEmittedFunction;
 
   /// Bookkeeping to ensure that useConformancesFrom{ObjectiveC,}Type() is
   /// only called once for each unique type, as an optimization.
@@ -134,6 +128,12 @@ public:
   llvm::Optional<FuncDecl *> ResumeUnsafeThrowingContinuationWithError;
   llvm::Optional<FuncDecl *> CheckExpectedExecutor;
 
+  llvm::Optional<FuncDecl*> CreateCheckedContinuation;
+  llvm::Optional<FuncDecl*> CreateCheckedThrowingContinuation;
+  llvm::Optional<FuncDecl*> ResumeCheckedContinuation;
+  llvm::Optional<FuncDecl*> ResumeCheckedThrowingContinuation;
+  llvm::Optional<FuncDecl*> ResumeCheckedThrowingContinuationWithError;
+
   llvm::Optional<FuncDecl *> AsyncMainDrainQueue;
   llvm::Optional<FuncDecl *> GetMainExecutor;
   llvm::Optional<FuncDecl *> SwiftJobRun;
@@ -189,10 +189,9 @@ public:
   /// implementation function for an ObjC API that was imported
   /// as `async` in Swift.
   SILFunction *getOrCreateForeignAsyncCompletionHandlerImplFunction(
-      CanSILFunctionType blockType, CanType continuationTy,
-      AbstractionPattern origFormalType, CanGenericSignature sig,
-      ForeignAsyncConvention convention,
-      llvm::Optional<ForeignErrorConvention> foreignError);
+      CanSILFunctionType blockType, CanType blockStorageType,
+      CanType continuationType, AbstractionPattern origFormalType,
+      CanGenericSignature sig, CalleeTypeInfo &calleeInfo);
 
   /// Determine whether the given class has any instance variables that
   /// need to be destroyed.
@@ -265,6 +264,9 @@ public:
   // Visitors for top-level forms
   //===--------------------------------------------------------------------===//
 
+  /// Returns true if SILGen should be skipped for the given decl.
+  bool shouldSkipDecl(Decl *d);
+
   void visit(Decl *D);
 
   // These are either not allowed at global scope or don't require
@@ -288,7 +290,7 @@ public:
 
   void visitFuncDecl(FuncDecl *fd);
   void visitPatternBindingDecl(PatternBindingDecl *vd);
-  void visitTopLevelCodeDecl(TopLevelCodeDecl *td);
+  void visitTopLevelCodeDecl(TopLevelCodeDecl *td) {}
   void visitIfConfigDecl(IfConfigDecl *icd);
   void visitPoundDiagnosticDecl(PoundDiagnosticDecl *PDD);
   void visitNominalTypeDecl(NominalTypeDecl *ntd);
@@ -298,6 +300,9 @@ public:
   void visitMissingDecl(MissingDecl *d);
   void visitMacroDecl(MacroDecl *d);
   void visitMacroExpansionDecl(MacroExpansionDecl *d);
+
+  void emitEntryPoint(SourceFile *SF);
+  void emitEntryPoint(SourceFile *SF, SILFunction *TopLevel);
 
   void emitAbstractFuncDecl(AbstractFunctionDecl *AFD);
 
@@ -309,6 +314,10 @@ public:
 
   /// Emits the function definition for a given SILDeclRef.
   void emitFunctionDefinition(SILDeclRef constant, SILFunction *f);
+
+  /// Emit a function now, if it's externally usable or has been referenced in
+  /// the current TU, or remember how to emit it later if not.
+  void emitOrDelayFunction(SILDeclRef constant);
 
   /// Generates code for the given closure expression and adds the
   /// SILFunction to the current SILModule under the name SILDeclRef(ce).
@@ -350,6 +359,11 @@ public:
 
   /// Emits a thunk from an actor function to a potentially distributed call.
   void emitDistributedThunk(SILDeclRef thunk);
+
+  /// Returns true if the given declaration must be referenced through a
+  /// back deployment thunk in a context with the given resilience expansion.
+  bool requiresBackDeploymentThunk(ValueDecl *decl,
+                                   ResilienceExpansion expansion);
 
   /// Emits a thunk that calls either the original function if it is available
   /// or otherwise calls a fallback variant of the function that was emitted
@@ -546,6 +560,17 @@ public:
   /// Retrieve the _Concurrency._checkExpectedExecutor intrinsic.
   FuncDecl *getCheckExpectedExecutor();
 
+  /// Retrieve the _Concurrency._createCheckedContinuation intrinsic.
+  FuncDecl *getCreateCheckedContinuation();
+  /// Retrieve the _Concurrency._createCheckedThrowingContinuation intrinsic.
+  FuncDecl *getCreateCheckedThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedContinuation intrinsic.
+  FuncDecl *getResumeCheckedContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedThrowingContinuation intrinsic.
+  FuncDecl *getResumeCheckedThrowingContinuation();
+  /// Retrieve the _Concurrency._resumeCheckedThrowingContinuationWithError intrinsic.
+  FuncDecl *getResumeCheckedThrowingContinuationWithError();
+
   /// Retrieve the _Concurrency._asyncMainDrainQueue intrinsic.
   FuncDecl *getAsyncMainDrainQueue();
   /// Retrieve the _Concurrency._getMainExecutor intrinsic.
@@ -597,11 +622,6 @@ public:
   /// mentioned by the given type.
   void useConformancesFromObjectiveCType(CanType type);
 
-  /// Emit a `mark_function_escape` instruction for top-level code when a
-  /// function or closure at top level refers to script globals.
-  void emitMarkFunctionEscapeForTopLevelCodeGlobals(SILLocation loc,
-                                                    CaptureInfo captureInfo);
-
   /// Map the substitutions for the original declaration to substitutions for
   /// the overridden declaration.
   static SubstitutionMap mapSubstitutionsForWitnessOverride(
@@ -613,6 +633,9 @@ public:
   void tryEmitPropertyDescriptor(AbstractStorageDecl *decl);
 
 private:
+  /// The most recent declaration we considered for emission.
+  SILDeclRef lastEmittedFunction;
+
   /// Emit the deallocator for a class that uses the objc allocator.
   void emitObjCAllocatorDestructor(ClassDecl *cd, DestructorDecl *dd);
 };

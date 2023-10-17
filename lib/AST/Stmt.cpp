@@ -51,6 +51,8 @@ StringRef Stmt::getDescriptiveKindName(StmtKind K) {
     return "return";
   case StmtKind::Yield:
     return "yield";
+  case StmtKind::Then:
+    return "then";
   case StmtKind::Defer:
     return "defer";
   case StmtKind::If:
@@ -331,13 +333,9 @@ Stmt *BraceStmt::getSingleActiveStatement() const {
   return getSingleActiveElement().dyn_cast<Stmt *>();
 }
 
-IsSingleValueStmtResult Stmt::mayProduceSingleValue(Evaluator &eval) const {
-  return evaluateOrDefault(eval, IsSingleValueStmtRequest{this},
-                           IsSingleValueStmtResult::circularReference());
-}
-
 IsSingleValueStmtResult Stmt::mayProduceSingleValue(ASTContext &ctx) const {
-  return mayProduceSingleValue(ctx.evaluator);
+  return evaluateOrDefault(ctx.evaluator, IsSingleValueStmtRequest{this, &ctx},
+                           IsSingleValueStmtResult::circularReference());
 }
 
 SourceLoc ReturnStmt::getStartLoc() const {
@@ -361,6 +359,26 @@ YieldStmt *YieldStmt::create(const ASTContext &ctx, SourceLoc yieldLoc,
 
 SourceLoc YieldStmt::getEndLoc() const {
   return RPLoc.isInvalid() ? getYields()[0]->getEndLoc() : RPLoc;
+}
+
+ThenStmt *ThenStmt::createParsed(ASTContext &ctx, SourceLoc thenLoc,
+                                 Expr *result) {
+  return new (ctx) ThenStmt(thenLoc, result, /*isImplicit*/ false);
+}
+
+ThenStmt *ThenStmt::createImplicit(ASTContext &ctx, Expr *result) {
+  return new (ctx) ThenStmt(SourceLoc(), result, /*isImplicit*/ true);
+}
+
+SourceRange ThenStmt::getSourceRange() const {
+  auto range = getResult()->getSourceRange();
+  if (!range)
+    return ThenLoc;
+
+  if (ThenLoc)
+    range.widen(ThenLoc);
+
+  return range;
 }
 
 SourceLoc ThrowStmt::getEndLoc() const { return SubExpr->getEndLoc(); }
@@ -452,6 +470,18 @@ bool DoCatchStmt::isSyntacticallyExhaustive() const {
     }
   }
   return false;
+}
+
+Type DoCatchStmt::getCaughtErrorType() const {
+  auto firstPattern = getCatches()
+    .front()
+    ->getCaseLabelItems()
+    .front()
+    .getPattern();
+  if (firstPattern->hasType())
+    return firstPattern->getType();
+
+  return Type();
 }
 
 void LabeledConditionalStmt::setCond(StmtCondition e) {
@@ -828,6 +858,15 @@ ArrayRef<Stmt *>
 SwitchStmt::getBranches(SmallVectorImpl<Stmt *> &scratch) const {
   assert(scratch.empty());
   for (auto *CS : getCases())
+    scratch.push_back(CS->getBody());
+  return scratch;
+}
+
+ArrayRef<Stmt *>
+DoCatchStmt::getBranches(SmallVectorImpl<Stmt *> &scratch) const {
+  assert(scratch.empty());
+  scratch.push_back(getBody());
+  for (auto *CS : getCatches())
     scratch.push_back(CS->getBody());
   return scratch;
 }

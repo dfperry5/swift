@@ -131,6 +131,7 @@ static ValueDecl *deriveInitDecl(DerivedConformance &derived, Type paramType,
                             /*Failable=*/true, /*FailabilityLoc=*/SourceLoc(),
                             /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
                             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
+                            /*ThrownType=*/TypeLoc(),
                             paramList,
                             /*GenericParams=*/nullptr, parentDC);
 
@@ -276,6 +277,11 @@ deriveBodyCodingKey_init_stringValue(AbstractFunctionDecl *initDecl, void *) {
   auto *selfRef = DerivedConformance::createSelfDeclRef(initDecl);
   SmallVector<ASTNode, 4> cases;
   for (auto *elt : elements) {
+    // Skip the cases that would return unavailable elements since those can't
+    // be instantiated at runtime.
+    if (elt->getAttrs().isUnavailable(C))
+      continue;
+
     auto *litExpr = new (C) StringLiteralExpr(elt->getNameStr(), SourceRange(),
                                               /*Implicit=*/true);
     auto *litPat = ExprPattern::createImplicit(C, litExpr, /*DC*/ initDecl);
@@ -333,7 +339,7 @@ static bool canSynthesizeCodingKey(DerivedConformance &derived) {
     }
   }
 
-  auto inherited = enumDecl->getInherited();
+  auto inherited = enumDecl->getInherited().getEntries();
   if (!inherited.empty() && inherited.front().wasValidated() &&
       inherited.front().isError())
     return false;

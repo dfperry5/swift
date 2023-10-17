@@ -14,6 +14,7 @@
 #include "swift/AST/AccessScope.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/Expr.h"
 #include "swift/AST/FileUnit.h"
 #include "swift/AST/GenericEnvironment.h"
@@ -95,24 +96,6 @@ VarDecl *DeclContext::getNonLocalVarDecl() const {
   return nullptr;
 }
 
-GenericTypeParamType *DeclContext::getProtocolSelfType() const {
-  assert(getSelfProtocolDecl() && "not a protocol");
-
-  GenericParamList *genericParams;
-  if (auto proto = dyn_cast<ProtocolDecl>(this)) {
-    genericParams = proto->getGenericParams();
-  } else {
-    genericParams = cast<ExtensionDecl>(this)->getGenericParams();
-  }
-
-  if (genericParams == nullptr)
-    return nullptr;
-
-  return genericParams->getParams().front()
-      ->getDeclaredInterfaceType()
-      ->castTo<GenericTypeParamType>();
-}
-
 Type DeclContext::getDeclaredTypeInContext() const {
   if (auto declaredType = getDeclaredInterfaceType())
     return mapTypeIntoContext(declaredType);
@@ -150,6 +133,10 @@ void DeclContext::forEachGenericContext(
       if (auto genericCtx = decl->getAsGenericContext())
         if (auto *gpList = genericCtx->getGenericParams())
           fn(gpList);
+
+      // Protocols do not capture outer generic parameters.
+      if (isa<ProtocolDecl>(decl))
+        return;
     }
   } while ((dc = dc->getParentForLookup()));
 }
@@ -277,10 +264,16 @@ DeclContext *DeclContext::getInnermostSkippedFunctionContext() {
 }
 
 DeclContext *DeclContext::getParentForLookup() const {
-  if (isa<ProtocolDecl>(this) || isa<ExtensionDecl>(this)) {
-    // If we are inside a protocol or an extension, skip directly
+  if (isa<ExtensionDecl>(this)) {
+    // If we are inside an extension, skip directly
     // to the module scope context, without looking at any (invalid)
     // outer types.
+    return getModuleScopeContext();
+  }
+  if (isa<ProtocolDecl>(this) && getParent()->isGenericContext()) {
+    // Protocols in generic contexts must not look in to their parents,
+    // as the parents may contain types with inferred implicit
+    // generic parameters not present in the protocol's generic signature.
     return getModuleScopeContext();
   }
   if (isa<NominalTypeDecl>(this)) {
@@ -407,7 +400,7 @@ DeclContext *DeclContext::getModuleScopeContext() const {
 
 void DeclContext::getSeparatelyImportedOverlays(
     ModuleDecl *declaring, SmallVectorImpl<ModuleDecl *> &overlays) const {
-  if (auto SF = getParentSourceFile())
+  if (auto SF = getOutermostParentSourceFile())
     SF->getSeparatelyImportedOverlays(declaring, overlays);
 }
 
@@ -445,9 +438,10 @@ ResilienceExpansion DeclContext::getResilienceExpansion() const {
 
 FragileFunctionKind DeclContext::getFragileFunctionKind() const {
   auto &context = getASTContext();
-  return evaluateOrDefault(context.evaluator,
-                           FragileFunctionKindRequest { const_cast<DeclContext *>(this) },
-                           {FragileFunctionKind::None, false});
+  return evaluateOrDefault(
+      context.evaluator,
+      FragileFunctionKindRequest{const_cast<DeclContext *>(this)},
+      {FragileFunctionKind::None});
 }
 
 FragileFunctionKind
@@ -466,23 +460,17 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
       if (VD->getDeclContext()->isLocalContext()) {
         auto kind = VD->getDeclContext()->getFragileFunctionKind();
         if (kind.kind != FragileFunctionKind::None)
-          return {FragileFunctionKind::DefaultArgument,
-                  kind.allowUsableFromInline};
+          return {FragileFunctionKind::DefaultArgument};
       }
 
       auto effectiveAccess =
-        VD->getFormalAccessScope(/*useDC=*/nullptr,
-                                 /*treatUsableFromInlineAsPublic=*/true);
-      auto formalAccess =
-        VD->getFormalAccessScope(/*useDC=*/nullptr,
-                                 /*treatUsableFromInlineAsPublic=*/false);
+          VD->getFormalAccessScope(/*useDC=*/nullptr,
+                                   /*treatUsableFromInlineAsPublic=*/true);
       if (effectiveAccess.isPublic()) {
-        return {FragileFunctionKind::DefaultArgument,
-                !formalAccess.isPublic()};
+        return {FragileFunctionKind::DefaultArgument};
       }
 
-      return {FragileFunctionKind::None,
-              /*allowUsableFromInline=*/false};
+      return {FragileFunctionKind::None};
     }
 
     // Stored property initializer contexts use minimal resilience expansion
@@ -491,13 +479,11 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
       auto bindingIndex = init->getBindingIndex();
       if (auto *varDecl = init->getBinding()->getAnchoringVarDecl(bindingIndex)) {
         if (varDecl->isInitExposedToClients()) {
-          return {FragileFunctionKind::PropertyInitializer,
-                  /*allowUsableFromInline=*/true};
+          return {FragileFunctionKind::PropertyInitializer};
         }
       }
 
-      return {FragileFunctionKind::None,
-              /*allowUsableFromInline=*/false};
+      return {FragileFunctionKind::None};
     }
 
     if (auto *AFD = dyn_cast<AbstractFunctionDecl>(dc)) {
@@ -513,29 +499,24 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
       // If the function is not externally visible, we will not be serializing
       // its body.
       if (!funcAccess.isPublic()) {
-        return {FragileFunctionKind::None,
-                /*allowUsableFromInline=*/false};
+        return {FragileFunctionKind::None};
       }
 
       // If the function is public, @_transparent implies @inlinable.
       if (AFD->isTransparent()) {
-        return {FragileFunctionKind::Transparent,
-                /*allowUsableFromInline=*/true};
+        return {FragileFunctionKind::Transparent};
       }
 
       if (AFD->getAttrs().hasAttribute<InlinableAttr>()) {
-        return {FragileFunctionKind::Inlinable,
-                /*allowUsableFromInline=*/true};
+        return {FragileFunctionKind::Inlinable};
       }
 
       if (AFD->getAttrs().hasAttribute<AlwaysEmitIntoClientAttr>()) {
-        return {FragileFunctionKind::AlwaysEmitIntoClient,
-                /*allowUsableFromInline=*/true};
+        return {FragileFunctionKind::AlwaysEmitIntoClient};
       }
 
       if (AFD->isBackDeployed(context->getASTContext())) {
-        return {FragileFunctionKind::BackDeploy,
-                /*allowUsableFromInline=*/true};
+        return {FragileFunctionKind::BackDeploy};
       }
 
       // Property and subscript accessors inherit @_alwaysEmitIntoClient,
@@ -543,23 +524,19 @@ swift::FragileFunctionKindRequest::evaluate(Evaluator &evaluator,
       if (auto accessor = dyn_cast<AccessorDecl>(AFD)) {
         auto *storage = accessor->getStorage();
         if (storage->getAttrs().getAttribute<InlinableAttr>()) {
-          return {FragileFunctionKind::Inlinable,
-                  /*allowUsableFromInline=*/true};
+          return {FragileFunctionKind::Inlinable};
         }
         if (storage->getAttrs().hasAttribute<AlwaysEmitIntoClientAttr>()) {
-          return {FragileFunctionKind::AlwaysEmitIntoClient,
-                  /*allowUsableFromInline=*/true};
+          return {FragileFunctionKind::AlwaysEmitIntoClient};
         }
         if (storage->isBackDeployed(context->getASTContext())) {
-          return {FragileFunctionKind::BackDeploy,
-                  /*allowUsableFromInline=*/true};
+          return {FragileFunctionKind::BackDeploy};
         }
       }
     }
   }
 
-  return {FragileFunctionKind::None,
-          /*allowUsableFromInline=*/false};
+  return {FragileFunctionKind::None};
 }
 
 /// Determine whether the innermost context is generic.
@@ -835,15 +812,6 @@ unsigned DeclContext::printContext(raw_ostream &OS, const unsigned indent,
         break;
       }
       break;
-    }
-
-    case InitializerKind::RuntimeAttribute: {
-      auto init = cast<RuntimeAttributeInitializer>(this);
-      auto *decl = init->getAttachedToDecl();
-
-      OS << "RuntimeAttribute attachedTo="
-         << init->getAttachedToDecl()->getName() << ", attribute=";
-      init->getAttr()->print(OS, decl);
     }
     }
     break;
@@ -1253,13 +1221,13 @@ getPrivateDeclContext(const DeclContext *DC, const SourceFile *useSF) {
 
   // use the type declaration as the private scope if it is in the same
   // file as useSF. This occurs for both extensions and declarations.
-  if (NTD->getParentSourceFile() == useSF)
+  if (NTD->getOutermostParentSourceFile() == useSF)
     return NTD;
 
   // Otherwise use the last extension declaration in the same file.
   const DeclContext *lastExtension = nullptr;
   for (ExtensionDecl *ED : NTD->getExtensions())
-    if (ED->getParentSourceFile() == useSF)
+    if (ED->getOutermostParentSourceFile() == useSF)
       lastExtension = ED;
 
   // If there's no last extension, return the supplied context.
@@ -1269,7 +1237,7 @@ getPrivateDeclContext(const DeclContext *DC, const SourceFile *useSF) {
 AccessScope::AccessScope(const DeclContext *DC, bool isPrivate)
     : Value(DC, isPrivate) {
   if (isPrivate) {
-    DC = getPrivateDeclContext(DC, DC->getParentSourceFile());
+    DC = getPrivateDeclContext(DC, DC->getOutermostParentSourceFile());
     Value.setPointer(DC);
   }
   if (!DC || isa<ModuleDecl>(DC) || isa<PackageUnit>(DC))
@@ -1319,8 +1287,8 @@ bool AccessScope::allowsPrivateAccess(const DeclContext *useDC, const DeclContex
     }
   }
   // Do not allow access if the sourceDC is in a different file
-  auto useSF = useDC->getParentSourceFile();
-  if (useSF != sourceDC->getParentSourceFile())
+  auto useSF = useDC->getOutermostParentSourceFile();
+  if (useSF != sourceDC->getOutermostParentSourceFile())
     return false;
 
   // Do not allow access if the sourceDC does not represent a type.

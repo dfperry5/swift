@@ -389,7 +389,7 @@ void
 SymbolGraph::recordInheritanceRelationships(Symbol S) {
   const auto VD = S.getLocalSymbolDecl();
   if (const auto *NTD = dyn_cast<NominalTypeDecl>(VD)) {
-    for (const auto &InheritanceLoc : NTD->getInherited()) {
+    for (const auto &InheritanceLoc : NTD->getInherited().getEntries()) {
       auto Ty = InheritanceLoc.getType();
       if (!Ty) {
         continue;
@@ -493,6 +493,13 @@ void SymbolGraph::recordConformanceRelationships(Symbol S) {
       });
     } else {
       for (const auto *Conformance : NTD->getAllConformances()) {
+        // Check to make sure that this conformance wasn't declared via an
+        // unconditionally-unavailable extension. If so, don't add that to the graph.
+        if (const auto *ED = dyn_cast_or_null<ExtensionDecl>(Conformance->getDeclContext())) {
+          if (isUnconditionallyUnavailableOnAllPlatforms(ED)) {
+            continue;
+          }
+        }
         recordEdge(
             S, Symbol(this, Conformance->getProtocol(), nullptr),
             RelationshipKind::ConformsTo(),

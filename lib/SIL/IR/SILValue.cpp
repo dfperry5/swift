@@ -17,6 +17,7 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILVisitor.h"
+#include "swift/SIL/Test.h"
 #include "llvm/ADT/StringSwitch.h"
 
 using namespace swift;
@@ -154,6 +155,23 @@ bool ValueBase::isLexical() const {
   return false;
 }
 
+namespace swift::test {
+// Arguments:
+// - value
+// Dumps:
+// - value
+// - whether it's lexical
+static FunctionTest IsLexicalTest("is-lexical", [](auto &function,
+                                                   auto &arguments,
+                                                   auto &test) {
+  auto value = arguments.takeValue();
+  auto isLexical = value->isLexical();
+  value->print(llvm::outs());
+  auto *boolString = isLexical ? "true" : "false";
+  llvm::outs() << boolString << "\n";
+});
+} // end namespace swift::test
+
 bool ValueBase::isGuaranteedForwarding() const {
   if (getOwnershipKind() != OwnershipKind::Guaranteed) {
     return false;
@@ -269,13 +287,17 @@ ValueOwnershipKind::ValueOwnershipKind(const SILFunction &F, SILType Type,
   }
 
   switch (Convention) {
-  case SILArgumentConvention::Indirect_In:
-    value = moduleConventions.useLoweredAddresses() ? OwnershipKind::None
-                                                    : OwnershipKind::Owned;
-    break;
   case SILArgumentConvention::Indirect_In_Guaranteed:
-    value = moduleConventions.useLoweredAddresses() ? OwnershipKind::None
-                                                    : OwnershipKind::Guaranteed;
+    value = moduleConventions.isTypeIndirectForIndirectParamConvention(
+                Type.getASTType())
+                ? OwnershipKind::None
+                : OwnershipKind::Guaranteed;
+    break;
+  case SILArgumentConvention::Indirect_In:
+    value = moduleConventions.isTypeIndirectForIndirectParamConvention(
+                Type.getASTType())
+                ? OwnershipKind::None
+                : OwnershipKind::Owned;
     break;
   case SILArgumentConvention::Indirect_Inout:
   case SILArgumentConvention::Indirect_InoutAliasable:

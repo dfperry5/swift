@@ -13,12 +13,16 @@
 #ifndef SWIFT_FRONTEND_CACHINGUTILS_H
 #define SWIFT_FRONTEND_CACHINGUTILS_H
 
+#include "swift/Frontend/CASOutputBackends.h"
 #include "swift/Frontend/CachedDiagnostics.h"
 #include "swift/Frontend/FrontendInputsAndOutputs.h"
+#include "swift/Frontend/FrontendOptions.h"
+#include "clang/CAS/CASOptions.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/CAS/ActionCache.h"
-#include "llvm/CAS/ObjectStore.h"
 #include "llvm/CAS/CASReference.h"
+#include "llvm/CAS/ObjectStore.h"
+#include "llvm/Support/PrefixMapper.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/VirtualOutputBackend.h"
 #include <memory>
@@ -27,11 +31,12 @@ namespace swift {
 
 /// Create a swift caching output backend that stores the output from
 /// compiler into a CAS.
-llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend>
+llvm::IntrusiveRefCntPtr<cas::SwiftCASOutputBackend>
 createSwiftCachingOutputBackend(
     llvm::cas::ObjectStore &CAS, llvm::cas::ActionCache &Cache,
     llvm::cas::ObjectRef BaseKey,
-    const FrontendInputsAndOutputs &InputsAndOutputs);
+    const FrontendInputsAndOutputs &InputsAndOutputs,
+    FrontendOptions::ActionType Action);
 
 /// Replay the output of the compilation from cache.
 /// Return true if outputs are replayed, false otherwise.
@@ -44,43 +49,35 @@ bool replayCachedCompilerOutputs(
 /// Load the cached compile result from cache.
 std::unique_ptr<llvm::MemoryBuffer> loadCachedCompileResultFromCacheKey(
     llvm::cas::ObjectStore &CAS, llvm::cas::ActionCache &Cache,
-    DiagnosticEngine &Diag, llvm::StringRef CacheKey,
+    DiagnosticEngine &Diag, llvm::StringRef CacheKey, file_types::ID Type,
     llvm::StringRef Filename = "");
-
-/// Store compiler output.
-llvm::Error storeCachedCompilerOutput(llvm::cas::ObjectStore &CAS,
-                                      llvm::cas::ActionCache &Cache,
-                                      StringRef Path, StringRef Bytes,
-                                      llvm::cas::ObjectRef BaseKey,
-                                      StringRef CorrespondingInput,
-                                      file_types::ID OutputKind);
 
 llvm::Expected<llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>>
 createCASFileSystem(llvm::cas::ObjectStore &CAS, ArrayRef<std::string> FSRoots,
                     ArrayRef<std::string> IncludeTreeRoots);
 
+std::vector<std::string> remapPathsFromCommandLine(
+    ArrayRef<std::string> Args,
+    llvm::function_ref<std::string(StringRef)> RemapCallback);
+
 namespace cas {
-/// Helper class to manage CAS/Caching from libSwiftScan C APIs.
-class CachingTool {
+class CachedResultLoader {
 public:
-  // Create the tool with a list of arguments from compiler invocation.
-  CachingTool(llvm::StringRef Path);
+  CachedResultLoader(llvm::cas::ObjectStore &CAS, llvm::cas::ActionCache &Cache,
+                     llvm::cas::ObjectRef CacheKey)
+      : CAS(CAS), Cache(Cache), CacheKey(CacheKey) {}
 
-  // Compute the CASID for PCH output from invocation.
-  std::string computeCacheKey(llvm::ArrayRef<const char *> Args,
-                              StringRef InputPath, file_types::ID OutputKind);
-
-  // Store content into CAS.
-  std::string storeContent(llvm::StringRef Content);
-
-  // Check if the tool is correctly initialized.
-  bool isValid() const { return CAS && Cache; }
+  using CallbackTy =
+      llvm::function_ref<llvm::Error(file_types::ID, llvm::cas::ObjectRef)>;
+  // Replay the cached result, return false if a cache miss happened.
+  llvm::Expected<bool> replay(CallbackTy Callback);
 
 private:
-  std::unique_ptr<llvm::cas::ObjectStore> CAS;
-  std::unique_ptr<llvm::cas::ActionCache> Cache;
+  llvm::cas::ObjectStore &CAS;
+  llvm::cas::ActionCache &Cache;
+  llvm::cas::ObjectRef CacheKey;
 };
-} // namespace cas
-}
+} // end namespace cas
+} // end namespace swift
 
 #endif

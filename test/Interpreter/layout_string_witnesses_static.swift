@@ -12,6 +12,8 @@
 
 // REQUIRES: executable_test
 
+// Requires runtime functions added in Swift 5.9.
+// UNSUPPORTED: use_os_stdlib
 // UNSUPPORTED: back_deployment_runtime
 
 import Swift
@@ -293,6 +295,74 @@ func testExistentialStructBox() {
 
 testExistentialStructBox()
 
+func testAnyWrapper() {
+    let ptr = UnsafeMutablePointer<AnyWrapper>.allocate(capacity: 1)
+
+    do {
+        let x = TestClass()
+        testInit(ptr, to: AnyWrapper(y: x, z: SimpleClass(x: 23)))
+    }
+
+    do {
+        let y = TestClass()
+
+        // CHECK: Before deinit
+        print("Before deinit")
+
+        // CHECK-NEXT: TestClass deinitialized!
+        // CHECK-NEXT: SimpleClass deinitialized!
+        testAssign(ptr, from: AnyWrapper(y: y, z: SimpleClass(x: 32)))
+    }
+
+    // CHECK-NEXT: Before deinit
+    print("Before deinit")
+
+    // CHECK-NEXT: TestClass deinitialized!
+    // CHECK-NEXT: SimpleClass deinitialized!
+    testDestroy(ptr)
+
+    ptr.deallocate()
+}
+
+testAnyWrapper()
+
+class ClassWithABC: A, B, C {
+    deinit {
+        print("ClassWithABC deinitialized!")
+    }
+}
+
+func testMultiProtocolExistential() {
+    let ptr = UnsafeMutablePointer<MultiProtocolExistentialWrapper>.allocate(capacity: 1)
+
+    do {
+        let x = ClassWithABC()
+        testInit(ptr, to: MultiProtocolExistentialWrapper(y: x, z: SimpleClass(x: 23)))
+    }
+
+    do {
+        let y = ClassWithABC()
+
+        // CHECK: Before deinit
+        print("Before deinit")
+
+        // CHECK-NEXT: ClassWithABC deinitialized!
+        // CHECK-NEXT: SimpleClass deinitialized!
+        testAssign(ptr, from: MultiProtocolExistentialWrapper(y: y, z: SimpleClass(x: 32)))
+    }
+
+    // CHECK-NEXT: Before deinit
+    print("Before deinit")
+
+    // CHECK-NEXT: ClassWithABC deinitialized!
+    // CHECK-NEXT: SimpleClass deinitialized!
+    testDestroy(ptr)
+
+    ptr.deallocate()
+}
+
+testMultiProtocolExistential()
+
 class ClassWithSomeClassProtocol: SomeClassProtocol {
     deinit {
         print("ClassWithSomeClassProtocol deinitialized!")
@@ -463,6 +533,37 @@ func testContainsSinglePayloadSimpleClassEnumEmpty() {
 }
 
 testContainsSinglePayloadSimpleClassEnumEmpty()
+
+func testSinglePayloadAnyHashableEnum() {
+    let ptr = UnsafeMutablePointer<SinglePayloadAnyHashableEnum>.allocate(capacity: 1)
+
+    do {
+        let x = SinglePayloadAnyHashableEnum.empty0
+        testInit(ptr, to: x)
+    }
+
+    do {
+        // CHECK: empty0
+        if case .empty0 = ptr.pointee {
+            print("empty0")
+        }
+
+        let y = SinglePayloadAnyHashableEnum.empty0
+
+        testAssign(ptr, from: y)
+    }
+
+    // CHECK-NEXT: empty0
+    if case .empty0 = ptr.pointee {
+        print("empty0")
+    }
+
+    testDestroy(ptr)
+
+    ptr.deallocate()
+}
+
+testSinglePayloadAnyHashableEnum()
 
 func testMultiPayloadEnum() {
     let ptr = UnsafeMutablePointer<MultiPayloadEnumWrapper>.allocate(capacity: 1)

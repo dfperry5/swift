@@ -100,8 +100,10 @@ set(LLVM_OPTIONAL_SOURCES
     ${swift_runtime_leaks_sources}
     ${swift_runtime_backtracing_sources})
 
+set(swift_enable_backtracing)
 if(SWIFT_ENABLE_BACKTRACING)
   list(APPEND swift_runtime_sources ${swift_runtime_backtracing_sources})
+  set(swift_enable_backtracing -DSWIFT_ENABLE_BACKTRACING)
 endif()
 
 set(swift_runtime_library_compile_flags ${swift_runtime_compile_flags})
@@ -172,7 +174,9 @@ endforeach()
 add_swift_target_library(swiftImageRegistrationObjectELF
                   OBJECT_LIBRARY IS_STDLIB IS_STDLIB_CORE
                   SwiftRT-ELF-WASM.cpp
-                  C_COMPILE_FLAGS ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                  C_COMPILE_FLAGS
+                    ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                    ${swift_enable_backtracing}
                   C_COMPILE_FLAGS_LINUX -fno-lto
                   LINK_FLAGS ${SWIFT_RUNTIME_CORE_LINK_FLAGS}
                   TARGET_SDKS ${ELFISH_SDKS}
@@ -183,7 +187,9 @@ add_swift_target_library(swiftImageRegistrationObjectELF
 add_swift_target_library(swiftImageRegistrationObjectCOFF
                   OBJECT_LIBRARY IS_STDLIB IS_STDLIB_CORE
                   SwiftRT-COFF.cpp
-                  C_COMPILE_FLAGS ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                  C_COMPILE_FLAGS
+                    ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                    ${swift_enable_backtracing}
                   LINK_FLAGS ${SWIFT_RUNTIME_CORE_LINK_FLAGS}
                   TARGET_SDKS ${COFF_SDKS}
                   SWIFT_COMPILE_FLAGS ${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}
@@ -192,7 +198,9 @@ add_swift_target_library(swiftImageRegistrationObjectCOFF
 add_swift_target_library(swiftImageRegistrationObjectWASM
                   OBJECT_LIBRARY IS_STDLIB IS_STDLIB_CORE
                   SwiftRT-ELF-WASM.cpp
-                  C_COMPILE_FLAGS ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                  C_COMPILE_FLAGS
+                    ${SWIFT_RUNTIME_CORE_CXX_FLAGS}
+                    ${swift_enable_backtracing}
                   LINK_FLAGS ${SWIFT_RUNTIME_CORE_LINK_FLAGS}
                   TARGET_SDKS ${WASM_SDKS}
                   SWIFT_COMPILE_FLAGS ${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}
@@ -216,7 +224,7 @@ foreach(sdk ${SWIFT_SDKS})
       endif()
       set(swiftrtObject ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/swiftImageRegistrationObject${SWIFT_SDK_${sdk}_OBJECT_FORMAT}-${arch_suffix}.dir/${swiftrtSourceName}${CMAKE_C_OUTPUT_EXTENSION})
 
-      if(sdk STREQUAL WINDOWS)
+      if(sdk STREQUAL "WINDOWS")
         set(extension .obj)
       else()
         set(extension .o)
@@ -262,12 +270,12 @@ foreach(sdk ${SWIFT_SDKS})
 
     # Generate the static-stdlib-args.lnk file used by -static-stdlib option for
     # 'GenericUnix' (eg linux)
-    if(${SWIFT_SDK_${sdk}_OBJECT_FORMAT} STREQUAL ELF)
+    if(SWIFT_SDK_${sdk}_OBJECT_FORMAT STREQUAL "ELF")
       string(TOLOWER "${sdk}" lowercase_sdk)
       set(libpthread -lpthread)
       set(concurrency_libs)
       set(android_libraries)
-      if(${sdk} STREQUAL ANDROID)
+      if(sdk STREQUAL "ANDROID")
         set(android_libraries -llog)
         set(libpthread)
       elseif(SWIFT_CONCURRENCY_USES_DISPATCH)

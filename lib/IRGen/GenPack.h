@@ -114,6 +114,27 @@ StackAddress allocatePack(IRGenFunction &IGF, CanSILPackType packType);
 
 void deallocatePack(IRGenFunction &IGF, StackAddress addr, CanSILPackType packType);
 
+llvm::Optional<StackAddress>
+emitDynamicTupleTypeLabels(IRGenFunction &IGF,
+                           CanTupleType tupleType,
+                           CanPackType packType,
+                           llvm::Value *shapeExpression);
+
+StackAddress
+emitDynamicFunctionParameterFlags(IRGenFunction &IGF,
+                                  AnyFunctionType::CanParamArrayRef params,
+                                  CanPackType packType,
+                                  llvm::Value *shapeExpression);
+
+std::pair<StackAddress, llvm::Value *>
+emitInducedTupleTypeMetadataPack(
+    IRGenFunction &IGF, llvm::Value *tupleMetadata);
+
+MetadataResponse
+emitInducedTupleTypeMetadataPackRef(
+    IRGenFunction &IGF, CanPackType packType,
+    llvm::Value *tupleMetadata);
+
 } // end namespace irgen
 } // end namespace swift
 

@@ -518,6 +518,20 @@ SILVTable *SILModule::lookUpVTable(const ClassDecl *C,
   if (!Vtbl)
     return nullptr;
 
+  if (C->walkSuperclasses([&](ClassDecl *S) {
+    auto R = VTableMap.find(S);
+    if (R != VTableMap.end())
+      return TypeWalker::Action::Continue;
+    SILVTable *Vtbl = getSILLoader()->lookupVTable(S);
+    if (!Vtbl) {
+      return TypeWalker::Action::Stop;
+    }
+    VTableMap[S] = Vtbl;
+    return TypeWalker::Action::Continue;
+  })) {
+    return nullptr;
+  }
+
   // If we succeeded, map C -> VTbl in the table and return VTbl.
   VTableMap[C] = Vtbl;
   return Vtbl;
@@ -544,6 +558,15 @@ SILMoveOnlyDeinit *SILModule::lookUpMoveOnlyDeinit(const NominalTypeDecl *C,
   // If we succeeded, map C -> VTbl in the table and return VTbl.
   MoveOnlyDeinitMap[C] = tbl;
   return tbl;
+}
+
+SILVTable *SILModule::lookUpSpecializedVTable(SILType classTy) {
+  // First try to look up R from the lookup table.
+  auto R = SpecializedVTableMap.find(classTy);
+  if (R != SpecializedVTableMap.end())
+    return R->second;
+
+  return nullptr;
 }
 
 SerializedSILLoader *SILModule::getSILLoader() {
@@ -864,12 +887,42 @@ void SILModule::installSILRemarkStreamer() {
   silRemarkStreamer = SILRemarkStreamer::create(*this);
 }
 
+void SILModule::promoteLinkages() {
+  for (auto &Fn : functions) {
+    // Ignore functions with shared linkage
+    if (Fn.getLinkage() == SILLinkage::Shared)
+      continue;
+
+    if (Fn.isDefinition())
+      Fn.setLinkage(SILLinkage::Public);
+    else
+      Fn.setLinkage(SILLinkage::PublicExternal);
+  }
+
+  for (auto &Global : silGlobals) {
+    // Ignore globals with shared linkage
+    if (Global.getLinkage() == SILLinkage::Shared)
+      continue;
+
+    if (Global.isDefinition())
+      Global.setLinkage(SILLinkage::Public);
+    else
+      Global.setLinkage(SILLinkage::PublicExternal);
+  }
+
+  // TODO: Promote linkage of other SIL entities
+}
+
 bool SILModule::isStdlibModule() const {
   return TheSwiftModule->isStdlibModule();
 }
 void SILModule::performOnceForPrespecializedImportedExtensions(
     llvm::function_ref<void(AbstractFunctionDecl *)> action) {
   if (prespecializedFunctionDeclsImported)
+    return;
+
+  // No prespecitalizations in embedded Swift
+  if (getASTContext().LangOpts.hasFeature(Feature::Embedded))
     return;
 
   SmallVector<ModuleDecl *, 8> importedModules;
@@ -952,31 +1005,4 @@ bool Lowering::usesObjCAllocator(ClassDecl *theClass) {
   // If the root class was implemented in Objective-C, use Objective-C's
   // allocation methods because they may have been overridden.
   return theClass->getObjectModel() == ReferenceCounting::ObjC;
-}
-
-static bool isUnconditionallyUnavailable(const Decl *D) {
-  if (auto unavailableAttrAndDecl = D->getSemanticUnavailableAttr())
-    return unavailableAttrAndDecl->first->isUnconditionallyUnavailable();
-
-  return false;
-}
-
-bool Lowering::shouldSkipLowering(const Decl *D) {
-  if (D->getASTContext().LangOpts.UnavailableDeclOptimizationMode !=
-      UnavailableDeclOptimization::Complete)
-    return false;
-
-  // Unavailable declarations should be skipped if
-  // -unavailable-decl-optimization=complete is specified.
-  return isUnconditionallyUnavailable(D);
-}
-
-bool Lowering::shouldLowerToUnavailableCodeStub(const Decl *D) {
-  if (D->getASTContext().LangOpts.UnavailableDeclOptimizationMode !=
-      UnavailableDeclOptimization::Stub)
-    return false;
-
-  // Unavailable declarations should trap at runtime if
-  // -unavailable-decl-optimization=stub is specified.
-  return isUnconditionallyUnavailable(D);
 }

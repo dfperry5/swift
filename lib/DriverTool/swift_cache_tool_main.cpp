@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 //
 #include "swift/AST/DiagnosticsFrontend.h"
+#include "swift/Basic/FileTypes.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/LLVMInitialize.h"
 #include "swift/Basic/Version.h"
@@ -23,6 +24,7 @@
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/Parse/ParseVersion.h"
+#include "clang/CAS/CASOptions.h"
 #include "llvm/CAS/ActionCache.h"
 #include "llvm/CAS/BuiltinUnifiedCASDatabases.h"
 #include "llvm/CAS/ObjectStore.h"
@@ -87,7 +89,7 @@ private:
   CompilerInvocation Invocation;
   PrintingDiagnosticConsumer PDC;
   std::string MainExecutablePath;
-  std::string CASPath;
+  clang::CASOptions CASOpts;
   std::vector<std::string> Inputs;
   std::vector<std::string> FrontendArgs;
   SwiftCacheToolAction ActionKind = SwiftCacheToolAction::Invalid;
@@ -124,8 +126,19 @@ public:
       return 0;
     }
 
-    CASPath =
-        ParsedArgs.getLastArgValue(OPT_cas_path, getDefaultOnDiskCASPath());
+    if (const Arg* PluginPath = ParsedArgs.getLastArg(OPT_cas_plugin_path))
+      CASOpts.PluginPath = PluginPath->getValue();
+    if (const Arg* OnDiskPath = ParsedArgs.getLastArg(OPT_cas_path))
+      CASOpts.CASPath = OnDiskPath->getValue();
+    for (StringRef Opt : ParsedArgs.getAllArgValues(OPT_cas_plugin_option)) {
+      StringRef Name, Value;
+      std::tie(Name, Value) = Opt.split('=');
+      CASOpts.PluginOptions.emplace_back(std::string(Name), std::string(Value));
+    }
+
+    // Fallback to default path if not set.
+    if (CASOpts.CASPath.empty() && CASOpts.PluginPath.empty())
+      CASOpts.CASPath = getDefaultOnDiskCASPath();
 
     Inputs = ParsedArgs.getAllArgValues(OPT_INPUT);
     FrontendArgs = ParsedArgs.getAllArgValues(OPT__DASH_DASH);
@@ -174,8 +187,11 @@ private:
       llvm::errs() << "missing swift-frontend command-line after --\n";
       return true;
     }
-    // drop swift-frontend executable path from command-line.
+    // drop swift-frontend executable path and leading `-frontend` from
+    // command-line.
     if (StringRef(FrontendArgs[0]).endswith("swift-frontend"))
+      FrontendArgs.erase(FrontendArgs.begin());
+    if (StringRef(FrontendArgs[0]).equals("-frontend"))
       FrontendArgs.erase(FrontendArgs.begin());
 
     SmallVector<std::unique_ptr<llvm::MemoryBuffer>, 4>
@@ -186,8 +202,20 @@ private:
 
     // Make sure CASPath is the same between invocation and cache-tool by
     // appending the cas-path since the option doesn't affect cache key.
-    Args.emplace_back("-cas-path");
-    Args.emplace_back(CASPath.c_str());
+    if (!CASOpts.CASPath.empty()) {
+      Args.emplace_back("-cas-path");
+      Args.emplace_back(CASOpts.CASPath.c_str());
+    }
+    if (!CASOpts.PluginPath.empty()) {
+      Args.emplace_back("-cas-plugin-path");
+      Args.emplace_back(CASOpts.PluginPath.c_str());
+    }
+    std::vector<std::string> PluginJoinedOpts;
+    for (const auto& Opt: CASOpts.PluginOptions) {
+      PluginJoinedOpts.emplace_back(Opt.first + "=" + Opt.second);
+      Args.emplace_back("-cas-plugin-option");
+      Args.emplace_back(PluginJoinedOpts.back().c_str());
+    }
 
     if (Invocation.parseArgs(Args, Instance.getDiags(),
                              &configurationFileBuffers, workingDirectory,
@@ -261,7 +289,7 @@ int SwiftCacheToolInvocation::printOutputKeys() {
   auto addOutputKey = [&](StringRef InputPath, file_types::ID OutputKind,
                           StringRef OutputPath) {
     auto OutputKey =
-        createCompileJobCacheKeyForOutput(CAS, *BaseKey, InputPath, OutputKind);
+        createCompileJobCacheKeyForOutput(CAS, *BaseKey, InputPath);
     if (!OutputKey) {
       llvm::errs() << "cannot create cache key for " << OutputPath << ": "
                    << toString(OutputKey.takeError()) << "\n";
@@ -283,7 +311,7 @@ int SwiftCacheToolInvocation::printOutputKeys() {
         .SupplementaryOutputs.forEachSetOutputAndType(
             [&](const std::string &File, file_types::ID ID) {
               // Dont print serialized diagnostics.
-              if (ID == file_types::ID::TY_SerializedDiagnostics)
+              if (file_types::isProducedFromDiagnostics(ID))
                 return;
 
               addOutputKey(InputPath, ID, File);
@@ -324,8 +352,7 @@ readOutputEntriesFromFile(StringRef Path) {
 
   auto JSONValue = llvm::json::parse((*JSONContent)->getBuffer());
   if (!JSONValue)
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "failed to parse input file as JSON");
+    return JSONValue.takeError();
 
   auto Keys = JSONValue->getAsArray();
   if (!Keys)
@@ -336,9 +363,11 @@ readOutputEntriesFromFile(StringRef Path) {
 }
 
 int SwiftCacheToolInvocation::validateOutputs() {
-  auto DB = llvm::cas::createOnDiskUnifiedCASDatabases(CASPath);
+  auto DB = CASOpts.getOrCreateDatabases();
   if (!DB)
     report_fatal_error(DB.takeError());
+
+  auto &CAS = *DB->first;
 
   PrintingDiagnosticConsumer PDC;
   Instance.getDiags().addConsumer(PDC);
@@ -354,12 +383,38 @@ int SwiftCacheToolInvocation::validateOutputs() {
     for (const auto& Entry : *Keys) {
       if (auto *Obj = Entry.getAsObject()) {
         if (auto Key = Obj->getString("CacheKey")) {
-          if (auto Buffer = loadCachedCompileResultFromCacheKey(
-                  *DB->first, *DB->second, Instance.getDiags(), *Key))
-            continue;
-          llvm::errs() << "failed to find output for cache key " << *Key
-                       << "\n";
-          return true;
+          auto ID = CAS.parseID(*Key);
+          if (!ID) {
+            llvm::errs() << "failed to parse ID " << Key << ": "
+                         << toString(ID.takeError()) << "\n";
+            return true;
+          }
+          auto Ref = CAS.getReference(*ID);
+          if (!Ref) {
+            llvm::errs() << "failed to find output for cache key " << Key
+                         << "\n";
+            return true;
+          }
+          cas::CachedResultLoader Loader(*DB->first, *DB->second, *Ref);
+          auto Result = Loader.replay(
+                  [&](file_types::ID Kind, ObjectRef Ref) -> llvm::Error {
+                    auto Proxy = CAS.getProxy(Ref);
+                    if (!Proxy)
+                      return Proxy.takeError();
+                    return llvm::Error::success();
+                  });
+
+          if (!Result) {
+            llvm::errs() << "failed to find output for cache key " << *Key
+                         << ": " << toString(Result.takeError()) << "\n";
+            return true;
+          }
+          if (!*Result) {
+            llvm::errs() << "failed to load output for cache key " << *Key
+                         << "\n";
+            return true;
+          }
+          continue;
         }
       }
       llvm::errs() << "can't read cache key from " << Path << "\n";
@@ -399,7 +454,8 @@ int SwiftCacheToolInvocation::renderDiags() {
         if (auto Key = Obj->getString("CacheKey")) {
           if (auto Buffer = loadCachedCompileResultFromCacheKey(
                   Instance.getObjectStore(), Instance.getActionCache(),
-                  Instance.getDiags(), *Key)) {
+                  Instance.getDiags(), *Key,
+                  file_types::ID::TY_CachedDiagnostics)) {
             if (auto E = CDP->replayCachedDiagnostics(Buffer->getBuffer())) {
               llvm::errs() << "failed to replay cache: "
                            << toString(std::move(E)) << "\n";

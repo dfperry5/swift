@@ -68,6 +68,11 @@ private func tryPromoteAlloc(_ allocRef: AllocRefInstBase,
     return false
   }
 
+  // The most important check: does the object escape the current function?
+  if allocRef.isEscaping(context) {
+    return false
+  }
+
   if deadEndBlocks.isDeadEnd(allocRef.parentBlock) {
 
     // Allocations inside a code region which ends up in a no-return block may missing their
@@ -77,11 +82,8 @@ private func tryPromoteAlloc(_ allocRef: AllocRefInstBase,
     //  ...
     //  unreachable  // The end of %k's lifetime
     //
-    // Also, such an allocation cannot escape the function, because the function does not
-    // return after the point of allocation. So we can stack-promote it unconditionally.
-    //
     // There is one exception: if it's in a loop (within the dead-end region) we must not
-    // extend its lifetime. On the other hand we can be sure that its final release is not
+    // extend its lifetime. In this case we can be sure that its final release is not
     // missing, because otherwise the object would be leaking. For example:
     //
     //  bb1:
@@ -93,18 +95,10 @@ private func tryPromoteAlloc(_ allocRef: AllocRefInstBase,
     //
     // Therefore, if the allocation is inside a loop, we can treat it like allocations in
     // non dead-end regions.
-    if !isInLoop(block: allocRef.parentBlock, context),
-       // TODO: for some reason this doesn't work for aysnc functions.
-       //       Maybe a problem with co-routine splitting in LLVM?
-       !allocRef.parentFunction.isAsync {
+    if !isInLoop(block: allocRef.parentBlock, context) {
       allocRef.setIsStackAllocatable(context)
       return true
     }
-  }
-
-  // The most important check: does the object escape the current function?
-  if allocRef.isEscaping(context) {
-    return false
   }
 
   // Try to find the top most dominator block which dominates all use points.
@@ -273,7 +267,7 @@ private struct ComputeOuterBlockrange : EscapeVisitorWithResult {
     // instructions (for which the `visitUse` closure is not called).
     result.insert(operandsDefinitionBlock)
 
-    // We need to explicitly add predecessor blocks of phi-arguments becaues they
+    // We need to explicitly add predecessor blocks of phis becaues they
     // are not necesesarily visited during the down-walk in `isEscaping()`.
     // This is important for the special case where there is a back-edge from the
     // inner range to the inner rage's begin-block:
@@ -284,8 +278,8 @@ private struct ComputeOuterBlockrange : EscapeVisitorWithResult {
     //     %k = alloc_ref $Klass   // innerInstRange.begin
     //     cond_br bb2, bb1(%k)    // back-edge to bb1 == innerInstRange.blockRange.begin
     //
-    if value is BlockArgument {
-      result.insert(contentsOf: operandsDefinitionBlock.predecessors)
+    if let phi = Phi(value) {
+      result.insert(contentsOf: phi.predecessors)
     }
     return .continueWalk
   }
@@ -295,14 +289,13 @@ private extension BasicBlockRange {
   /// Returns true if there is a direct edge connecting this range with the `otherRange`.
   func hasControlFlowEdge(to otherRange: BasicBlockRange) -> Bool {
     func isOnlyInOtherRange(_ block: BasicBlock) -> Bool {
-      return !inclusiveRangeContains(block) &&
-             otherRange.inclusiveRangeContains(block) && block != otherRange.begin
+      return !inclusiveRangeContains(block) && otherRange.inclusiveRangeContains(block)
     }
 
     for lifeBlock in inclusiveRange {
       assert(otherRange.inclusiveRangeContains(lifeBlock), "range must be a subset of other range")
       for succ in lifeBlock.successors {
-        if isOnlyInOtherRange(succ) {
+        if isOnlyInOtherRange(succ) && succ != otherRange.begin {
           return true
         }
         // The entry of the begin-block is conceptually not part of the range. We can check if

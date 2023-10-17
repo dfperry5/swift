@@ -30,6 +30,7 @@
 #include "swift/Basic/LangOptions.h"
 #include "swift/Basic/SourceManager.h"
 #include "swift/ClangImporter/ClangImporter.h"
+#include "swift/Frontend/CASOutputBackends.h"
 #include "swift/Frontend/CachedDiagnostics.h"
 #include "swift/Frontend/DiagnosticVerifier.h"
 #include "swift/Frontend/FrontendOptions.h"
@@ -168,8 +169,16 @@ public:
     ClangImporterOpts.ModuleCachePath = Path.str();
   }
 
+  void setClangScannerModuleCachePath(StringRef Path) {
+    ClangImporterOpts.ClangScannerModuleCachePath = Path.str();
+  }
+
   StringRef getClangModuleCachePath() const {
     return ClangImporterOpts.ModuleCachePath;
+  }
+
+  StringRef getClangScannerModuleCachePath() const {
+    return ClangImporterOpts.ClangScannerModuleCachePath;
   }
 
   void setImportSearchPaths(const std::vector<std::string> &Paths) {
@@ -420,6 +429,11 @@ public:
   std::string getModuleInterfaceOutputPathForWholeModule() const;
   std::string getPrivateModuleInterfaceOutputPathForWholeModule() const;
 
+  /// APIDescriptorPath only makes sense in whole module compilation mode,
+  /// so return the APIDescriptorPath when in that mode and fail an assert
+  /// if not in that mode.
+  std::string getAPIDescriptorPathForWholeModule() const;
+
 public:
   /// Given the current configuration of this frontend invocation, a set of
   /// supplementary output paths, and a module, compute the appropriate set of
@@ -469,6 +483,10 @@ class CompilerInstance {
 
   /// Virtual OutputBackend.
   llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> OutputBackend = nullptr;
+
+  /// CAS OutputBackend.
+  llvm::IntrusiveRefCntPtr<swift::cas::SwiftCASOutputBackend> CASOutputBackend =
+      nullptr;
 
   /// The verification output backend.
   using HashBackendTy = llvm::vfs::HashingOutputBackend<llvm::BLAKE3>;
@@ -524,6 +542,10 @@ public:
   llvm::vfs::OutputBackend &getOutputBackend() const {
     return *OutputBackend;
   }
+  swift::cas::SwiftCASOutputBackend &getCASOutputBackend() const {
+    return *CASOutputBackend;
+  }
+
   void
   setOutputBackend(llvm::IntrusiveRefCntPtr<llvm::vfs::OutputBackend> Backend) {
     OutputBackend = std::move(Backend);
@@ -632,6 +654,10 @@ public:
 
   /// Whether this compiler instance supports caching.
   bool supportCaching() const;
+
+  /// Whether errors during interface verification can be downgrated
+  /// to warnings.
+  bool downgradeInterfaceVerificationErrors() const;
 
   /// Gets the SourceFile which is the primary input for this CompilerInstance.
   /// \returns the primary SourceFile, or nullptr if there is no primary input;

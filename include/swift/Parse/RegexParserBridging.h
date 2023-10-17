@@ -15,6 +15,7 @@
 #define REGEX_PARSER_BRIDGING
 
 #include "swift/AST/ASTBridging.h"
+#include "swift/Basic/Nullability.h"
 #include <stdbool.h>
 
 /// Attempt to lex a regex literal string. Takes the following arguments:
@@ -56,8 +57,8 @@ typedef bool (*RegexLiteralParsingFn)(/*InputPtr*/ const char *_Nonnull,
                                       /*VersionOut*/ unsigned *_Nonnull,
                                       /*CaptureStructureOut*/ void *_Nonnull,
                                       /*CaptureStructureSize*/ unsigned,
-                                      /*DiagnosticBaseLoc*/ swift::SourceLoc,
-                                      BridgedDiagnosticEngine);
+                                      /*DiagnosticBaseLoc*/ BridgedSourceLoc,
+                                      BridgedDiagEngine);
 void Parser_registerRegexLiteralParsingFn(RegexLiteralParsingFn _Nullable fn);
 
 #endif // REGEX_PARSER_BRIDGING

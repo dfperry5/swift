@@ -211,8 +211,8 @@ enum class CompletionKind : uint8_t {
   EffectsSpecifier,
   PoundAvailablePlatform,
   CallArg,
-  LabeledTrailingClosure,
   ReturnStmtExpr,
+  ThenStmtExpr,
   YieldStmtExpr,
   ForEachSequence,
 

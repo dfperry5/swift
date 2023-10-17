@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import AST
 import SIL
 import OptimizerBridging
 
@@ -26,6 +27,23 @@ extension Context {
   var calleeAnalysis: CalleeAnalysis {
     let bridgeCA = _bridged.getCalleeAnalysis()
     return CalleeAnalysis(bridged: bridgeCA)
+  }
+
+  var hadError: Bool { _bridged.hadError() }
+
+  var silStage: SILStage {
+    switch _bridged.getSILStage() {
+      case .Raw:       return .raw
+      case .Canonical: return .canonical
+      case .Lowered:   return .lowered
+      default:         fatalError("unhandled SILStage case")
+    }
+  }
+}
+
+extension Context {
+  var diagnosticEngine: DiagnosticEngine {
+    return DiagnosticEngine(bridged: _bridged.getDiagnosticEngine())
   }
 }
 
@@ -71,6 +89,10 @@ extension MutatingContext {
     erase(instruction: inst)
   }
 
+  func erase(block: BasicBlock) {
+    _bridged.eraseBlock(block.bridged)
+  }
+
   func tryOptimizeApplyOfPartialApply(closure: PartialApplyInst) -> Bool {
     if _bridged.tryOptimizeApplyOfPartialApply(closure.bridged) {
       notifyInstructionsChanged()
@@ -110,10 +132,15 @@ extension MutatingContext {
   }
 
   func inlineFunction(apply: FullApplySite, mandatoryInline: Bool) {
+    // This is only a best-effort attempt to notity the new cloned instructions as changed.
+    // TODO: get a list of cloned instructions from the `inlineFunction`
     let instAfterInling: Instruction?
     switch apply {
-    case is ApplyInst, is BeginApplyInst:
+    case is ApplyInst:
       instAfterInling = apply.next
+    case let beginApply as BeginApplyInst:
+      let next = beginApply.next!
+      instAfterInling = (next is EndApplyInst ? nil : next)
     case is TryApplyInst:
       instAfterInling = apply.parentBlock.next?.instructions.first
     default:
@@ -145,17 +172,15 @@ extension MutatingContext {
     SubstitutionMap(_bridged.getContextSubstitutionMap(type.bridged))
   }
 
-  // Private utilities
-
-  fileprivate func notifyInstructionsChanged() {
+  func notifyInstructionsChanged() {
     _bridged.asNotificationHandler().notifyChanges(.instructionsChanged)
   }
 
-  fileprivate func notifyCallsChanged() {
+  func notifyCallsChanged() {
     _bridged.asNotificationHandler().notifyChanges(.callsChanged)
   }
 
-  fileprivate func notifyBranchesChanged() {
+  func notifyBranchesChanged() {
     _bridged.asNotificationHandler().notifyChanges(.branchesChanged)
   }
 }
@@ -195,9 +220,13 @@ struct FunctionPassContext : MutatingContext {
     return PostDominatorTree(bridged: bridgedPDT)
   }
 
+  var swiftArrayDecl: NominalTypeDecl {
+    NominalTypeDecl(_bridged: _bridged.getSwiftArrayDecl())
+  }
+
   func loadFunction(name: StaticString, loadCalleesRecursively: Bool) -> Function? {
     return name.withUTF8Buffer { (nameBuffer: UnsafeBufferPointer<UInt8>) in
-      let nameStr = llvm.StringRef(nameBuffer.baseAddress, nameBuffer.count)
+      let nameStr = BridgedStringRef(nameBuffer.baseAddress, nameBuffer.count)
       return _bridged.loadFunction(nameStr, loadCalleesRecursively).function
     }
   }
@@ -215,13 +244,9 @@ struct FunctionPassContext : MutatingContext {
   /// Returns nil if no such function or multiple matching functions are found.
   func lookupStdlibFunction(name: StaticString) -> Function? {
     return name.withUTF8Buffer { (nameBuffer: UnsafeBufferPointer<UInt8>) in
-      let nameStr = llvm.StringRef(nameBuffer.baseAddress, nameBuffer.count)
+      let nameStr = BridgedStringRef(nameBuffer.baseAddress, nameBuffer.count)
       return _bridged.lookupStdlibFunction(nameStr).function
     }
-  }
-
-  func erase(block: BasicBlock) {
-    _bridged.eraseBlock(block.bridged)
   }
 
   func modifyEffects(in function: Function, _ body: (inout FunctionEffects) -> ()) {
@@ -234,7 +259,7 @@ struct FunctionPassContext : MutatingContext {
   }
 
   func optimizeMemoryAccesses(in function: Function) -> Bool {
-    if swift.optimizeMemoryAccesses(function.bridged.getFunction()) {
+    if BridgedPassContext.optimizeMemoryAccesses(function.bridged) {
       notifyInstructionsChanged()
       return true
     }
@@ -242,8 +267,24 @@ struct FunctionPassContext : MutatingContext {
   }
 
   func eliminateDeadAllocations(in function: Function) -> Bool {
-    if swift.eliminateDeadAllocations(function.bridged.getFunction()) {
+    if BridgedPassContext.eliminateDeadAllocations(function.bridged) {
       notifyInstructionsChanged()
+      return true
+    }
+    return false
+  }
+
+  func specializeVTable(for type: Type, in function: Function) -> VTable? {
+    guard let vtablePtr = _bridged.specializeVTableForType(type.bridged, function.bridged) else {
+      return nil
+    }
+    return VTable(bridged: BridgedVTable(vTable: vtablePtr))
+  }
+
+  func specializeClassMethodInst(_ cm: ClassMethodInst) -> Bool {
+    if _bridged.specializeClassMethodInst(cm.bridged) {
+      notifyInstructionsChanged()
+      notifyCallsChanged()
       return true
     }
     return false
@@ -259,12 +300,11 @@ struct FunctionPassContext : MutatingContext {
   }
 
   func mangleOutlinedVariable(from function: Function) -> String {
-    let stdString = _bridged.mangleOutlinedVariable(function.bridged)
-    return String(_cxxString: stdString)
+    return String(taking: _bridged.mangleOutlinedVariable(function.bridged))
   }
 
   func createGlobalVariable(name: String, type: Type, isPrivate: Bool) -> GlobalVariable {
-    let gv = name._withStringRef {
+    let gv = name._withBridgedStringRef {
       _bridged.createGlobalVariable($0, type.bridged, isPrivate)
     }
     return gv.globalVar
@@ -275,6 +315,23 @@ struct SimplifyContext : MutatingContext {
   let _bridged: BridgedPassContext
   let notifyInstructionChanged: (Instruction) -> ()
   let preserveDebugInfo: Bool
+}
+
+extension Type {
+  func getStaticSize(context: SimplifyContext) -> Int? {
+    let v = context._bridged.getStaticSize(self.bridged)
+    return v == -1 ? nil : v
+  }
+  
+  func getStaticAlignment(context: SimplifyContext) -> Int? {
+    let v = context._bridged.getStaticAlignment(self.bridged)
+    return v == -1 ? nil : v
+  }
+  
+  func getStaticStride(context: SimplifyContext) -> Int? {
+    let v = context._bridged.getStaticStride(self.bridged)
+    return v == -1 ? nil : v
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -349,9 +406,9 @@ extension Undef {
 }
 
 extension BasicBlock {
-  func addBlockArgument(type: Type, ownership: Ownership, _ context: some MutatingContext) -> BlockArgument {
+  func addArgument(type: Type, ownership: Ownership, _ context: some MutatingContext) -> Argument {
     context.notifyInstructionsChanged()
-    return bridged.addBlockArgument(type.bridged, ownership._bridged).blockArgument
+    return bridged.addBlockArgument(type.bridged, ownership._bridged).argument
   }
   
   func eraseArgument(at index: Int, _ context: some MutatingContext) {
@@ -438,10 +495,26 @@ extension AllocRefInst {
   }
 }
 
+extension RefElementAddrInst {
+  func set(isImmutable: Bool, _ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.RefElementAddrInst_setImmutable(isImmutable)
+    context.notifyInstructionChanged(self)
+  }
+}
+
 extension GlobalValueInst {
   func setIsBare(_ context: some MutatingContext) {
     context.notifyInstructionsChanged()
     bridged.GlobalValueInst_setIsBare()
+    context.notifyInstructionChanged(self)
+  }
+}
+
+extension LoadInst {
+  func set(ownership: LoadInst.LoadOwnership, _ context: some MutatingContext) {
+    context.notifyInstructionsChanged()
+    bridged.LoadInst_setOwnership(ownership.rawValue)
     context.notifyInstructionChanged(self)
   }
 }

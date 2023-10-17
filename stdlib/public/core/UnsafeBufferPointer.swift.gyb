@@ -1190,6 +1190,7 @@ extension Unsafe${Mutable}BufferPointer {
   }
 }
 
+@_unavailableInEmbedded
 extension Unsafe${Mutable}BufferPointer: CustomDebugStringConvertible {
   /// A textual representation of the buffer, suitable for debugging.
   public var debugDescription: String {
@@ -1197,7 +1198,13 @@ extension Unsafe${Mutable}BufferPointer: CustomDebugStringConvertible {
       + "(start: \(_position.map(String.init(describing:)) ?? "nil"), count: \(count))"
   }
 }
+
+@available(*, unavailable)
+extension Unsafe${Mutable}BufferPointer: Sendable { }
 %end
+
+@available(*, unavailable)
+extension UnsafeBufferPointer.Iterator: Sendable { }
 
 
 // ${'Local Variables'}:

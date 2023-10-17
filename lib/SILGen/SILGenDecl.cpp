@@ -100,7 +100,12 @@ static void copyOrInitPackExpansionInto(SILGenFunction &SGF,
                         formalPackType, componentIndex, indexWithinComponent);
       }
 
-      auto eltMV = ManagedValue(elt, eltCleanup);
+      ManagedValue eltMV;
+      if (eltCleanup == CleanupHandle::invalid()) {
+        eltMV = ManagedValue::forRValueWithoutOwnership(elt);
+      } else {
+        eltMV = ManagedValue::forOwnedRValue(elt, eltCleanup);
+      }
 
       // Perform the initialization.  If this doesn't consume the
       // element value, that's fine, we'll just destroy it as part of
@@ -508,11 +513,11 @@ public:
 
     // The box type's context is lowered in the minimal resilience domain.
     auto instanceType = SGF.SGM.Types.getLoweredRValueType(
-        TypeExpansionContext::minimal(), decl->getType());
+        TypeExpansionContext::minimal(), decl->getTypeInContext());
 
     // If we have a no implicit copy param decl, make our instance type
     // @moveOnly.
-    if (!instanceType->isPureMoveOnly()) {
+    if (!instanceType->isNoncopyable()) {
       if (auto *pd = dyn_cast<ParamDecl>(decl)) {
         bool isNoImplicitCopy = pd->isNoImplicitCopy();
         isNoImplicitCopy |= pd->getSpecifier() == ParamSpecifier::Consuming;
@@ -530,7 +535,7 @@ public:
 
     auto boxType = SGF.SGM.Types.getContextBoxTypeForCapture(
         decl, instanceType, SGF.F.getGenericEnvironment(),
-        /*mutable*/ !instanceType->isPureMoveOnly() || !decl->isLet());
+        /*mutable*/ !instanceType->isNoncopyable() || !decl->isLet());
 
     // The variable may have its lifetime extended by a closure, heap-allocate
     // it using a box.
@@ -553,7 +558,7 @@ public:
           decl, Box, MarkUnresolvedReferenceBindingInst::Kind::InOut);
 
     if (SGF.getASTContext().SILOpts.supportsLexicalLifetimes(SGF.getModule())) {
-      auto loweredType = SGF.getTypeLowering(decl->getType()).getLoweredType();
+      auto loweredType = SGF.getTypeLowering(decl->getTypeInContext()).getLoweredType();
       auto lifetime = SGF.F.getLifetime(decl, loweredType);
       // The box itself isn't lexical--neither a weak reference nor an unsafe
       // pointer to a box can be formed; and the box doesn't synchronize on
@@ -651,9 +656,9 @@ public:
     const TypeLowering *lowering = nullptr;
     if (vd->isNoImplicitCopy()) {
       lowering = &SGF.getTypeLowering(
-          SILMoveOnlyWrappedType::get(vd->getType()->getCanonicalType()));
+          SILMoveOnlyWrappedType::get(vd->getTypeInContext()->getCanonicalType()));
     } else {
-      lowering = &SGF.getTypeLowering(vd->getType());
+      lowering = &SGF.getTypeLowering(vd->getTypeInContext());
     }
 
     // Decide whether we need a temporary stack buffer to evaluate this 'let'.
@@ -684,7 +689,7 @@ public:
       // For noncopyable types, we always need to box them.
       needsTemporaryBuffer =
           (lowering->isAddressOnly() && SGF.silConv.useLoweredAddresses()) ||
-        lowering->getLoweredType().isPureMoveOnly();
+              lowering->getLoweredType().getASTType()->isNoncopyable();
     }
 
     // Make sure that we have a non-address only type when binding a
@@ -769,11 +774,12 @@ public:
     if (value->getOwnershipKind() == OwnershipKind::None) {
       // Then check if we have a pure move only type. In that case, we need to
       // insert a no implicit copy
-      if (value->getType().isPureMoveOnly()) {
+      if (value->getType().getASTType()->isNoncopyable()) {
         value = SGF.B.createMoveValue(PrologueLoc, value, /*isLexical*/ true);
-        return SGF.B.createMarkMustCheckInst(
+        return SGF.B.createMarkUnresolvedNonCopyableValueInst(
             PrologueLoc, value,
-            MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+            MarkUnresolvedNonCopyableValueInst::CheckKind::
+                ConsumableAndAssignable);
       }
 
       // Otherwise, if we don't have a no implicit copy trivial type, just
@@ -786,9 +792,10 @@ public:
       value =
           SGF.B.createOwnedCopyableToMoveOnlyWrapperValue(PrologueLoc, value);
       value = SGF.B.createMoveValue(PrologueLoc, value, /*isLexical*/ true);
-      return SGF.B.createMarkMustCheckInst(
+      return SGF.B.createMarkUnresolvedNonCopyableValueInst(
           PrologueLoc, value,
-          MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+          MarkUnresolvedNonCopyableValueInst::CheckKind::
+              ConsumableAndAssignable);
     }
 
     // Otherwise, we need to perform some additional processing. First, if we
@@ -812,16 +819,17 @@ public:
       return value;
 
     // Check if we have a move only type. In that case, we perform a lexical
-    // move and insert a mark_must_check.
+    // move and insert a mark_unresolved_non_copyable_value.
     //
     // We do this before the begin_borrow "normal" path below since move only
     // types do not have no implicit copy attr on them.
     if (value->getOwnershipKind() == OwnershipKind::Owned &&
-        value->getType().isPureMoveOnly()) {
+        value->getType().getASTType()->isNoncopyable()) {
       value = SGF.B.createMoveValue(PrologueLoc, value, true /*isLexical*/);
-      return SGF.B.createMarkMustCheckInst(
+      return SGF.B.createMarkUnresolvedNonCopyableValueInst(
           PrologueLoc, value,
-          MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+          MarkUnresolvedNonCopyableValueInst::CheckKind::
+              ConsumableAndAssignable);
     }
 
     // Otherwise, if we do not have a no implicit copy variable, just follow
@@ -839,9 +847,9 @@ public:
                                     /*isLexical*/ true);
     value = SGF.B.createCopyValue(PrologueLoc, value);
     value = SGF.B.createOwnedCopyableToMoveOnlyWrapperValue(PrologueLoc, value);
-    return SGF.B.createMarkMustCheckInst(
+    return SGF.B.createMarkUnresolvedNonCopyableValueInst(
         PrologueLoc, value,
-        MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+        MarkUnresolvedNonCopyableValueInst::CheckKind::ConsumableAndAssignable);
   }
 
   void bindValue(SILValue value, SILGenFunction &SGF, bool wasPlusOne,
@@ -1190,7 +1198,8 @@ void EnumElementPatternInitialization::emitEnumMatch(
             UnenforcedAccess access;
             SILValue accessAddress = access.beginAccess(
                 SGF, loc, boxedValue.getValue(), SILAccessKind::Read);
-            auto mvAccessAddress = ManagedValue::forUnmanaged(accessAddress);
+            auto mvAccessAddress =
+                ManagedValue::forBorrowedAddressRValue(accessAddress);
             {
               Scope loadScope(SGF, loc);
               ManagedValue borrowedVal =
@@ -1439,14 +1448,14 @@ SILGenFunction::emitInitializationForVarDecl(VarDecl *vd, bool forceImmutable,
     return InitializationPtr(new KnownAddressInitialization(SV));
   }
 
-  CanType varType = vd->getType()->getCanonicalType();
+  CanType varType = vd->getTypeInContext()->getCanonicalType();
 
   assert(!isa<InOutType>(varType) && "local variables should never be inout");
 
   // If this is a 'let' initialization for a copyable non-global, set up a let
   // binding, which stores the initialization value into VarLocs directly.
   if (forceImmutable && vd->getDeclContext()->isLocalContext() &&
-      !isa<ReferenceStorageType>(varType) && !varType->isPureMoveOnly())
+      !isa<ReferenceStorageType>(varType) && !varType->isNoncopyable())
     return InitializationPtr(new LetValueInitialization(vd, *this));
 
   // If the variable has no initial value, emit a mark_uninitialized instruction
@@ -1850,7 +1859,7 @@ public:
 ManagedValue SILGenFunction::emitManagedRValueWithEndLifetimeCleanup(
     SILValue value) {
   Cleanups.pushCleanup<EndLifetimeCleanup>(value);
-  return ManagedValue::forUnmanaged(value);
+  return ManagedValue::forUnmanagedOwnedValue(value);
 }
 
 namespace {
@@ -1986,8 +1995,9 @@ std::unique_ptr<TemporaryInitialization>
 SILGenFunction::emitTemporary(SILLocation loc, const TypeLowering &tempTL) {
   SILValue addr = emitTemporaryAllocation(loc, tempTL.getLoweredType());
   if (addr->getType().isMoveOnly())
-    addr = B.createMarkMustCheckInst(
-        loc, addr, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+    addr = B.createMarkUnresolvedNonCopyableValueInst(
+        loc, addr,
+        MarkUnresolvedNonCopyableValueInst::CheckKind::ConsumableAndAssignable);
   return useBufferAsTemporary(addr, tempTL);
 }
 
@@ -1996,8 +2006,9 @@ SILGenFunction::emitFormalAccessTemporary(SILLocation loc,
                                           const TypeLowering &tempTL) {
   SILValue addr = emitTemporaryAllocation(loc, tempTL.getLoweredType());
   if (addr->getType().isMoveOnly())
-    addr = B.createMarkMustCheckInst(
-        loc, addr, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+    addr = B.createMarkUnresolvedNonCopyableValueInst(
+        loc, addr,
+        MarkUnresolvedNonCopyableValueInst::CheckKind::ConsumableAndAssignable);
   CleanupHandle cleanup =
       enterDormantFormalAccessTemporaryCleanup(addr, loc, tempTL);
   return std::unique_ptr<TemporaryInitialization>(
@@ -2072,13 +2083,13 @@ SILGenFunction::emitFormalAccessManagedBufferWithCleanup(SILLocation loc,
   assert(isInFormalEvaluationScope() && "Must be in formal evaluation scope");
   auto &lowering = getTypeLowering(addr->getType());
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(addr);
+    return ManagedValue::forTrivialAddressRValue(addr);
 
   auto &cleanup = Cleanups.pushCleanup<FormalAccessReleaseValueCleanup>();
   CleanupHandle handle = Cleanups.getTopCleanup();
   FormalEvalContext.push<OwnedFormalAccess>(loc, handle, addr);
   cleanup.Depth = FormalEvalContext.stable_begin();
-  return ManagedValue(addr, handle);
+  return ManagedValue::forOwnedAddressRValue(addr, handle);
 }
 
 ManagedValue
@@ -2087,13 +2098,13 @@ SILGenFunction::emitFormalAccessManagedRValueWithCleanup(SILLocation loc,
   assert(isInFormalEvaluationScope() && "Must be in formal evaluation scope");
   auto &lowering = getTypeLowering(value->getType());
   if (lowering.isTrivial())
-    return ManagedValue::forUnmanaged(value);
+    return ManagedValue::forRValueWithoutOwnership(value);
 
   auto &cleanup = Cleanups.pushCleanup<FormalAccessReleaseValueCleanup>();
   CleanupHandle handle = Cleanups.getTopCleanup();
   FormalEvalContext.push<OwnedFormalAccess>(loc, handle, value);
   cleanup.Depth = FormalEvalContext.stable_begin();
-  return ManagedValue(value, handle);
+  return ManagedValue::forOwnedRValue(value, handle);
 }
 
 CleanupHandle SILGenFunction::enterDormantFormalAccessTemporaryCleanup(
@@ -2169,7 +2180,8 @@ void SILGenFunction::destroyLocalVariable(SILLocation silLoc, VarDecl *vd) {
     return;
   }
 
-  if (auto *mvi = dyn_cast<MarkMustCheckInst>(Val.getDefiningInstruction())) {
+  if (auto *mvi = dyn_cast<MarkUnresolvedNonCopyableValueInst>(
+          Val.getDefiningInstruction())) {
     if (mvi->hasMoveCheckerKind()) {
       if (auto *cvi = dyn_cast<CopyValueInst>(mvi->getOperand())) {
         if (auto *bbi = dyn_cast<BeginBorrowInst>(cvi->getOperand())) {

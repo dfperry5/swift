@@ -45,6 +45,7 @@ static bool isDeclName(Node::Kind kind) {
     case Node::Kind::InfixOperator:
     case Node::Kind::TypeSymbolicReference:
     case Node::Kind::ProtocolSymbolicReference:
+    case Node::Kind::ObjectiveCProtocolSymbolicReference:
       return true;
     default:
       return false;
@@ -58,9 +59,11 @@ static bool isAnyGeneric(Node::Kind kind) {
     case Node::Kind::Enum:
     case Node::Kind::Protocol:
     case Node::Kind::ProtocolSymbolicReference:
+    case Node::Kind::ObjectiveCProtocolSymbolicReference:
     case Node::Kind::OtherNominalType:
     case Node::Kind::TypeAlias:
     case Node::Kind::TypeSymbolicReference:
+    case Node::Kind::BuiltinTupleType:
       return true;
     default:
       return false;
@@ -110,6 +113,8 @@ bool swift::Demangle::isContext(Node::Kind kind) {
     case Node::Kind::ID:
 #include "swift/Demangling/DemangleNodes.def"
       return true;
+    case Node::Kind::BuiltinTupleType:
+      return true;
     default:
       return false;
   }
@@ -148,7 +153,6 @@ bool swift::Demangle::isFunctionAttr(Node::Kind kind) {
     case Node::Kind::BackDeploymentThunk:
     case Node::Kind::BackDeploymentFallback:
     case Node::Kind::HasSymbolQuery:
-    case Node::Kind::RuntimeDiscoverableAttributeRecord:
       return true;
     default:
       return false;
@@ -276,6 +280,7 @@ static bool isProtocolNode(Demangle::NodePointer Node) {
     return isProtocolNode(Node->getChild(0));
   case Demangle::Node::Kind::Protocol:
   case Demangle::Node::Kind::ProtocolSymbolicReference:
+  case Demangle::Node::Kind::ObjectiveCProtocolSymbolicReference:
     return true;
   default:
     return false;
@@ -868,6 +873,10 @@ NodePointer Demangler::demangleSymbolicReference(unsigned char rawKind) {
     kind = SymbolicReferenceKind::NonUniqueExtendedExistentialTypeShape;
     direct = Directness::Direct;
     break;
+  case 0x0c:
+    kind = SymbolicReferenceKind::ObjectiveCProtocol;
+    direct = Directness::Direct;
+    break;
   // These are all currently reserved but unused.
   case 0x03: // direct to protocol conformance descriptor
   case 0x04: // indirect to protocol conformance descriptor
@@ -891,8 +900,10 @@ NodePointer Demangler::demangleSymbolicReference(unsigned char rawKind) {
   
   // Types register as substitutions even when symbolically referenced.
   // OOPS: Except for opaque type references!
-  if (kind == SymbolicReferenceKind::Context &&
-      resolved->getKind() != Node::Kind::OpaqueTypeDescriptorSymbolicReference &&
+  if ((kind == SymbolicReferenceKind::Context ||
+       kind == SymbolicReferenceKind::ObjectiveCProtocol) &&
+      resolved->getKind() !=
+          Node::Kind::OpaqueTypeDescriptorSymbolicReference &&
       resolved->getKind() != Node::Kind::OpaqueReturnTypeOf)
     addSubstitution(resolved);
   return resolved;
@@ -944,7 +955,6 @@ recur:
     case 'H':
       switch (char c2 = nextChar()) {
       case 'A': return demangleDependentProtocolConformanceAssociated();
-      case 'a': return createNode(Node::Kind::RuntimeDiscoverableAttributeRecord);
       case 'C': return demangleConcreteProtocolConformance();
       case 'D': return demangleDependentProtocolConformanceRoot();
       case 'I': return demangleDependentProtocolConformanceInherited();
@@ -1426,6 +1436,13 @@ NodePointer Demangler::demangleBuiltinType() {
       Ty = createNode(Node::Kind::BuiltinTypeName,
                                BUILTIN_TYPE_NAME_WORD);
       break;
+    case 'P':
+      Ty = createNode(Node::Kind::BuiltinTypeName,
+                               BUILTIN_TYPE_NAME_PACKINDEX);
+      break;
+    case 'T':
+      Ty = createNode(Node::Kind::BuiltinTupleType);
+      break;
     default:
       return nullptr;
   }
@@ -1745,6 +1762,9 @@ NodePointer Demangler::popProtocol() {
   
   if (NodePointer SymbolicRef = popNode(Node::Kind::ProtocolSymbolicReference)){
     return SymbolicRef;
+  } else if (NodePointer SymbolicRef =
+                 popNode(Node::Kind::ObjectiveCProtocolSymbolicReference)) {
+    return SymbolicRef;
   }
 
   NodePointer Name = popNode(isDeclName);
@@ -1938,7 +1958,6 @@ bool Demangle::nodeConsumesGenericArgs(Node *node) {
     case Node::Kind::PropertyWrapperBackingInitializer:
     case Node::Kind::PropertyWrapperInitFromProjectedValue:
     case Node::Kind::Static:
-    case Node::Kind::RuntimeAttributeGenerator:
       return false;
     default:
       return true;
@@ -2141,7 +2160,8 @@ NodePointer Demangler::demangleImplFunctionType() {
       return nullptr;
 
     auto subsNode = createNode(Node::Kind::ImplInvocationSubstitutions);
-    assert(Substitutions.size() == 1);
+    if (Substitutions.size() != 1)
+      return nullptr;
     subsNode->addChild(Substitutions[0], *this);
     if (SubstitutionRetroConformances)
       subsNode->addChild(SubstitutionRetroConformances, *this);
@@ -2576,6 +2596,8 @@ NodePointer Demangler::popAssocTypeName() {
   // If we haven't seen a protocol, check for a symbolic reference.
   if (!Proto)
     Proto = popNode(Node::Kind::ProtocolSymbolicReference);
+  if (!Proto)
+    Proto = popNode(Node::Kind::ObjectiveCProtocolSymbolicReference);
 
   NodePointer Id = popNode(Node::Kind::Identifier);
   NodePointer AssocTy = createWithChild(Node::Kind::DependentAssociatedTypeRef, Id);
@@ -3278,10 +3300,13 @@ NodePointer Demangler::addFuncSpecParamNumber(NodePointer Param,
 NodePointer Demangler::demangleSpecAttributes(Node::Kind SpecKind) {
   bool metatypeParamsRemoved = nextIf('m');
   bool isSerialized = nextIf('q');
+  bool asyncRemoved = nextIf('a');
 
   int PassID = (int)nextChar() - '0';
-  if (PassID < 0 || PassID > 9)
+  if (PassID < 0 || PassID >= MAX_SPECIALIZATION_PASS) {
+    assert(false && "unexpected pass id");
     return nullptr;
+  }
 
   NodePointer SpecNd = createNode(SpecKind);
 
@@ -3290,6 +3315,10 @@ NodePointer Demangler::demangleSpecAttributes(Node::Kind SpecKind) {
 
   if (isSerialized)
     SpecNd->addChild(createNode(Node::Kind::IsSerialized),
+                     *this);
+
+  if (asyncRemoved)
+    SpecNd->addChild(createNode(Node::Kind::AsyncRemoved),
                      *this);
 
   SpecNd->addChild(createNode(Node::Kind::SpecializationPassID, PassID),
@@ -3754,10 +3783,6 @@ NodePointer Demangler::demangleFunctionEntity() {
     case 'U': Args = TypeAndIndex; Kind = Node::Kind::ExplicitClosure; break;
     case 'u': Args = TypeAndIndex; Kind = Node::Kind::ImplicitClosure; break;
     case 'A': Args = Index; Kind = Node::Kind::DefaultArgumentInitializer; break;
-    case 'a':
-      Args = ContextArg;
-      Kind = Node::Kind::RuntimeAttributeGenerator;
-      break;
     case 'm': return demangleEntity(Node::Kind::Macro);
     case 'M': return demangleMacroExpansion();
     case 'p': return demangleEntity(Node::Kind::GenericTypeParamDecl);

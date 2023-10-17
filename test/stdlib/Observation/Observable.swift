@@ -1,12 +1,9 @@
 // REQUIRES: swift_swift_parser, executable_test
 
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library -enable-experimental-feature InitAccessors -enable-experimental-feature Macros -Xfrontend -plugin-path -Xfrontend %swift-host-lib-dir/plugins)
+// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library -enable-experimental-feature Macros -enable-experimental-feature ExtensionMacros -Xfrontend -plugin-path -Xfrontend %swift-plugin-dir)
 
 // Run this test via the swift-plugin-server
-// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library -enable-experimental-feature InitAccessors -enable-experimental-feature Macros -Xfrontend -external-plugin-path -Xfrontend %swift-host-lib-dir/plugins#%swift-plugin-server)
-
-// Asserts is required for '-enable-experimental-feature InitAccessors'.
-// REQUIRES: asserts
+// RUN: %target-run-simple-swift( -Xfrontend -disable-availability-checking -parse-as-library -enable-experimental-feature Macros -enable-experimental-feature ExtensionMacros -Xfrontend -external-plugin-path -Xfrontend %swift-plugin-dir#%swift-plugin-server)
 
 // REQUIRES: observation
 // REQUIRES: concurrency
@@ -15,7 +12,7 @@
 // UNSUPPORTED: back_deployment_runtime
 
 import StdlibUnittest
-import _Observation
+import Observation
 
 @usableFromInline
 @inline(never)
@@ -23,29 +20,6 @@ func _blackHole<T>(_ value: T) { }
 
 @Observable
 class ContainsNothing { }
-
-@Observable
-struct Structure {
-  var field: Int = 0
-}
-
-@Observable
-struct MemberwiseInitializers {
-  var field: Int
-}
-
-func validateMemberwiseInitializers() {
-  _ = MemberwiseInitializers(field: 3)
-}
-
-@Observable
-struct DefiniteInitialization {
-  var field: Int
-
-  init(field: Int) {
-    self.field = field
-  }
-}
 
 @Observable
 class ContainsWeak {
@@ -89,6 +63,31 @@ struct NonObservableContainer {
   @Observable
   class ObservableContents {
     var field: Int = 3
+  }
+}
+
+@Observable
+final class SendableClass: Sendable {
+  var field: Int = 3
+}
+
+@Observable
+class CodableClass: Codable {
+  var field: Int = 3
+}
+
+@Observable
+final class HashableClass {
+  var field: Int = 3
+}
+
+extension HashableClass: Hashable {
+  static func == (lhs: HashableClass, rhs: HashableClass) -> Bool {
+    lhs.field == rhs.field
+  }
+
+  func hash(into hasher: inout Hasher) {
+    hasher.combine(field)
   }
 }
 
@@ -159,7 +158,10 @@ class IsolatedInstance {
 }
 
 @Observable
-struct StructHasExistingConformance: Observable { }
+class IgnoredComputed {
+  @ObservationIgnored
+  var message: String { "hello" }
+}
 
 @Observable
 class ClassHasExistingConformance: Observable { }
@@ -177,6 +179,42 @@ class CapturedState<State>: @unchecked Sendable {
   }
 }
 
+@Observable
+class RecursiveInner {
+  var value = "prefix"
+}
+
+@Observable
+class RecursiveOuter {
+  var inner = RecursiveInner()
+  var value = "prefix"
+  @ObservationIgnored var innerEventCount = 0
+  @ObservationIgnored var outerEventCount = 0
+
+  func recursiveTrackingCalls() {
+    withObservationTracking({
+      let _ = value
+      _ = withObservationTracking({
+        inner.value
+      }, onChange: {
+        self.innerEventCount += 1
+      })
+    }, onChange: {
+      self.outerEventCount += 1
+    })
+  }
+}
+
+@Observable
+#if FOO
+@available(SwiftStdlib 5.9, *)
+#elseif BAR
+@available(SwiftStdlib 5.9, *)
+#else
+#endif
+class GuardedAvailability {
+}
+
 @main
 struct Validator {
   @MainActor
@@ -184,6 +222,10 @@ struct Validator {
 
     
     let suite = TestSuite("Observable")
+
+    suite.test("only instantiate") {
+      let test = MiddleNamePerson()
+    }
     
     suite.test("unobserved value changes") {
       let test = MiddleNamePerson()
@@ -206,23 +248,6 @@ struct Validator {
       expectEqual(changed.state, true)
       changed.state = false
       test.firstName = "c"
-      expectEqual(changed.state, false)
-    }
-
-    suite.test("tracking structure changes") {
-      let changed = CapturedState(state: false)
-      
-      var test = Structure()
-      withObservationTracking {
-        _blackHole(test.field)
-      } onChange: {
-        changed.state = true
-      }
-      
-      test.field = 4
-      expectEqual(changed.state, true)
-      changed.state = false
-      test.field = 5
       expectEqual(changed.state, false)
     }
 
@@ -381,7 +406,31 @@ struct Validator {
       test.test = "c"
       expectEqual(changed.state, false)
     }
-    
+
+    suite.test("recursive tracking inner then outer") {
+      let obj = RecursiveOuter()
+      obj.recursiveTrackingCalls()
+      obj.inner.value = "test"
+      expectEqual(obj.innerEventCount, 1)
+      expectEqual(obj.outerEventCount, 1)
+      obj.recursiveTrackingCalls()
+      obj.value = "test"
+      expectEqual(obj.innerEventCount, 1)
+      expectEqual(obj.outerEventCount, 2)
+    }
+
+    suite.test("recursive tracking outer then inner") {
+      let obj = RecursiveOuter()
+      obj.recursiveTrackingCalls()
+      obj.value = "test"
+      expectEqual(obj.innerEventCount, 0)
+      expectEqual(obj.outerEventCount, 1)
+      obj.recursiveTrackingCalls()
+      obj.inner.value = "test"
+      expectEqual(obj.innerEventCount, 2)
+      expectEqual(obj.outerEventCount, 2)
+    }
+
     runAllTests()
   }
 }

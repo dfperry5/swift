@@ -64,6 +64,14 @@ public:
   SILGenModule &getSILGenModule() const;
   SILGenFunction &getSILGenFunction() const { return SGF; }
 
+  /// Given a value \p value, create a copy of it and return the relevant
+  /// ManagedValue.
+  ManagedValue copyOwnedObjectRValue(SILLocation loc, SILValue value,
+                                     ManagedValue::ScopeKind kind);
+
+  ManagedValue borrowObjectRValue(SILGenFunction &SGF, SILLocation loc,
+                                  SILValue value, ManagedValue::ScopeKind kind);
+
   SILDebugLocation
   getSILDebugLocation(SILLocation Loc,
                       bool ForMetaInstruction = false) override;
@@ -132,6 +140,14 @@ public:
   /// values.
   ManagedValue createExplicitCopyValue(SILLocation Loc, ManagedValue operand);
 
+  using SILBuilder::createWeakCopyValue;
+
+  ManagedValue createWeakCopyValue(SILLocation loc, ManagedValue originalValue);
+
+#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                          \
+  using SILBuilder::createStrongCopy##Name##Value;                             \
+  ManagedValue createStrongCopy##Name##Value(SILLocation loc,                  \
+                                             ManagedValue originalValue);
 #define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
   using SILBuilder::createStrongCopy##Name##Value;                             \
   ManagedValue createStrongCopy##Name##Value(SILLocation loc,                  \
@@ -251,6 +267,8 @@ public:
   ManagedValue createLoadCopy(SILLocation loc, ManagedValue addr,
                               const TypeLowering &lowering);
 
+  ManagedValue createLoadTrivial(SILLocation loc, ManagedValue addr);
+
   /// Create a SILArgument for an input parameter. Asserts if used to create a
   /// function argument for an out parameter.
   ManagedValue createInputFunctionArgument(
@@ -289,6 +307,7 @@ public:
   using SILBuilder::createCheckedCastBranch;
   void createCheckedCastBranch(SILLocation loc, bool isExact,
                                ManagedValue op,
+                               CanType sourceFormalTy,
                                SILType destLoweredTy,
                                CanType destFormalTy,
                                SILBasicBlock *trueBlock,
@@ -470,9 +489,10 @@ public:
   createGuaranteedCopyableToMoveOnlyWrapperValue(SILLocation loc,
                                                  ManagedValue value);
 
-  using SILBuilder::createMarkMustCheckInst;
-  ManagedValue createMarkMustCheckInst(SILLocation loc, ManagedValue value,
-                                       MarkMustCheckInst::CheckKind kind);
+  using SILBuilder::createMarkUnresolvedNonCopyableValueInst;
+  ManagedValue createMarkUnresolvedNonCopyableValueInst(
+      SILLocation loc, ManagedValue value,
+      MarkUnresolvedNonCopyableValueInst::CheckKind kind);
 
   using SILBuilder::emitCopyValueOperation;
   ManagedValue emitCopyValueOperation(SILLocation Loc, ManagedValue v);
@@ -480,6 +500,11 @@ public:
   void emitCopyAddrOperation(SILLocation loc, SILValue srcAddr,
                              SILValue destAddr, IsTake_t isTake,
                              IsInitialization_t isInitialize);
+
+  using SILBuilder::createEndLifetime;
+  void createEndLifetime(SILLocation loc, ManagedValue selfValue) {
+    createEndLifetime(loc, selfValue.forward(SGF));
+  }
 };
 
 } // namespace Lowering

@@ -64,6 +64,9 @@ bool ArgsToFrontendOptionsConverter::convert(
   if (const Arg *A = Args.getLastArg(OPT_prebuilt_module_cache_path)) {
     Opts.PrebuiltModuleCachePath = A->getValue();
   }
+  if (const Arg *A = Args.getLastArg(OPT_module_cache_path)) {
+    Opts.ExplicitModulesOutputPath = A->getValue();
+  }
   if (const Arg *A = Args.getLastArg(OPT_backup_module_interface_path)) {
     Opts.BackupModuleInterfaceDir = A->getValue();
   }
@@ -135,6 +138,7 @@ bool ArgsToFrontendOptionsConverter::convert(
   Opts.SerializeDependencyScannerCache |= Args.hasArg(OPT_serialize_dependency_scan_cache);
   Opts.ReuseDependencyScannerCache |= Args.hasArg(OPT_reuse_dependency_scan_cache);
   Opts.EmitDependencyScannerCacheRemarks |= Args.hasArg(OPT_dependency_scan_cache_remarks);
+  Opts.ParallelDependencyScan |= Args.hasArg(OPT_parallel_scan);
   if (const Arg *A = Args.getLastArg(OPT_dependency_scan_cache_path)) {
     Opts.SerializedDependencyScannerCachePath = A->getValue();
   }
@@ -249,6 +253,34 @@ bool ArgsToFrontendOptionsConverter::convert(
   if (checkBuildFromInterfaceOnlyOptions())
     return true;
 
+  Opts.DeterministicCheck = Args.hasArg(OPT_enable_deterministic_check);
+  Opts.EnableCaching = Args.hasArg(OPT_cache_compile_job);
+  Opts.EnableCachingRemarks = Args.hasArg(OPT_cache_remarks);
+  Opts.CacheSkipReplay = Args.hasArg(OPT_cache_disable_replay);
+  Opts.CASOpts.CASPath =
+      Args.getLastArgValue(OPT_cas_path, llvm::cas::getDefaultOnDiskCASPath());
+  Opts.CASOpts.PluginPath = Args.getLastArgValue(OPT_cas_plugin_path);
+  for (StringRef Opt : Args.getAllArgValues(OPT_cas_plugin_option)) {
+    StringRef Name, Value;
+    std::tie(Name, Value) = Opt.split('=');
+    Opts.CASOpts.PluginOptions.emplace_back(std::string(Name),
+                                            std::string(Value));
+  }
+
+  Opts.CASFSRootIDs = Args.getAllArgValues(OPT_cas_fs);
+  Opts.ClangIncludeTrees = Args.getAllArgValues(OPT_clang_include_tree_root);
+  Opts.InputFileKey = Args.getLastArgValue(OPT_input_file_key);
+  Opts.CacheReplayPrefixMap = Args.getAllArgValues(OPT_cache_replay_prefix_map);
+
+  if (Opts.EnableCaching && Opts.CASFSRootIDs.empty() &&
+      Opts.ClangIncludeTrees.empty() &&
+      FrontendOptions::supportCompilationCaching(Opts.RequestedAction)) {
+    if (!Args.hasArg(OPT_allow_unstable_cache_key_for_testing)) {
+        Diags.diagnose(SourceLoc(), diag::error_caching_no_cas_fs);
+        return true;
+    }
+  }
+
   if (FrontendOptions::doesActionGenerateIR(Opts.RequestedAction)) {
     if (Args.hasArg(OPT_experimental_skip_non_inlinable_function_bodies) ||
         Args.hasArg(OPT_experimental_skip_all_function_bodies) ||
@@ -288,6 +320,10 @@ bool ArgsToFrontendOptionsConverter::convert(
         A->getOption().matches(OPT_serialize_debugging_options);
   }
 
+  Opts.SkipNonExportableDecls |=
+      Args.hasArg(OPT_experimental_skip_non_exportable_decls);
+  // FIXME: Remove this with rdar://117020997
+  Opts.SkipNonExportableDecls |= Args.hasArg(OPT_experimental_lazy_typecheck);
   Opts.DebugPrefixSerializedDebuggingOptions |=
       Args.hasArg(OPT_prefix_serialized_debugging_options);
   Opts.EnableSourceImport |= Args.hasArg(OPT_enable_source_import);
@@ -346,34 +382,8 @@ bool ArgsToFrontendOptionsConverter::convert(
     Opts.serializedPathObfuscator.addMapping(SplitMap.first, SplitMap.second);
   }
   Opts.emptyABIDescriptor = Args.hasArg(OPT_empty_abi_descriptor);
-  Opts.DeterministicCheck = Args.hasArg(OPT_enable_deterministic_check);
   for (auto A : Args.getAllArgValues(options::OPT_block_list_file)) {
     Opts.BlocklistConfigFilePaths.push_back(A);
-  }
-
-  Opts.EnableCaching = Args.hasArg(OPT_cache_compile_job);
-  Opts.EnableCachingRemarks = Args.hasArg(OPT_cache_remarks);
-  Opts.CacheSkipReplay = Args.hasArg(OPT_cache_disable_replay);
-  Opts.CASOpts.CASPath =
-      Args.getLastArgValue(OPT_cas_path, llvm::cas::getDefaultOnDiskCASPath());
-  Opts.CASOpts.PluginPath = Args.getLastArgValue(OPT_cas_plugin_path);
-  for (StringRef Opt : Args.getAllArgValues(OPT_cas_plugin_option)) {
-    StringRef Name, Value;
-    std::tie(Name, Value) = Opt.split('=');
-    Opts.CASOpts.PluginOptions.emplace_back(std::string(Name),
-                                            std::string(Value));
-  }
-
-  Opts.CASFSRootIDs = Args.getAllArgValues(OPT_cas_fs);
-  Opts.ClangIncludeTrees = Args.getAllArgValues(OPT_clang_include_tree_root);
-
-  if (Opts.EnableCaching && Opts.CASFSRootIDs.empty() &&
-      Opts.ClangIncludeTrees.empty() &&
-      FrontendOptions::supportCompilationCaching(Opts.RequestedAction)) {
-    if (!Args.hasArg(OPT_allow_unstable_cache_key_for_testing)) {
-        Diags.diagnose(SourceLoc(), diag::error_caching_no_cas_fs);
-        return true;
-    }
   }
 
   return false;
@@ -706,7 +716,10 @@ bool ArgsToFrontendOptionsConverter::
 
 bool ArgsToFrontendOptionsConverter::checkBuildFromInterfaceOnlyOptions()
     const {
-  if (Opts.RequestedAction != FrontendOptions::ActionType::CompileModuleFromInterface &&
+  if (Opts.RequestedAction !=
+          FrontendOptions::ActionType::CompileModuleFromInterface &&
+      Opts.RequestedAction !=
+          FrontendOptions::ActionType::TypecheckModuleFromInterface &&
       Opts.ExplicitInterfaceBuild) {
     Diags.diagnose(SourceLoc(),
                    diag::error_cannot_explicit_interface_build_in_mode);
@@ -752,6 +765,11 @@ bool ArgsToFrontendOptionsConverter::checkUnusedSupplementaryOutputPaths()
   if (!FrontendOptions::canActionEmitABIDescriptor(Opts.RequestedAction) &&
       Opts.InputsAndOutputs.hasABIDescriptorOutputPath()) {
     Diags.diagnose(SourceLoc(), diag::error_mode_cannot_emit_abi_descriptor);
+    return true;
+  }
+  if (!FrontendOptions::canActionEmitAPIDescriptor(Opts.RequestedAction) &&
+      Opts.InputsAndOutputs.hasAPIDescriptorOutputPath()) {
+    Diags.diagnose(SourceLoc(), diag::error_mode_cannot_emit_api_descriptor);
     return true;
   }
   if (!FrontendOptions::canActionEmitConstValues(Opts.RequestedAction) &&

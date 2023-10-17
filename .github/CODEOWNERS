@@ -7,6 +7,9 @@
 # order.
 
 # TODO: /.clang-format
+
+/.clang-tidy   @egorzhdan
+
 # TODO: /.dir-locals.el
 # TODO: /.flake8
 # TODO: /.gitattributes
@@ -58,6 +61,7 @@
 /include/swift/AST/*Requirement*                   @hborla @slavapestov
 /include/swift/AST/*Substitution*                  @slavapestov
 /include/swift/AST/Evaluator*                      @CodaFi @slavapestov
+/include/swift/AST/DiagnosticsParse.def            @ahoppen @bnbarham @CodaFi @DougGregor @rintaro
 /include/swift/ClangImporter                       @zoecarver @hyp @egorzhdan
 /include/swift/DependencyScan                      @artemcm
 /include/swift/Driver                              @artemcm
@@ -65,6 +69,7 @@
 /include/swift/IDE/                                @ahoppen @bnbarham @rintaro @hamishknight
 /include/swift/Index/                              @bnbarham
 /include/swift/Refactoring                         @ahoppen @bnbarham
+/include/swift/Option/*Options*                    @tshortli
 /include/swift/Parse/                              @ahoppen @bnbarham @CodaFi @DougGregor @rintaro
 /include/swift/PrintAsClang                        @zoecarver @hyp @egorzhdan
 # TODO: /include/swift/SIL/
@@ -182,6 +187,7 @@
 /tools/SourceKit                                    @ahoppen @bnbarham @rintaro @hamishknight
 /tools/lldb-moduleimport-test/                      @adrian-prantl
 /tools/swift-ide-test                               @ahoppen @bnbarham @rintaro @hamishknight
+/tools/swift-inspect                                @mikeash @al45tair @compnerd
 /tools/swift-refactor                               @ahoppen @bnbarham
 
 # unittests

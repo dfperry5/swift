@@ -377,11 +377,14 @@ public:
   /// pack.
   bool hasParameterPack() const { return getASTType()->hasParameterPack(); }
 
-  /// Whether the type contains a concrete pack.
-  bool hasConcretePack() const { return getASTType()->hasConcretePack(); }
-
-  /// Whether the type contains some flavor of pack.
+  /// Whether the type contains a PackType.
   bool hasPack() const { return getASTType()->hasPack(); }
+
+  /// Whether the type contains a PackArchetypeType.
+  bool hasPackArchetype() const { return getASTType()->hasPackArchetype(); }
+
+  /// Whether the type contains any flavor of pack.
+  bool hasAnyPack() const { return getASTType()->hasAnyPack(); }
 
   /// True if the type is an empty tuple or an empty struct or a tuple or
   /// struct containing only empty types.
@@ -519,6 +522,13 @@ public:
     return false;
   }
 
+  bool isAsyncFunction() const {
+    if (auto *fTy = getASTType()->getAs<SILFunctionType>()) {
+      return fTy->isAsync();
+    }
+    return false;
+  }
+
   /// True if the type involves any archetypes.
   bool hasArchetype() const { return getASTType()->hasArchetype(); }
 
@@ -563,6 +573,8 @@ public:
   bool isTuple() const { return is<TupleType>(); }
   bool isFunction() const { return is<SILFunctionType>(); }
   bool isMetatype() const { return is<MetatypeType>(); }
+
+  VarDecl *getFieldDecl(intptr_t fieldIndex) const;
 
   /// Given that this is a nominal type, return the lowered type of
   /// the given field.  Applies substitutions as necessary.  The
@@ -743,17 +755,9 @@ public:
   /// wrapped type.
   bool isMoveOnly() const;
 
-  /// Is this a type that is a first class move only type. This returns false
-  /// for a move only wrapped type.
-  bool isPureMoveOnly() const;
-
   /// Return true if this is a value type (struct/enum) that requires
   /// deinitialization beyond destruction of its members.
   bool isValueTypeWithDeinit() const;
-
-  /// Returns true if and only if this type is a first class move only
-  /// type. NOTE: Returns false if the type is a move only wrapped type.
-  bool isMoveOnlyNominalType() const;
 
   /// Returns true if this SILType is a move only wrapper type.
   ///
@@ -863,6 +867,8 @@ public:
 
   SILType getInstanceTypeOfMetatype(SILFunction *function) const;
 
+  MetatypeRepresentation getRepresentationOfMetatype(SILFunction *function) const;
+
   bool isOrContainsObjectiveCClass() const;
 
   bool isCalleeConsumedFunction() const {
@@ -871,6 +877,9 @@ public:
   }
 
   bool isMarkedAsImmortal() const;
+
+  ProtocolConformanceRef conformsToProtocol(SILFunction *fn,
+                                            ProtocolDecl *protocol) const;
 
   //
   // Accessors for types used in SIL instructions:

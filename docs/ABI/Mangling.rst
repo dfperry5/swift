@@ -108,6 +108,10 @@ The following symbolic reference kinds are currently implemented:
      symbolic-extended-existential-type-shape ::= '\x0B' .{4} // Reference points directly to a NonUniqueExtendedExistentialTypeShape
    #endif
 
+   #if SWIFT_RUNTIME_VERSION >= 5.TBD
+    objective-c-protocol-relative-reference  ::=  `\x0C`  .{4} // Reference points directly to a objective-c protcol reference
+   #endif
+
 A mangled name may also include ``\xFF`` bytes, which are only used for
 alignment padding. They do not affect what the mangled name references and can
 be skipped over and ignored.
@@ -150,7 +154,6 @@ Globals
   #endif
   global ::= protocol-conformance 'Hc'   // protocol conformance runtime record
   global ::= global 'HF'                 // accessible function runtime record
-  global ::= global 'Ha'                 // runtime discoverable attribute record
 
   global ::= nominal-type 'Mo'           // class metadata immediate member base offset
 
@@ -1151,6 +1154,7 @@ Function Specializations
   specialization ::= type '_' type* 'Ts' SPEC-INFO     // Generic re-abstracted prespecialization
   specialization ::= type '_' type* 'TG' SPEC-INFO     // Generic not re-abstracted specialization
   specialization ::= type '_' type* 'Ti' SPEC-INFO     // Inlined function with generic substitutions.
+  specialization ::= type '_' type* 'Ta' SPEC-INFO     // Non-async specialization
 
 The types are the replacement types of the substitution list.
 
@@ -1173,7 +1177,7 @@ Some kinds need arguments, which precede ``Tf``.
   spec-arg ::= identifier
   spec-arg ::= type
 
-  SPEC-INFO ::= MT-REMOVED? FRAGILE? PASSID
+  SPEC-INFO ::= MT-REMOVED? FRAGILE? ASYNC-REMOVED? PASSID
 
   PASSID ::= '0'                             // AllocBoxToStack,
   PASSID ::= '1'                             // ClosureSpecializer,
@@ -1181,10 +1185,14 @@ Some kinds need arguments, which precede ``Tf``.
   PASSID ::= '3'                             // CapturePropagation,
   PASSID ::= '4'                             // FunctionSignatureOpts,
   PASSID ::= '5'                             // GenericSpecializer,
+  PASSID ::= '6'                             // MoveDiagnosticInOutToOut,
+  PASSID ::= '7'                             // AsyncDemotion,
 
   MT-REMOVED ::= 'm'                         // non-generic metatype arguments are removed in the specialized function
 
   FRAGILE ::= 'q'
+
+  ASYNC-REMOVED ::= 'a'                      // async effect removed
 
   ARG-SPEC-KIND ::= 'n'                      // Unmodified argument
   ARG-SPEC-KIND ::= 'c'                      // Consumes n 'type' arguments which are closed over types in argument order

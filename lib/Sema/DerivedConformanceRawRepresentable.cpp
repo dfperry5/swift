@@ -429,7 +429,7 @@ deriveRawRepresentable_init(DerivedConformance &derived) {
                             /*Failable=*/ true, /*FailabilityLoc=*/SourceLoc(),
                             /*Async=*/false, /*AsyncLoc=*/SourceLoc(),
                             /*Throws=*/false, /*ThrowsLoc=*/SourceLoc(),
-                            paramList,
+                            /*ThrownType=*/TypeLoc(), paramList,
                             /*GenericParams=*/nullptr, parentDC);
   
   initDecl->setImplicit();
@@ -460,7 +460,7 @@ bool DerivedConformance::canDeriveRawRepresentable(DeclContext *DC,
 
   rawType = DC->mapTypeIntoContext(rawType);
 
-  auto inherited = enumDecl->getInherited();
+  auto inherited = enumDecl->getInherited().getEntries();
   if (!inherited.empty() && inherited.front().wasValidated() &&
       inherited.front().isError())
     return false;

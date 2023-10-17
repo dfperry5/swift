@@ -47,8 +47,8 @@ SILValue SILGenFunction::emitSelfDeclForDestructor(VarDecl *selfDecl) {
   selfType = F.mapTypeIntoContext(selfType);
   SILValue selfValue = F.begin()->createFunctionArgument(selfType, selfDecl);
 
-  // If we have a move only type, then mark it with mark_must_check so we can't
-  // escape it.
+  // If we have a move only type, then mark it with
+  // mark_unresolved_non_copyable_value so we can't escape it.
   if (selfType.isMoveOnly()) {
     // For now, we do not handle move only class deinits. This is because we
     // need to do a bit more refactoring to handle the weird way that it deals
@@ -56,9 +56,10 @@ SILValue SILGenFunction::emitSelfDeclForDestructor(VarDecl *selfDecl) {
     // are owned, lets mark them as needing to be no implicit copy checked so
     // they cannot escape.
     if (selfValue->getOwnershipKind() == OwnershipKind::Owned) {
-      selfValue = B.createMarkMustCheckInst(
+      selfValue = B.createMarkUnresolvedNonCopyableValueInst(
           selfDecl, selfValue,
-          MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+          MarkUnresolvedNonCopyableValueInst::CheckKind::
+              ConsumableAndAssignable);
     }
   }
 
@@ -127,6 +128,39 @@ struct LoweredParamGenerator {
 
   void finish() {
     parameterTypes.finish();
+  }
+};
+
+struct WritebackReabstractedInoutCleanup final : Cleanup {
+  SILValue OrigAddress, SubstAddress;
+  AbstractionPattern OrigTy;
+  CanType SubstTy;
+  WritebackReabstractedInoutCleanup(SILValue origAddress, SILValue substAddress,
+                                    AbstractionPattern origTy,
+                                    CanType substTy)
+      : OrigAddress(origAddress), SubstAddress(substAddress),
+        OrigTy(origTy), SubstTy(substTy)
+  {}
+  
+  void emit(SILGenFunction &SGF, CleanupLocation l, ForUnwind_t forUnwind)
+  override {
+    Scope s(SGF.Cleanups, l);
+    // Load the final local value coming in.
+    auto mv = SGF.emitLoad(l, SubstAddress,
+                           SGF.getTypeLowering(SubstAddress->getType()),
+                           SGFContext(), IsTake);
+    // Reabstract the value back to the original representation.
+    mv = SGF.emitSubstToOrigValue(l, mv.ensurePlusOne(SGF, l),
+                                  OrigTy, SubstTy);
+    // Write it back to the original inout parameter.
+    SGF.B.createStore(l, mv.forward(SGF), OrigAddress,
+                      StoreOwnershipQualifier::Init);
+  }
+  
+  void dump(SILGenFunction&) const override {
+    llvm::errs() << "WritebackReabstractedInoutCleanup\n";
+    OrigAddress->print(llvm::errs());
+    SubstAddress->print(llvm::errs());
   }
 };
 
@@ -253,8 +287,27 @@ public:
       // If we are inout and are move only, insert a note to the move checker to
       // check ownership.
       if (mv.getType().isMoveOnly() && !mv.getType().isMoveOnlyWrapped())
-        mv = SGF.B.createMarkMustCheckInst(
-            loc, mv, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+        mv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+            loc, mv,
+            MarkUnresolvedNonCopyableValueInst::CheckKind::
+                ConsumableAndAssignable);
+
+      // If the value needs to be reabstracted, set up a shadow copy with
+      // writeback here.
+      if (argType.getASTType() != mv.getType().getASTType()) {
+        // Load the value coming in.
+        auto origBuf = mv.getValue();
+        mv = SGF.emitLoad(loc, origBuf, SGF.getTypeLowering(mv.getType()), SGFContext(), IsTake);
+        // Reabstract the value if necessary.
+        mv = SGF.emitOrigToSubstValue(loc, mv.ensurePlusOne(SGF, loc), orig, t);
+        // Store the value to a local buffer.
+        auto substBuf = SGF.emitTemporaryAllocation(loc, argType);
+        SGF.B.createStore(loc, mv.forward(SGF), substBuf, StoreOwnershipQualifier::Init);
+        // Introduce a writeback to put the final value back in the inout.
+        SGF.Cleanups.pushCleanup<WritebackReabstractedInoutCleanup>(origBuf, substBuf, orig, t);
+        mv = ManagedValue::forLValue(substBuf);
+      }
+
       return mv;
     }
 
@@ -406,9 +459,10 @@ public:
       }
       auto tupleValue = SGF.B.createTuple(loc, tl.getLoweredType(),
                                           elementValues);
-      return canBeGuaranteed
-        ? ManagedValue::forUnmanaged(tupleValue)
-        : SGF.emitManagedRValueWithCleanup(tupleValue);
+      if (tupleValue->getOwnershipKind() == OwnershipKind::None)
+        return ManagedValue::forObjectRValueWithoutOwnership(tupleValue);
+      return canBeGuaranteed ? ManagedValue::forBorrowedObjectRValue(tupleValue)
+                             : SGF.emitManagedRValueWithCleanup(tupleValue);
     } else {
       // If the type is address-only, we need to move or copy the elements into
       // a tuple in memory.
@@ -547,7 +601,7 @@ public:
         if (pd->hasExternalPropertyWrapper())
           pd = cast<ParamDecl>(pd->getPropertyWrapperBackingProperty());
         substFormalParams.push_back(
-          pd->toFunctionParam(pd->getType()).getCanonical(nullptr));
+          pd->toFunctionParam(pd->getTypeInContext()).getCanonical(nullptr));
       };
       for (auto paramDecl : *paramList) {
         addParamDecl(paramDecl);
@@ -605,7 +659,7 @@ private:
     if (FormalParamTypes && FormalParamTypes->isOrigPackExpansion()) {
       paramValue = argEmitter.handlePackComponent(*FormalParamTypes);
     } else {
-      auto substType = pd->getType()->getCanonicalType();
+      auto substType = pd->getTypeInContext()->getCanonicalType();
       assert(!FormalParamTypes ||
              FormalParamTypes->getSubstParam().getParameterType() == substType);
       auto origType = (FormalParamTypes ? FormalParamTypes->getOrigType()
@@ -651,7 +705,7 @@ private:
     // - @_eagerMove
     // - @_noEagerMove
     bool isNoImplicitCopy = pd->isNoImplicitCopy();
-    if (!argrv.getType().isPureMoveOnly()) {
+    if (!argrv.getType().getASTType()->isNoncopyable()) {
       isNoImplicitCopy |= pd->getSpecifier() == ParamSpecifier::Borrowing;
       isNoImplicitCopy |= pd->getSpecifier() == ParamSpecifier::Consuming;
       if (pd->isSelfParameter()) {
@@ -681,7 +735,7 @@ private:
         auto boxType = SGF.SGM.Types.getContextBoxTypeForCapture(
             pd,
             SGF.SGM.Types.getLoweredRValueType(TypeExpansionContext::minimal(),
-                                               pd->getType()),
+                                               pd->getTypeInContext()),
             SGF.F.getGenericEnvironment(),
             /*mutable*/ false);
 
@@ -707,8 +761,9 @@ private:
       // consume the value.
       assert(argrv.getOwnershipKind() == OwnershipKind::Guaranteed);
       argrv = argrv.copy(SGF, loc);
-      argrv = SGF.B.createMarkMustCheckInst(
-          loc, argrv, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+      argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+          loc, argrv,
+          MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
       return completeUpdate(argrv);
     }
 
@@ -720,38 +775,42 @@ private:
 
       // If our argument was owned, we use no implicit copy. Otherwise, we
       // use no copy.
-      MarkMustCheckInst::CheckKind kind;
+      MarkUnresolvedNonCopyableValueInst::CheckKind kind;
       switch (pd->getValueOwnership()) {
       case ValueOwnership::Default:
       case ValueOwnership::Shared:
       case ValueOwnership::InOut:
-        kind = MarkMustCheckInst::CheckKind::NoConsumeOrAssign;
+        kind = MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign;
         break;
 
       case ValueOwnership::Owned:
-        kind = MarkMustCheckInst::CheckKind::ConsumableAndAssignable;
+        kind = MarkUnresolvedNonCopyableValueInst::CheckKind::
+            ConsumableAndAssignable;
         break;
       }
 
-      argrv = SGF.B.createMarkMustCheckInst(loc, argrv, kind);
+      argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(loc, argrv, kind);
       return completeUpdate(argrv);
     }
 
     if (argrv.getOwnershipKind() == OwnershipKind::Guaranteed) {
       argrv = SGF.B.createGuaranteedCopyableToMoveOnlyWrapperValue(loc, argrv);
       argrv = argrv.copy(SGF, loc);
-      argrv = SGF.B.createMarkMustCheckInst(
-          loc, argrv, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+      argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+          loc, argrv,
+          MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
       return completeUpdate(argrv);
     }
 
     if (argrv.getOwnershipKind() == OwnershipKind::Owned) {
-      // If we have an owned value, forward it into the mark_must_check to
-      // avoid an extra destroy_value.
+      // If we have an owned value, forward it into the
+      // mark_unresolved_non_copyable_value to avoid an extra destroy_value.
       argrv = SGF.B.createOwnedCopyableToMoveOnlyWrapperValue(loc, argrv);
       argrv = SGF.B.createMoveValue(loc, argrv, true /*is lexical*/);
-      argrv = SGF.B.createMarkMustCheckInst(
-          loc, argrv, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+      argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+          loc, argrv,
+          MarkUnresolvedNonCopyableValueInst::CheckKind::
+              ConsumableAndAssignable);
       return completeUpdate(argrv);
     }
 
@@ -819,11 +878,13 @@ private:
       switch (pd->getValueOwnership()) {
       case ValueOwnership::Default:
         if (pd->isSelfParameter()) {
-          assert(!isa<MarkMustCheckInst>(argrv.getValue()) &&
+          assert(!isa<MarkUnresolvedNonCopyableValueInst>(argrv.getValue()) &&
                  "Should not have inserted mark must check inst in EmitBBArgs");
           if (!pd->isInOut()) {
-            argrv = SGF.B.createMarkMustCheckInst(
-                loc, argrv, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+            argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+                loc, argrv,
+                MarkUnresolvedNonCopyableValueInst::CheckKind::
+                    NoConsumeOrAssign);
           }
         } else {
           if (auto *fArg = dyn_cast<SILFunctionArgument>(argrv.getValue())) {
@@ -840,35 +901,41 @@ private:
             case SILArgumentConvention::Pack_Out:
               llvm_unreachable("Should have been handled elsewhere");
             case SILArgumentConvention::Indirect_In:
-              argrv = SGF.B.createMarkMustCheckInst(
+              argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
                   loc, argrv,
-                  MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+                  MarkUnresolvedNonCopyableValueInst::CheckKind::
+                      ConsumableAndAssignable);
               break;
             case SILArgumentConvention::Indirect_In_Guaranteed:
-              argrv = SGF.B.createMarkMustCheckInst(
-                  loc, argrv, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+              argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+                  loc, argrv,
+                  MarkUnresolvedNonCopyableValueInst::CheckKind::
+                      NoConsumeOrAssign);
             }
           } else {
-            assert(isa<MarkMustCheckInst>(argrv.getValue()) &&
+            assert(isa<MarkUnresolvedNonCopyableValueInst>(argrv.getValue()) &&
                    "Should have inserted mark must check inst in EmitBBArgs");
           }
         }
         break;
       case ValueOwnership::InOut: {
-        assert(isa<MarkMustCheckInst>(argrv.getValue()) &&
+        assert(isa<MarkUnresolvedNonCopyableValueInst>(argrv.getValue()) &&
                "Expected mark must check inst with inout to be handled in "
                "emitBBArgs earlier");
-        auto mark = cast<MarkMustCheckInst>(argrv.getValue());
+        auto mark = cast<MarkUnresolvedNonCopyableValueInst>(argrv.getValue());
         debugOperand = mark->getOperand();
         break;
       }
       case ValueOwnership::Owned:
-        argrv = SGF.B.createMarkMustCheckInst(
-            loc, argrv, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+        argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+            loc, argrv,
+            MarkUnresolvedNonCopyableValueInst::CheckKind::
+                ConsumableAndAssignable);
         break;
       case ValueOwnership::Shared:
-        argrv = SGF.B.createMarkMustCheckInst(
-            loc, argrv, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+        argrv = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+            loc, argrv,
+            MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
         break;
       }
     }
@@ -877,7 +944,8 @@ private:
       = SGF.B.createDebugValueAddr(loc, debugOperand, varinfo);
 
     if (argrv.getValue() != debugOperand) {
-      if (auto valueInst = dyn_cast<MarkMustCheckInst>(argrv.getValue())) {
+      if (auto valueInst =
+              dyn_cast<MarkUnresolvedNonCopyableValueInst>(argrv.getValue())) {
         // Move the debug instruction outside of any marker instruction that might
         // have been applied to the value, so that analysis doesn't move the
         // debug_value anywhere it shouldn't be.
@@ -904,7 +972,7 @@ private:
     SILLocation loc(PD);
     loc.markAsPrologue();
 
-    assert(PD->getType()->isMaterializable());
+    assert(PD->getTypeInContext()->isMaterializable());
 
     ++ArgNo;
     if (PD->hasName() || PD->isIsolated()) {
@@ -962,7 +1030,7 @@ void SILGenFunction::bindParameterForForwarding(ParamDecl *param,
     param = cast<ParamDecl>(param->getPropertyWrapperBackingProperty());
   }
 
-  makeArgument(param->getType(), param, parameters, *this);
+  makeArgument(param->getTypeInContext(), param, parameters, *this);
 }
 
 void SILGenFunction::bindParametersForForwarding(const ParameterList *params,
@@ -1018,7 +1086,7 @@ static void emitCaptureArguments(SILGenFunction &SGF,
     auto *fArg = SGF.F.begin()->createFunctionArgument(ty, VD);
     fArg->setClosureCapture(true);
 
-    ManagedValue val = ManagedValue::forUnmanaged(fArg);
+    ManagedValue val = ManagedValue::forBorrowedRValue(fArg);
 
     // If the original variable was settable, then Sema will have treated the
     // VarDecl as an lvalue, even in the closure's use.  As such, we need to
@@ -1046,8 +1114,9 @@ static void emitCaptureArguments(SILGenFunction &SGF,
     // with consuming the move only type.
     if (val.getType().isMoveOnly()) {
       val = val.ensurePlusOne(SGF, Loc);
-      val = SGF.B.createMarkMustCheckInst(
-          Loc, val, MarkMustCheckInst::CheckKind::NoConsumeOrAssign);
+      val = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+          Loc, val,
+          MarkUnresolvedNonCopyableValueInst::CheckKind::NoConsumeOrAssign);
     }
 
     arg = val.getValue();
@@ -1079,25 +1148,31 @@ static void emitCaptureArguments(SILGenFunction &SGF,
     LLVM_FALLTHROUGH;
 
   case CaptureKind::Immutable: {
+    auto argIndex = SGF.F.begin()->getNumArguments();
     // Non-escaping stored decls are captured as the address of the value.
-    auto argConv = SGF.F.getConventions().getSILArgumentConvention(
-        SGF.F.begin()->getNumArguments());
+    auto argConv = SGF.F.getConventions().getSILArgumentConvention(argIndex);
     bool isInOut = (argConv == SILArgumentConvention::Indirect_Inout ||
                     argConv == SILArgumentConvention::Indirect_InoutAliasable);
-    if (isInOut || SGF.SGM.M.useLoweredAddresses()) {
+    auto param = SGF.F.getConventions().getParamInfoForSILArg(argIndex);
+    if (SGF.F.getConventions().isSILIndirect(param)) {
       ty = ty.getAddressType();
     }
     auto *fArg = SGF.F.begin()->createFunctionArgument(ty, VD);
     fArg->setClosureCapture(true);
     arg = SILValue(fArg);
 
-    // If our capture is no escape and we have a noncopyable value, insert a
-    // consumable and assignable. If we have an escaping closure, we are going
-    // to emit an error later in SIL since it is illegal to capture an inout
-    // value in an escaping closure.
-    if (isInOut && ty.isPureMoveOnly() && capture.isNoEscape()) {
-      arg = SGF.B.createMarkMustCheckInst(
-          Loc, arg, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+    // If we have an inout noncopyable parameter, insert a consumable and
+    // assignable.
+    //
+    // NOTE: If we have an escaping closure, we are going to emit an error later
+    // in SIL since it is illegal to capture an inout value in an escaping
+    // closure. The later code knows how to handle that we have the
+    // mark_unresolved_non_copyable_value here.
+    if (isInOut && ty.getASTType()->isNoncopyable()) {
+      arg = SGF.B.createMarkUnresolvedNonCopyableValueInst(
+          Loc, arg,
+          MarkUnresolvedNonCopyableValueInst::CheckKind::
+              ConsumableAndAssignable);
     }
     break;
   }
@@ -1167,11 +1242,20 @@ void SILGenFunction::emitProlog(
       auto &lowering = getTypeLowering(type);
       SILType ty = lowering.getLoweredType();
       SILValue val = F.begin()->createFunctionArgument(ty);
-      OpaqueValues[opaqueValue] = ManagedValue::forUnmanaged(val);
 
       // Opaque values are always passed 'owned', so add a clean up if needed.
+      //
+      // TODO: Should this be tied to the mv?
       if (!lowering.isTrivial())
         enterDestroyCleanup(val);
+
+      ManagedValue mv;
+      if (lowering.isTrivial())
+        mv = ManagedValue::forObjectRValueWithoutOwnership(val);
+      else
+        mv = ManagedValue::forUnmanagedOwnedValue(val);
+
+      OpaqueValues[opaqueValue] = mv;
 
       continue;
     }
@@ -1196,7 +1280,7 @@ void SILGenFunction::emitProlog(
           // the instance properties of the class.
           return false;
 
-        case ActorIsolation::Independent:
+        case ActorIsolation::Nonisolated:
         case ActorIsolation::Unspecified:
           return false;
         }
@@ -1234,7 +1318,7 @@ void SILGenFunction::emitProlog(
   // Local function to load the expected executor from a local actor
   auto loadExpectedExecutorForLocalVar = [&](VarDecl *var) {
     auto loc = RegularLocation::getAutoGeneratedLocation(F.getLocation());
-    Type actorType = var->getType();
+    Type actorType = var->getTypeInContext();
     RValue actorInstanceRV = emitRValueForDecl(
         loc, var, actorType, AccessSemantics::Ordinary);
     ManagedValue actorInstance =
@@ -1247,7 +1331,7 @@ void SILGenFunction::emitProlog(
     auto actorIsolation = getActorIsolation(funcDecl);
     switch (actorIsolation.getKind()) {
     case ActorIsolation::Unspecified:
-    case ActorIsolation::Independent:
+    case ActorIsolation::Nonisolated:
       break;
 
     case ActorIsolation::ActorInstance: {
@@ -1265,7 +1349,14 @@ void SILGenFunction::emitProlog(
           ManagedValue actorArg;
           if (actorIsolation.getActorInstanceParameter() == 0) {
             assert(selfParam && "no self parameter for ActorInstance isolation");
-            auto selfArg = ManagedValue::forUnmanaged(F.getSelfArgument());
+            ManagedValue selfArg;
+            if (F.getSelfArgument()->getOwnershipKind() ==
+                OwnershipKind::Guaranteed) {
+              selfArg = ManagedValue::forBorrowedRValue(F.getSelfArgument());
+            } else {
+              selfArg =
+                  ManagedValue::forUnmanagedOwnedValue(F.getSelfArgument());
+            }
             ExpectedExecutor = emitLoadActorExecutor(loc, selfArg);
           } else {
             unsigned isolatedParamIdx =
@@ -1291,17 +1382,19 @@ void SILGenFunction::emitProlog(
     bool wantExecutor = F.isAsync() || wantDataRaceChecks;
     auto actorIsolation = closureExpr->getActorIsolation();
     switch (actorIsolation.getKind()) {
-    case ClosureActorIsolation::Independent:
+    case ActorIsolation::Unspecified:
+    case ActorIsolation::Nonisolated:
       break;
 
-    case ClosureActorIsolation::ActorInstance: {
+    case ActorIsolation::ActorInstance: {
       if (wantExecutor) {
         loadExpectedExecutorForLocalVar(actorIsolation.getActorInstance());
       }
       break;
     }
 
-    case ClosureActorIsolation::GlobalActor:
+    case ActorIsolation::GlobalActor:
+    case ActorIsolation::GlobalActorUnsafe:
       if (wantExecutor) {
         ExpectedExecutor =
           emitLoadGlobalActorExecutor(actorIsolation.getGlobalActor());
@@ -1341,7 +1434,7 @@ void SILGenFunction::emitProlog(
   // uninhabited
   if (paramList) {
     for (auto *param : *paramList) {
-      if (param->getType()->isStructurallyUninhabited()) {
+      if (param->getTypeInContext()->isStructurallyUninhabited()) {
         SILLocation unreachableLoc(param);
         unreachableLoc.markAsPrologue();
         B.createUnreachable(unreachableLoc);
@@ -1369,8 +1462,8 @@ SILValue SILGenFunction::emitMainExecutor(SILLocation loc) {
             ctx,
             DeclBaseName(ctx.getIdentifier("_getMainExecutor")),
             /*Arguments*/ emptyParams),
-        {}, /*async*/ false, /*throws*/ false, {}, emptyParams,
-        ctx.TheExecutorType,
+        {}, /*async*/ false, /*throws*/ false, /*thrownType*/Type(), {},
+        emptyParams, ctx.TheExecutorType,
         getModule().getSwiftModule());
     getMainExecutorFuncDecl->getAttrs().add(
         new (ctx) SILGenNameAttr("swift_task_getMainExecutor", /*raw*/ false,
@@ -1418,8 +1511,8 @@ SILValue SILGenFunction::emitLoadGlobalActorExecutor(Type globalActor) {
 
   CanType actorMetaType = CanMetatypeType::get(actorType, metaRepr);
   ManagedValue actorMetaTypeValue =
-    ManagedValue::forUnmanaged(B.createMetatype(loc,
-      SILType::getPrimitiveObjectType(actorMetaType)));
+      ManagedValue::forObjectRValueWithoutOwnership(B.createMetatype(
+          loc, SILType::getPrimitiveObjectType(actorMetaType)));
 
   RValue actorInstanceRV = emitRValueForStorageLoad(loc, actorMetaTypeValue,
     actorMetaType, /*isSuper*/ false, sharedInstanceDecl, PreparedArguments(),
@@ -1478,7 +1571,7 @@ SILGenFunction::emitExecutor(SILLocation loc, ActorIsolation isolation,
                              llvm::Optional<ManagedValue> maybeSelf) {
   switch (isolation.getKind()) {
   case ActorIsolation::Unspecified:
-  case ActorIsolation::Independent:
+  case ActorIsolation::Nonisolated:
     return llvm::None;
 
   case ActorIsolation::ActorInstance: {
@@ -1504,9 +1597,9 @@ void SILGenFunction::emitHopToActorValue(SILLocation loc, ManagedValue actor) {
       getActorIsolationOfContext(FunctionDC, [](AbstractClosureExpr *CE) {
         return CE->getActorIsolation();
       });
-  if (isolation != ActorIsolation::Independent
+  if (isolation != ActorIsolation::Nonisolated
       && isolation != ActorIsolation::Unspecified) {
-    // TODO: Explicit hop with no hop-back should only be allowed in independent
+    // TODO: Explicit hop with no hop-back should only be allowed in nonisolated
     // async functions. But it needs work for any closure passed to
     // Task.detached, which currently has unspecified isolation.
     llvm::report_fatal_error(
@@ -1532,15 +1625,11 @@ void SILGenFunction::emitPreconditionCheckExpectedExecutor(
   // Call the library function that performs the checking.
   auto args = emitSourceLocationArgs(loc.getSourceLoc(), loc);
 
-  emitApplyOfLibraryIntrinsic(loc, checkExecutor, SubstitutionMap(),
-                              {
-                                args.filenameStartPointer,
-                                args.filenameLength,
-                                args.filenameIsAscii,
-                                args.line,
-                                ManagedValue::forUnmanaged(executor)
-                              },
-                              SGFContext());
+  emitApplyOfLibraryIntrinsic(
+      loc, checkExecutor, SubstitutionMap(),
+      {args.filenameStartPointer, args.filenameLength, args.filenameIsAscii,
+       args.line, ManagedValue::forObjectRValueWithoutOwnership(executor)},
+      SGFContext());
 }
 
 bool SILGenFunction::unsafelyInheritsExecutor() {

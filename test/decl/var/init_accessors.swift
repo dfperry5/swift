@@ -1,6 +1,4 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-feature InitAccessors
-
-// REQUIRES: asserts
+// RUN: %target-typecheck-verify-swift
 
 func test_empty_init_accessor() {
   struct Test {
@@ -25,7 +23,8 @@ func test_empty_init_accessor() {
 func test_invalid_init_accessor_use() {
   var other: String = "" // expected-warning {{}}
   var x: Int {
-    init(initialValue) initializes(other) {}
+    @storageRestrictions(initializes: other)
+    init(initialValue) {}
     // expected-error@-1 {{init accessors could only be associated with properties}}
 
     get { 42 }
@@ -46,7 +45,8 @@ func test_use_of_initializes_accesses_on_non_inits() {
     var y: String
 
     var _x: Int {
-      init(initialValue) initializes(x) accesses(y) { // Ok
+      @storageRestrictions(initializes: x, accesses: y)
+      init(initialValue) { // Ok
       }
 
       get { x }
@@ -55,14 +55,17 @@ func test_use_of_initializes_accesses_on_non_inits() {
 
     var _y: String {
       get { y }
-      set(initialValue) initializes(y) {}
-      // expected-error@-1 {{initalizes(...) attribute could only be used with init accessors}}
+
+      @storageRestrictions(initializes: y)
+      // expected-error@-1 {{@storageRestrictions attribute could only be used with init accessors}}
+      set(initialValue) {}
     }
 
     var _q: String {
       get { y }
-      set(initialValue) accesses(x) {}
-      // expected-error@-1 {{accesses(...) attribute could only be used with init accessors}}
+      @storageRestrictions(accesses: x)
+      // expected-error@-1 {{@storageRestrictions attribute could only be used with init accessors}}
+      set(initialValue) {}
     }
 
     init(x: Int, y: String) {
@@ -76,15 +79,21 @@ func test_invalid_refs_in_init_attrs() {
   struct Test {
     var c: Int { get { 42 } }
     var x: Int {
-      init(initialValue) initializes(a) accesses(b, c) {}
+      @storageRestrictions(initializes: a, accesses: b, c)
       // expected-error@-1 {{find type 'a' in scope}}
       // expected-error@-2 {{find type 'b' in scope}}
       // expected-error@-3 {{init accessor cannot refer to property 'c'; init accessors can refer only to stored properties}}
+      init(initialValue) {}
+
+      get { 0 }
     }
 
     var y: String {
-      init(initialValue) initializes(test) {}
+      @storageRestrictions(initializes: test)
       // expected-error@-1 {{ambiguous reference to member 'test'}}
+      init(initialValue) {}
+
+      get { "" }
     }
 
     func test(_: Int) {} // expected-note {{'test' declared here}}
@@ -98,14 +107,18 @@ func test_assignment_to_let_properties() {
     let y: Int // expected-note {{change 'let' to 'var' to make it mutable}}
 
     var pointX: Int {
-      init(initialValue) initializes(x) accesses(y) {
+      @storageRestrictions(initializes: x, accesses: y)
+      init(initialValue) {
         self.x = initialValue // Ok
         self.y = 42 // expected-error {{cannot assign to property: 'y' is a 'let' constant}}
       }
+
+      get { x }
     }
 
     var point: (Int, Int) {
-      init(initialValue) initializes(x, y) {
+      @storageRestrictions(initializes: x, y)
+      init(initialValue) {
         self.x = initialValue.0 // Ok
         self.y = initialValue.1 // Ok
       }
@@ -126,8 +139,9 @@ func test_duplicate_and_computed_lazy_properties() {
     var _b: Int
 
     var a: Int {
-      init(initialValue) initializes(_b, _a) accesses(_a) {
-        // expected-error@-1 {{property '_a' cannot be both initialized and accessed}}
+      @storageRestrictions(initializes: _b, _a, accesses: _a)
+      // expected-error@-1 {{property '_a' cannot be both initialized and accessed}}
+      init(initialValue) {
       }
 
       get { _a }
@@ -142,10 +156,13 @@ func test_duplicate_and_computed_lazy_properties() {
     var _a: Int
 
     var a: Int {
-      init(initialValue) initializes(a, c) accesses(_a, b) {}
+      @storageRestrictions(initializes: a, c, accesses: _a, b)
       // expected-error@-1 {{init accessor cannot refer to property 'a'; init accessors can refer only to stored properties}}
       // expected-error@-2 {{init accessor cannot refer to property 'b'; init accessors can refer only to stored properties}}
       // expected-error@-3 {{init accessor cannot refer to property 'c'; init accessors can refer only to stored properties}}
+      init(initialValue) {}
+
+      get { _a }
     }
 
     var b: Int {
@@ -204,7 +221,8 @@ func test_invalid_references() {
     var _d: String
 
     var data: Int {
-      init(initialValue) initializes(_a) accesses(_d) {
+      @storageRestrictions(initializes: _a, accesses: _d)
+      init(initialValue) {
         _a = initialValue // Ok
 
         print(_d) // Ok
@@ -249,7 +267,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     var _b: Int
 
     var a: T {
-      init(initialValue) initializes(_a) {
+      @storageRestrictions(initializes: _a)
+      init(initialValue) {
         _a = initialValue
       }
 
@@ -258,7 +277,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     }
 
     var pair: (T, Int) {
-      init(initialValue) initializes(_a, _b) {
+      @storageRestrictions(initializes: _a, _b)
+      init(initialValue) {
         _a = initialValue.0
         _b = initialValue.1
       }
@@ -278,7 +298,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     var _b: Int
 
     var a: T {
-      init(initialValue) initializes(_a) {
+      @storageRestrictions(initializes: _a)
+      init(initialValue) {
         _a = initialValue
       }
 
@@ -287,7 +308,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     }
 
     var b: Int {
-      init(initialValue) initializes(_b) {
+      @storageRestrictions(initializes: _b)
+      init(initialValue) {
         _b = initialValue
       }
 
@@ -298,7 +320,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     var _c: U
 
     var pair: (T, U) {
-      init(initialValue) initializes(_a, _c) {
+      @storageRestrictions(initializes: _a, _c)
+      init(initialValue) {
         _a = initialValue.0
         _c = initialValue.1
       }
@@ -316,7 +339,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     var _b: Int
 
     var a: T {
-      init(initialValue) initializes(_a) {
+      @storageRestrictions(initializes: _a)
+      init(initialValue) {
         _a = initialValue
       }
 
@@ -325,7 +349,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     }
 
     var b: Int {
-      init(initialValue) initializes(_b) {
+      @storageRestrictions(initializes: _b)
+      init(initialValue) {
         _b = initialValue
       }
 
@@ -336,7 +361,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     var _c: U
 
     var c: U {
-      init(initialValue) initializes(_c) {
+      @storageRestrictions(initializes: _c)
+      init(initialValue) {
         _c = initialValue
       }
 
@@ -345,7 +371,8 @@ func test_memberwise_with_overlaps_dont_synthesize_inits() {
     }
 
     var triple: (T, Int, U) {
-      init(initialValue) initializes(_a, _b, _c) {
+      @storageRestrictions(initializes: _a, _b, _c)
+      init(initialValue) {
         _a = initialValue.0
         _b = initialValue.1
         _c = initialValue.2
@@ -366,7 +393,8 @@ func test_memberwise_ordering() {
     var _b: Int
 
     var a: Int {
-      init(initialValue) initializes(_a) accesses(_b) {
+      @storageRestrictions(initializes: _a, accesses: _b)
+      init(initialValue) {
         _a = initialValue
       }
 
@@ -381,7 +409,8 @@ func test_memberwise_ordering() {
     var _a: Int
 
     var a: Int {
-      init(initialValue) initializes(_a) accesses(_b) {
+      @storageRestrictions(initializes: _a, accesses: _b)
+      init(initialValue) {
         // expected-note@-1 {{init accessor for 'a' cannot access stored property '_b' because it is called before '_b' is initialized}}
         _a = initialValue
       }
@@ -396,7 +425,8 @@ func test_memberwise_ordering() {
     var _a: Int
 
     var pair: (Int, Int) {
-      init(initialValue) initializes(_a, _b) {
+      @storageRestrictions(initializes: _a, _b)
+      init(initialValue) {
         _a = initialValue.0
         _b = initialValue.1
       }
@@ -415,7 +445,8 @@ func test_memberwise_ordering() {
     var _b: Int
 
     var pair: (Int, Int) {
-      init(initalValue) accesses(_a, _b) {
+      @storageRestrictions(accesses: _a, _b)
+      init(initalValue) {
       }
 
       get { (_a, _b) }
@@ -432,7 +463,8 @@ func test_memberwise_ordering() {
     var _b: Int
 
     var c: Int {
-      init(initalValue) initializes(_c) accesses(_a, _b) {
+      @storageRestrictions(initializes: _c, accesses: _a, _b)
+      init(initalValue) {
       }
 
       get { _c }
@@ -449,11 +481,15 @@ func test_default_arguments_are_analyzed() {
   struct Test {
     var pair: (Int, Int) = (0, 1) { // Ok
       init {}
+
+      get { (0, 1) }
     }
 
     var other: (Int, String) = ("", 42) {
       // expected-error@-1 {{cannot convert value of type '(String, Int)' to specified type '(Int, String)'}}
       init(initialValue) {}
+
+      get { (0, "") }
     }
 
     var otherPair = (0, 1) {
@@ -464,4 +500,193 @@ func test_default_arguments_are_analyzed() {
       // expected-error@-1 {{cannot convert return expression of type 'Int' to return type '(Int, Int)'}}
     }
   }
+}
+
+struct TestStructPropWithoutSetter {
+  var _x: Int
+
+  var x: Int {
+    @storageRestrictions(initializes: _x)
+    init(initialValue) {
+      self._x = initialValue
+    }
+
+    get { _x }
+  }
+
+  init(v: Int) {
+    x = v // Ok
+  }
+}
+
+extension TestStructPropWithoutSetter {
+  init(other: Int) {
+    x = other // Ok
+  }
+
+  init(other: inout TestStructPropWithoutSetter, v: Int) {
+    other.x = v // expected-error {{cannot assign to property: 'x' is immutable}}
+  }
+}
+
+do {
+  class TestClassPropWithoutSetter { // expected-error {{class 'TestClassPropWithoutSetter' has no initializers}}
+    var x: Int {
+      init {
+      }
+
+      get { 0 }
+    }
+  }
+
+  // This should generate only memberwise initializer because `a` doesn't have a default
+  struct TestStructWithoutSetter { // expected-note {{'init(a:)' declared here}}
+    var a: Int {
+      init {
+      }
+      get { 0 }
+    }
+  }
+
+  _ = TestStructWithoutSetter() // expected-error {{missing argument for parameter 'a' in call}}
+  _ = TestStructWithoutSetter(a: 42) // Ok
+
+  struct TestDefaultInitializable {
+    var a: Int? {
+      init {}
+      get { nil }
+    }
+  }
+
+  _ = TestDefaultInitializable() // Ok (`a` is initialized to `nil`)
+
+  struct TestMixedDefaultInitializable {
+    var a: Int? {
+      init {}
+      get { nil }
+    }
+
+    var _b: String
+    var b: String? {
+      @storageRestrictions(initializes: _b)
+      init { _b = newValue ?? "" }
+      get { _b }
+      set { _b = newValue ?? "" }
+    }
+  }
+
+  _ = TestMixedDefaultInitializable() // Ok (both `a` and `b` are initialized to `nil`)
+
+  class SubTestPropWithoutSetter : TestClassPropWithoutSetter {
+    init(otherV: Int) {
+      x = otherV // Ok
+    }
+  }
+
+  class OtherWithoutSetter<U> {
+    var data: U {
+      init {
+      }
+
+      get { fatalError() }
+    }
+
+    init(data: U) {
+      self.data = data // Ok
+    }
+  }
+}
+
+func test_invalid_storage_restrictions() {
+  struct Test {
+    var _a: Int = 0
+    var _b: Int = 0
+
+    var a: Int {
+      @storageRestrictions()
+      // expected-error@-1 {{missing label in @storageRestrictions attribute}}
+      init {}
+
+      get { _a }
+    }
+
+    var b: Int {
+      @storageRestrictions(initializes:)
+      // expected-error@-1 {{expected property name in @storageRestrictions list}}
+      init {}
+
+      get { _b }
+    }
+
+    var c: Int {
+      @storageRestrictions(initializes: a, initializes: b)
+      // expected-error@-1 {{duplicate label 'initializes' in @storageRestrictions attribute}}
+      // expected-error@-2 {{init accessor cannot refer to property 'a'; init accessors can refer only to stored properties}}
+      init {}
+
+      get { 0 }
+    }
+
+    var d: Int {
+      @storageRestrictions(accesses: a, accesses: c)
+      // expected-error@-1 {{duplicate label 'accesses' in @storageRestrictions attribute}}
+      // expected-error@-2 {{init accessor cannot refer to property 'a'; init accessors can refer only to stored properties}}
+      init {}
+
+      get { 0 }
+    }
+
+    var e: Int {
+      @storageRestrictions(initialize: a, b, accesses: c, d)
+      // expected-error@-1 {{unexpected label 'initialize' in @storageRestrictions attribute}}
+      init {}
+
+      get { 0 }
+    }
+
+    var f: Int {
+      @storageRestrictions(initializes: _a, accesses: _b, _a)
+      // expected-error@-1 {{property '_a' cannot be both initialized and accessed}}
+      init {}
+      // expected-error@-1 {{variable with an init accessor must also have a getter}}
+    }
+
+    var g: Int {
+      @storageRestrictions(initializes: _a)
+      // expected-error@-1 {{@storageRestrictions attribute could only be used with init accessors}}
+      get { 0 }
+    }
+
+    init() {}
+  }
+}
+
+do {
+  struct Test1 {
+    var q: String
+    var a: Int? {
+      init {}
+      get { 42 }
+    }
+  }
+
+  _ = Test1(q: "some question") // Ok `a` is default initialized to `nil`
+  _ = Test1(q: "ultimate question", a: 42)
+
+  struct Test2 {
+    var q: String
+
+    var _a: Int?
+    var a: Int? {
+      @storageRestrictions(initializes: _a)
+      init {
+        _a = newValue
+      }
+      get { _a }
+      set { _a = newValue }
+    }
+  }
+
+  _ = Test2(q: "some question") // Ok `a` is default initialized to `nil`
+  _ = Test2(q: "ultimate question", a: 42)
 }

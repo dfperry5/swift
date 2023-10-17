@@ -545,7 +545,7 @@ ERROR(expected_sil_profiler_counter_total,none,
       "expected profiler counter total", ())
 ERROR(expected_sil_profiler_counter_hash,none,
       "expected profiler counter hash", ())
-ERROR(expected_sil_test_specification_body,none,
+ERROR(expected_sil_specify_test_body,none,
       "expected a string consisting of the space-separated test arguments", ())
 
 // SIL Values
@@ -680,7 +680,7 @@ ERROR(sil_movevalue_invalid_optional_attribute,none,
 ERROR(sil_markmustcheck_invalid_attribute,none,
       "Attribute '[%0]' can not be applied to mark_value_as_moveonly", (StringRef))
 ERROR(sil_markmustcheck_requires_attribute,none,
-      "mark_must_check requires an attribute like 'noImplicitCopy'", ())
+      "mark_unresolved_non_copyable_value requires an attribute like 'noImplicitCopy'", ())
 ERROR(sil_moveonlytocopyable_invalid_attribute,none,
       "Attribute '[%0]' can not be applied to moveonlywrapper_to_copyable", (StringRef))
 ERROR(sil_moveonlytocopyable_requires_attribute,none,
@@ -1104,10 +1104,6 @@ ERROR(expected_expr_throw,PointsToFirstBadToken,
 // Discard Statement
 ERROR(expected_expr_discard,PointsToFirstBadToken,
       "expected expression in 'discard' statement", ())
-WARNING(forget_is_deprecated,PointsToFirstBadToken,
-      "'_forget' keyword is deprecated and will be removed soon; "
-      "use 'discard' instead",
-      ())
 
 // Await/Async
 ERROR(expected_await_not_async,none,
@@ -1248,8 +1244,9 @@ ERROR(case_stmt_without_body,none,
 // 'try' on statements
 ERROR(try_on_stmt,none,
       "'try' cannot be used with '%0'", (StringRef))
-ERROR(try_on_return_throw_yield,none,
-      "'try' must be placed on the %select{returned|thrown|yielded}0 expression",
+ERROR(try_must_come_after_stmt,none,
+      "'try' must be placed on the %select{returned|thrown|yielded|produced}0 "
+      "expression",
       (unsigned))
 ERROR(try_on_var_let,none,
       "'try' must be placed on the initial value expression", ())
@@ -1399,6 +1396,16 @@ ERROR(expected_expr_after_copy, none,
       "expected expression after 'copy'", ())
 ERROR(expected_expr_after_borrow, none,
       "expected expression after '_borrow'", ())
+ERROR(expected_expr_after_each, none,
+      "expected expression after 'each'", ())
+ERROR(expected_expr_after_repeat, none,
+      "expected expression after 'repeat'", ())
+ERROR(expected_expr_after_then,none,
+      "expected expression after 'then'", ())
+
+WARNING(unindented_code_after_then,none,
+        "expression following 'then' is treated as an argument of "
+        "the 'then'", ())
 
 WARNING(move_consume_final_spelling, none,
         "'_move' has been renamed to 'consume', and the '_move' spelling will be removed shortly", ())
@@ -1683,6 +1690,13 @@ ERROR(attr_type_eraser_expected_type_name,none,
 ERROR(attr_type_eraser_expected_rparen,none,
       "expected ')' after type name for @_typeEraser", ())
 
+ERROR(expected_thrown_error_type,none,
+      "expected thrown error type after 'throws('", ())
+ERROR(expected_rparen_after_thrown_error_type,none,
+      "expected ')' after thrown error type", ())
+ERROR(rethrows_with_thrown_error,none,
+      "'rethrows' cannot be combined with a specific thrown error type", ())
+
 ERROR(attr_private_import_expected_rparen,none,
       "expected ')' after function name for @_private", ())
 ERROR(attr_private_import_expected_sourcefile, none,
@@ -1842,6 +1856,19 @@ ERROR(documentation_attr_metadata_expected_text,none,
 ERROR(documentation_attr_duplicate_metadata,none,
       "cannot give more than one metadata argument to the same item", ())
 
+ERROR(attr_rawlayout_expected_label,none,
+      "expected %0 argument to @_rawLayout attribute", (StringRef))
+ERROR(attr_rawlayout_expected_integer_size,none,
+      "expected integer literal size in @_rawLayout attribute", ())
+ERROR(attr_rawlayout_expected_integer_alignment,none,
+      "expected integer literal alignment in @_rawLayout attribute", ())
+ERROR(attr_rawlayout_expected_integer_count,none,
+      "expected integer literal count in @_rawLayout attribute", ())
+ERROR(attr_rawlayout_expected_params,none,
+      "expected %1 argument after %0 argument in @_rawLayout attribute", (StringRef, StringRef))
+
+ERROR(attr_extern_expected_label,none,
+      "expected %0 argument to @_extern attribute", (StringRef))
 //------------------------------------------------------------------------------
 // MARK: Generics parsing diagnostics
 //------------------------------------------------------------------------------
@@ -2127,6 +2154,18 @@ ERROR(sil_markuncheckedreferencebinding_invalid_attribute,none,
 ERROR(init_accessor_is_not_on_property,none,
       "init accessors could only be associated with properties",
       ())
+
+ERROR(missing_storage_restrictions_attr_label,none,
+      "missing label in @storageRestrictions attribute", ())
+
+ERROR(invalid_storage_restrictions_attr_label,none,
+      "unexpected label %0 in @storageRestrictions attribute", (Identifier))
+
+ERROR(duplicate_storage_restrictions_attr_label,none,
+      "duplicate label %0 in @storageRestrictions attribute", (Identifier))
+
+ERROR(storage_restrictions_attr_expected_name,none,
+      "expected property name in @storageRestrictions list", ())
 
 #define UNDEFINE_DIAGNOSTIC_MACROS
 #include "DefineDiagnosticMacros.h"

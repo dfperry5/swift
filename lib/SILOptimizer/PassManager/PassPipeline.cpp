@@ -103,6 +103,7 @@ static void addOwnershipModelEliminatorPipeline(SILPassPipelinePlan &P) {
 /// order.
 static void addDefiniteInitialization(SILPassPipelinePlan &P) {
   P.addDefiniteInitialization();
+  P.addLetPropertyLowering();
   P.addRawSILInstLowering();
 }
 
@@ -132,6 +133,7 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   P.addAddressLowering();
 
   P.addFlowIsolation();
+  P.addSendNonSendable();
 
   // Automatic differentiation: canonicalize all differentiability witnesses
   // and `differentiable_function` instructions.
@@ -232,6 +234,9 @@ static void addMandatoryDiagnosticOptPipeline(SILPassPipelinePlan &P) {
   // until we can audit the later part of the pipeline. Eventually, this should
   // occur before IRGen.
   P.addMoveOnlyTypeEliminator();
+
+  // For embedded Swift: Specialize generic class vtables.
+  P.addVTableSpecializer();
 
   P.addMandatoryPerformanceOptimizations();
   P.addOnoneSimplification();
@@ -464,10 +469,16 @@ void addFunctionPasses(SILPassPipelinePlan &P,
   // makes a change we'll end up restarting the function passes on the
   // current function (after optimizing any new callees).
   P.addDevirtualizer();
-  P.addGenericSpecializer();
-  // Run devirtualizer after the specializer, because many
-  // class_method/witness_method instructions may use concrete types now.
-  P.addDevirtualizer();
+  // MandatoryPerformanceOptimizations already took care of all specializations
+  // in embedded Swift mode, running the generic specializer might introduce
+  // more generic calls from non-generic functions, which breaks the assumptions
+  // of embedded Swift.
+  if (!P.getOptions().EmbeddedSwift) {
+    P.addGenericSpecializer();
+    // Run devirtualizer after the specializer, because many
+    // class_method/witness_method instructions may use concrete types now.
+    P.addDevirtualizer();
+  }
   P.addARCSequenceOpts();
 
   if (P.getOptions().EnableOSSAModules) {
@@ -636,8 +647,8 @@ static void addPerfEarlyModulePassPipeline(SILPassPipelinePlan &P) {
 // callees. This provides more precise escape analysis and side effect analysis
 // of callee arguments.
 static void addHighLevelFunctionPipeline(SILPassPipelinePlan &P) {
-  P.startPipeline("HighLevel,Function+EarlyLoopOpt");
-  // FIXME: update EagerSpecializer to be a function pass!
+  P.startPipeline("HighLevel,Function+EarlyLoopOpt",
+                  true /*isFunctionPassPipeline*/);
   P.addEagerSpecializer();
   P.addObjCBridgingOptimization();
 
@@ -658,6 +669,9 @@ static void addHighLevelModulePipeline(SILPassPipelinePlan &P) {
   P.addPerformanceSILLinker();
   P.addDeadObjectElimination();
   P.addGlobalPropertyOpt();
+
+  if (P.getOptions().EnableAsyncDemotion)
+    P.addAsyncDemotion();
 
   // Do the first stack promotion on high-level SIL before serialization.
   //
@@ -687,11 +701,10 @@ static void addMidLevelFunctionPipeline(SILPassPipelinePlan &P) {
   P.addLoopUnroll();
 }
 
-static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
+  static void addClosureSpecializePassPipeline(SILPassPipelinePlan &P) {
   P.startPipeline("ClosureSpecialize");
   P.addDeadFunctionAndGlobalElimination();
   P.addReadOnlyGlobalVariablesPass();
-  P.addTargetConstantFolding();
   P.addDeadStoreElimination();
   P.addDeadObjectElimination();
 
@@ -1004,6 +1017,9 @@ SILPassPipelinePlan::getOnonePassPipeline(const SILOptions &Options) {
   // inlinable functions from imported ones.
   P.addOnonePrespecializations();
 
+  // For embedded Swift: CMO is used to serialize libraries.
+  P.addCrossModuleOptimization();
+
   // First serialize the SIL if we are asked to.
   P.startPipeline("Serialization");
   P.addSerializeSILPass();
@@ -1022,9 +1038,6 @@ SILPassPipelinePlan::getOnonePassPipeline(const SILOptions &Options) {
   P.startPipeline("Rest of Onone");
   P.addUsePrespecialized();
 
-  // Needed to fold MemoryLayout constants in performance-annotated functions.
-  P.addTargetConstantFolding();
-
   // Has only an effect if the -assume-single-thread option is specified.
   if (P.getOptions().AssumeSingleThreaded) {
     P.addAssumeSingleThreaded();
@@ -1036,6 +1049,13 @@ SILPassPipelinePlan::getOnonePassPipeline(const SILOptions &Options) {
   // This is mainly there to optimize `Builtin.isConcrete`, which must not be
   // constant folded before any generic specialization.
   P.addLateOnoneSimplification();
+
+  if (Options.EmbeddedSwift) {
+    // For embedded Swift: Remove all unspecialized functions. This is important
+    // to avoid having debuginfo references to these functions that we don't
+    // want to emit in IRGen.
+    P.addLateDeadFunctionAndGlobalElimination();
+  }
 
   P.addCleanupDebugSteps();
 

@@ -942,11 +942,6 @@ class ConjunctionStep : public BindingStep<ConjunctionElementProducer> {
   /// in isolated mode.
   SmallVector<Solution, 4> IsolatedSolutions;
 
-  /// If \c ConjunctionStep::attempt modified the constraint system options,
-  /// it will store the original options in this \c llvm::SaveAndRestore.
-  /// Upon \c resume, these values will be restored.
-  llvm::Optional<llvm::SaveAndRestore<ConstraintSystemOptions>> ModifiedOptions;
-
 public:
   ConjunctionStep(ConstraintSystem &cs, Constraint *conjunction,
                   SmallVectorImpl<Solution> &solutions)
@@ -1037,8 +1032,10 @@ private:
   /// Restore best and current scores as they were before conjunction.
   void restoreCurrentScore(const Score &solutionScore) const {
     CS.CurrentScore = CurrentScore;
-    CS.increaseScore(SK_Fix, solutionScore.Data[SK_Fix]);
-    CS.increaseScore(SK_Hole, solutionScore.Data[SK_Hole]);
+    CS.increaseScore(SK_Fix, Conjunction->getLocator(),
+                     solutionScore.Data[SK_Fix]);
+    CS.increaseScore(SK_Hole, Conjunction->getLocator(),
+                     solutionScore.Data[SK_Hole]);
   }
 
   void restoreBestScore() const { CS.solverState->BestScore = BestScore; }

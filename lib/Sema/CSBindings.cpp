@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 #include "swift/Sema/CSBindings.h"
 #include "TypeChecker.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/Sema/ConstraintGraph.h"
 #include "swift/Sema/ConstraintSystem.h"
@@ -669,7 +670,7 @@ void BindingSet::determineLiteralCoverage() {
       Type adjustedTy;
 
       std::tie(isCovered, adjustedTy) =
-          literal.isCoveredBy(*binding, allowsNil, CS.DC);
+          literal.isCoveredBy(*binding, allowsNil, CS);
 
       if (!isCovered)
         continue;
@@ -872,7 +873,7 @@ void PotentialBindings::addDefault(Constraint *constraint) {
   Defaults.insert(constraint);
 }
 
-bool LiteralRequirement::isCoveredBy(Type type, DeclContext *useDC) const {
+bool LiteralRequirement::isCoveredBy(Type type, ConstraintSystem &CS) const {
   auto coversDefaultType = [](Type type, Type defaultType) -> bool {
     if (!defaultType->hasUnboundGenericType())
       return type->isEqual(defaultType);
@@ -892,14 +893,12 @@ bool LiteralRequirement::isCoveredBy(Type type, DeclContext *useDC) const {
   if (hasDefaultType() && coversDefaultType(type, getDefaultType()))
     return true;
 
-  return (bool)TypeChecker::conformsToProtocol(type, getProtocol(),
-                                               useDC->getParentModule());
+  return bool(CS.lookupConformance(type, getProtocol()));
 }
 
 std::pair<bool, Type>
-LiteralRequirement::isCoveredBy(const PotentialBinding &binding,
-                                bool canBeNil,
-                                DeclContext *useDC) const {
+LiteralRequirement::isCoveredBy(const PotentialBinding &binding, bool canBeNil,
+                                ConstraintSystem &CS) const {
   auto type = binding.BindingType;
   switch (binding.Kind) {
   case AllowedBindingKind::Exact:
@@ -919,7 +918,7 @@ LiteralRequirement::isCoveredBy(const PotentialBinding &binding,
     if (type->isTypeVariableOrMember() || type->isPlaceholder())
       return std::make_pair(false, Type());
 
-    if (isCoveredBy(type, useDC)) {
+    if (isCoveredBy(type, CS)) {
       return std::make_pair(true, requiresUnwrap ? type : binding.BindingType);
     }
 
@@ -1250,31 +1249,24 @@ PotentialBindings::inferFromRelational(Constraint *constraint) {
     return llvm::None;
 
   if (TypeVar->getImpl().isKeyPathType()) {
-    auto *BGT = type->lookThroughAllOptionalTypes()->getAs<BoundGenericType>();
-    if (!BGT || !isKnownKeyPathType(BGT))
-      return llvm::None;
+    auto objectTy = type->lookThroughAllOptionalTypes();
 
-    // `PartialKeyPath<T>` represents a type-erased version of `KeyPath<T, V>`.
-    //
-    // In situations where partial key path cannot be used directly i.e.
-    // passing an argument to a parameter represented by a partial key path,
-    // let's attempt a `KeyPath` binding which would then be converted to a
-    // partial key path since there is a subtype relationship between them.
-    if (BGT->isPartialKeyPath() && kind == AllowedBindingKind::Subtypes) {
-      auto &ctx = CS.getASTContext();
-      auto *keyPathLoc = TypeVar->getImpl().getLocator();
-
-      auto rootTy = BGT->getGenericArgs()[0];
-      // Since partial key path is an erased version of `KeyPath`, the value
-      // type would never be used, which means that binding can use
-      // type variable generated for a result of key path expression.
-      auto valueTy =
-          keyPathLoc->castLastElementTo<LocatorPathElt::KeyPathType>()
-              .getValueType();
-
-      type = BoundGenericType::get(ctx.getKeyPathDecl(), Type(),
-                                   {rootTy, valueTy});
+    // If contextual type is an existential with a superclass
+    // constraint, let's try to infer a key path type from it.
+    if (kind == AllowedBindingKind::Subtypes) {
+      if (type->isExistentialType()) {
+        auto layout = type->getExistentialLayout();
+        if (auto superclass = layout.explicitSuperclass) {
+          if (isKnownKeyPathType(superclass)) {
+            type = superclass;
+            objectTy = superclass;
+          }
+        }
+      }
     }
+
+    if (!(isKnownKeyPathType(objectTy) || objectTy->is<AnyFunctionType>()))
+      return llvm::None;
   }
 
   if (auto *locator = TypeVar->getImpl().getLocator()) {
@@ -1483,6 +1475,7 @@ void PotentialBindings::infer(Constraint *constraint) {
   case ConstraintKind::ExplicitGenericArguments:
   case ConstraintKind::PackElementOf:
   case ConstraintKind::SameShape:
+  case ConstraintKind::MaterializePackExpansion:
     // Constraints from which we can't do anything.
     break;
 
@@ -2067,13 +2060,20 @@ bool TypeVarBindingProducer::computeNext() {
 
       for (auto supertype : enumerateDirectSupertypes(type)) {
         // If we're not allowed to try this binding, skip it.
-        if (auto simplifiedSuper = checkTypeOfBinding(TypeVar, supertype))
-          addNewBinding(binding.withType(*simplifiedSuper));
+        if (auto simplifiedSuper = checkTypeOfBinding(TypeVar, supertype)) {
+          auto supertype = *simplifiedSuper;
+          // A key path type cannot be bound to type-erased key path variants.
+          if (TypeVar->getImpl().isKeyPathType() &&
+              (supertype->isPartialKeyPath() || supertype->isAnyKeyPath()))
+            continue;
+
+          addNewBinding(binding.withType(supertype));
+        }
       }
     }
   }
 
-  if (NumTries == 0) {
+  if (newBindings.empty()) {
     // Add defaultable constraints (if any).
     for (auto *constraint : DelayedDefaults) {
       if (constraint->getKind() == ConstraintKind::FallbackType) {
@@ -2086,6 +2086,9 @@ bool TypeVarBindingProducer::computeNext() {
 
       addNewBinding(getDefaultBinding(constraint));
     }
+
+    // Drop all of the default since we have converted them into bindings.
+    DelayedDefaults.clear();
   }
 
   if (newBindings.empty())
@@ -2297,6 +2300,12 @@ bool TypeVariableBinding::attempt(ConstraintSystem &cs) const {
       if (TypeVar->getImpl().getGenericParameter())
         return false;
 
+      // Don't penalize solutions if we couldn't determine the type of the code
+      // completion token. We still want to examine the surrounding types in
+      // that case.
+      if (TypeVar->getImpl().isCodeCompletionToken())
+        return false;
+
       // Don't penalize solutions with holes due to missing arguments after the
       // code completion position.
       auto argLoc = srcLocator->findLast<LocatorPathElt::SynthesizedArgument>();
@@ -2315,7 +2324,7 @@ bool TypeVariableBinding::attempt(ConstraintSystem &cs) const {
     }
     // Reflect in the score that this type variable couldn't be
     // resolved and had to be bound to a placeholder "hole" type.
-    cs.increaseScore(SK_Hole);
+    cs.increaseScore(SK_Hole, srcLocator);
 
     if (auto fix = fixForHole(cs)) {
       if (cs.recordFix(/*fix=*/fix->first, /*impact=*/fix->second))

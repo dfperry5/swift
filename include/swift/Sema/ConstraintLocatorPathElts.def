@@ -54,6 +54,9 @@ SIMPLE_LOCATOR_PATH_ELT(AutoclosureResult)
 /// The result of a closure.
 SIMPLE_LOCATOR_PATH_ELT(ClosureResult)
 
+/// The thrown error of a closure.
+SIMPLE_LOCATOR_PATH_ELT(ClosureThrownError)
+
 /// FIXME: Misleading name: this locator is used only for single-expression
 /// closure returns.
 ///
@@ -123,7 +126,7 @@ CUSTOM_LOCATOR_PATH_ELT(KeyPathDynamicMember)
 SIMPLE_LOCATOR_PATH_ELT(KeyPathRoot)
 
 /// The type of the key path expression.
-CUSTOM_LOCATOR_PATH_ELT(KeyPathType)
+SIMPLE_LOCATOR_PATH_ELT(KeyPathType)
 
 /// The value of a key path.
 SIMPLE_LOCATOR_PATH_ELT(KeyPathValue)
@@ -259,8 +262,8 @@ CUSTOM_LOCATOR_PATH_ELT(SyntacticElement)
 /// The element of the pattern binding declaration.
 CUSTOM_LOCATOR_PATH_ELT(PatternBindingElement)
 
-/// A branch of a SingleValueStmtExpr.
-CUSTOM_LOCATOR_PATH_ELT(SingleValueStmtBranch)
+/// A particular result of a ThenStmt at a given index in a SingleValueStmtExpr.
+CUSTOM_LOCATOR_PATH_ELT(SingleValueStmtResult)
 
 /// A declaration introduced by a pattern: name (i.e. `x`) or `_`
 ABSTRACT_LOCATOR_PATH_ELT(PatternDecl)
@@ -271,6 +274,9 @@ ABSTRACT_LOCATOR_PATH_ELT(PatternDecl)
 
 /// A function type global actor.
 SIMPLE_LOCATOR_PATH_ELT(GlobalActorType)
+
+/// The thrown error of a function type.
+SIMPLE_LOCATOR_PATH_ELT(ThrownErrorType)
 
 /// A type coercion operand.
 SIMPLE_LOCATOR_PATH_ELT(CoercionOperand)

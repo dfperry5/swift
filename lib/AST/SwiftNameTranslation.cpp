@@ -156,9 +156,11 @@ isVisibleToObjC(const ValueDecl *VD, AccessLevel minRequiredAccess,
 StringRef
 swift::cxx_translation::getNameForCxx(const ValueDecl *VD,
                                       CustomNamesOnly_t customNamesOnly) {
-  if (const auto *Expose = VD->getAttrs().getAttribute<ExposeAttr>()) {
-    if (!Expose->Name.empty())
-      return Expose->Name;
+  ASTContext& ctx = VD->getASTContext();
+
+  for (auto *EA : VD->getAttrs().getAttributes<ExposeAttr>()) {
+    if (EA->getExposureKind() == ExposureKind::Cxx && !EA->Name.empty())
+      return EA->Name;
   }
 
   if (customNamesOnly)
@@ -166,6 +168,11 @@ swift::cxx_translation::getNameForCxx(const ValueDecl *VD,
 
   if (isa<ConstructorDecl>(VD))
     return "init";
+
+  if (VD->isOperator()) {
+    std::string name = ("operator" + VD->getBaseIdentifier().str()).str();
+    return ctx.getIdentifier(name).str();
+  }
 
   if (auto *mod = dyn_cast<ModuleDecl>(VD)) {
     if (mod->isStdlibModule())
@@ -188,7 +195,7 @@ swift::cxx_translation::getNameForCxx(const ValueDecl *VD,
         os << char(std::toupper(paramNameStr[0]));
         os << paramNameStr.drop_front(1);
       }
-      auto r = VD->getASTContext().getIdentifier(os.str());
+      auto r = ctx.getIdentifier(os.str());
       return r.str();
     }
 
@@ -235,6 +242,11 @@ swift::cxx_translation::getDeclRepresentation(const ValueDecl *VD) {
       genericSignature =
           typeDecl->getGenericSignature().getCanonicalSignature();
     }
+    // Nested types are not yet supported.
+    if (!typeDecl->hasClangNode() &&
+        isa_and_nonnull<NominalTypeDecl>(
+            typeDecl->getDeclContext()->getAsDecl()))
+      return {Unsupported, UnrepresentableNested};
   }
   if (const auto *varDecl = dyn_cast<VarDecl>(VD)) {
     // Check if any property accessor throws, do not expose it in that case.
@@ -298,26 +310,19 @@ swift::cxx_translation::diagnoseRepresenationError(RepresentationError error,
                                                    ValueDecl *vd) {
   switch (error) {
   case UnrepresentableObjC:
-    return Diagnostic(diag::expose_unsupported_objc_decl_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_unsupported_objc_decl_to_cxx, vd);
   case UnrepresentableAsync:
-    return Diagnostic(diag::expose_unsupported_async_decl_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_unsupported_async_decl_to_cxx, vd);
   case UnrepresentableIsolatedInActor:
-    return Diagnostic(diag::expose_unsupported_actor_isolated_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_unsupported_actor_isolated_to_cxx, vd);
   case UnrepresentableRequiresClientEmission:
-    return Diagnostic(diag::expose_unsupported_client_emission_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_unsupported_client_emission_to_cxx, vd);
   case UnrepresentableGeneric:
-    return Diagnostic(diag::expose_generic_decl_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_generic_decl_to_cxx, vd);
   case UnrepresentableGenericRequirements:
-    return Diagnostic(diag::expose_generic_requirement_to_cxx,
-                      vd->getDescriptiveKind(), vd);
+    return Diagnostic(diag::expose_generic_requirement_to_cxx, vd);
   case UnrepresentableThrows:
-    return Diagnostic(diag::expose_throwing_to_cxx, vd->getDescriptiveKind(),
-                      vd);
+    return Diagnostic(diag::expose_throwing_to_cxx, vd);
   case UnrepresentableIndirectEnum:
     return Diagnostic(diag::expose_indirect_enum_cxx, vd);
   case UnrepresentableEnumCaseType:
@@ -327,7 +332,8 @@ swift::cxx_translation::diagnoseRepresenationError(RepresentationError error,
   case UnrepresentableProtocol:
     return Diagnostic(diag::expose_protocol_to_cxx_unsupported, vd);
   case UnrepresentableMoveOnly:
-    return Diagnostic(diag::expose_move_only_to_cxx, vd->getDescriptiveKind(),
-                      vd);
+    return Diagnostic(diag::expose_move_only_to_cxx, vd);
+  case UnrepresentableNested:
+    return Diagnostic(diag::expose_nested_type_to_cxx, vd);
   }
 }

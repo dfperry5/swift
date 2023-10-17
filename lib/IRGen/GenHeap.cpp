@@ -274,7 +274,7 @@ HeapLayout::HeapLayout(IRGenModule &IGM, LayoutStrategy strategy,
                        ArrayRef<const TypeInfo *> fieldTypeInfos,
                        llvm::StructType *typeToFill,
                        NecessaryBindings &&bindings, unsigned bindingsIndex)
-    : StructLayout(IGM, /*decl=*/nullptr, LayoutKind::HeapObject, strategy,
+    : StructLayout(IGM, /*type=*/ llvm::None, LayoutKind::HeapObject, strategy,
                    fieldTypeInfos, typeToFill),
       ElementTypes(fieldTypes.begin(), fieldTypes.end()),
       Bindings(std::move(bindings)), BindingsIndex(bindingsIndex) {
@@ -499,6 +499,22 @@ static llvm::Constant *buildPrivateMetadata(IRGenModule &IGM,
                                             MetadataKind kind) {
   // Build the fields of the private metadata.
   ConstantInitBuilder builder(IGM);
+
+  // In embedded Swift, heap objects have a different, simple(r) layout:
+  // superclass pointer + destructor.
+  if (IGM.Context.LangOpts.hasFeature(Feature::Embedded)) {
+    auto fields = builder.beginStruct();
+    fields.addNullPointer(IGM.Int8PtrTy);
+    fields.addSignedPointer(dtorFn,
+                            IGM.getOptions().PointerAuth.HeapDestructors,
+                            PointerAuthEntity::Special::HeapDestructor);
+
+    llvm::GlobalVariable *var = fields.finishAndCreateGlobal(
+        "metadata", IGM.getPointerAlignment(), /*constant*/ true,
+        llvm::GlobalVariable::PrivateLinkage);
+    return var;
+  }
+
   auto fields = builder.beginStruct(IGM.FullBoxMetadataStructTy);
 
   fields.addSignedPointer(dtorFn, IGM.getOptions().PointerAuth.HeapDestructors,

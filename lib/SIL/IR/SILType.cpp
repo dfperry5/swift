@@ -320,6 +320,12 @@ static void addFieldSubstitutionsIfNeeded(TypeConverter &TC, SILType ty,
   }
 }
 
+VarDecl *SILType::getFieldDecl(intptr_t fieldIndex) const {
+  NominalTypeDecl *decl = getNominalOrBoundGenericNominal();
+  assert(decl && "expected nominal type");
+  return getIndexedField(decl, fieldIndex);
+}
+
 SILType SILType::getFieldType(VarDecl *field, TypeConverter &TC,
                               TypeExpansionContext context) const {
   AbstractionPattern origFieldTy = TC.getAbstractionPattern(field);
@@ -361,9 +367,7 @@ SILType SILType::getFieldType(VarDecl *field, SILFunction *fn) const {
 }
 
 SILType SILType::getFieldType(intptr_t fieldIndex, SILFunction *function) const {
-  NominalTypeDecl *decl = getNominalOrBoundGenericNominal();
-  assert(decl && "expected nominal type");
-  VarDecl *field = getIndexedField(decl, fieldIndex);
+  VarDecl *field = getFieldDecl(fieldIndex);
   return getFieldType(field, function->getModule(), function->getTypeExpansionContext());
 }
 
@@ -936,6 +940,12 @@ TypeBase::replaceSubstitutedSILFunctionTypesWithUnsubstituted(SILModule &M) cons
 bool SILType::isEffectivelyExhaustiveEnumType(SILFunction *f) {
   EnumDecl *decl = getEnumOrBoundGenericEnum();
   assert(decl && "Called for a non enum type");
+
+  // Since unavailable enum elements cannot be referenced in canonical SIL,
+  // enums with these elements cannot be treated as exhaustive types.
+  if (decl->hasCasesUnavailableDuringLowering())
+    return false;
+
   return decl->isEffectivelyExhaustive(f->getModule().getSwiftModule(),
                                        f->getResilienceExpansion());
 }
@@ -1026,7 +1036,7 @@ SILType::getSingletonAggregateFieldType(SILModule &M,
 
 bool SILType::isMoveOnly() const {
   // Nominal types are move-only if declared as such.
-  if (isMoveOnlyNominalType())
+  if (getASTType()->isNoncopyable())
     return true;
 
 
@@ -1044,19 +1054,7 @@ bool SILType::isMoveOnly() const {
   return isMoveOnlyWrapped();
 }
 
-bool SILType::isMoveOnlyNominalType() const {
-  if (auto *nom = getNominalOrBoundGenericNominal())
-    if (nom->isMoveOnly())
-      return true;
-  return false;
-}
 
-bool SILType::isPureMoveOnly() const {
-  if (auto *nom = getNominalOrBoundGenericNominal())
-    if (nom->isMoveOnly())
-      return true;
-  return false;
-}
 
 bool SILType::isValueTypeWithDeinit() const {
   // Do not look inside an aggregate type that has a user-deinit, for which
@@ -1072,6 +1070,11 @@ SILType SILType::getInstanceTypeOfMetatype(SILFunction *function) const {
   CanType instanceTy = metaType.getInstanceType();
   auto &tl = function->getModule().Types.getTypeLowering(instanceTy, TypeExpansionContext(*function));
   return tl.getLoweredType();
+}
+
+MetatypeRepresentation SILType::getRepresentationOfMetatype(SILFunction *function) const {
+  auto metaType = castTo<MetatypeType>();
+  return metaType->getRepresentation();
 }
 
 bool SILType::isOrContainsObjectiveCClass() const {
@@ -1179,7 +1182,7 @@ SILType SILType::addingMoveOnlyWrapperToBoxedType(const SILFunction *fn) {
   auto oldField = oldLayout->getFields()[0];
   if (oldField.getLoweredType()->is<SILMoveOnlyWrappedType>())
     return *this;
-  assert(!oldField.getLoweredType()->isPureMoveOnly() &&
+  assert(!oldField.getLoweredType()->isNoncopyable() &&
          "Cannot moveonlywrapped in a moveonly type");
   auto newField =
       SILField(SILMoveOnlyWrappedType::get(oldField.getLoweredType()),
@@ -1208,4 +1211,9 @@ SILType SILType::removingMoveOnlyWrapperToBoxedType(const SILFunction *fn) {
   auto newBoxType = SILBoxType::get(fn->getASTContext(), newLayout,
                                     boxTy->getSubstitutions());
   return SILType::getPrimitiveObjectType(newBoxType);
+}
+
+ProtocolConformanceRef
+SILType::conformsToProtocol(SILFunction *fn, ProtocolDecl *protocol) const {
+  return fn->getParentModule()->conformsToProtocol(getASTType(), protocol);
 }

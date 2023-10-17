@@ -258,6 +258,10 @@ struct SILOptOptions {
                     llvm::cl::desc("Enable Speculative Devirtualization pass."));
 
   llvm::cl::opt<bool>
+  EnableAsyncDemotion = llvm::cl::opt<bool>("enable-async-demotion",
+                    llvm::cl::desc("Enables an optimization pass to demote async functions."));
+
+  llvm::cl::opt<bool>
   EnableMoveInoutStackProtection = llvm::cl::opt<bool>("enable-move-inout-stack-protector",
                     llvm::cl::desc("Enable the stack protector by moving values to temporaries."));
 
@@ -491,6 +495,29 @@ struct SILOptOptions {
         "enable-copy-propagation",
         llvm::cl::desc("Whether to run the copy propagation pass: "
                        "'true', 'false', or 'requested-passes-only'."));
+
+  llvm::cl::opt<bool> BypassResilienceChecks = llvm::cl::opt<bool>(
+      "bypass-resilience-checks",
+      llvm::cl::desc("Ignore all checks for module resilience."));
+
+  llvm::cl::opt<bool> DebugDiagnosticNames = llvm::cl::opt<bool>(
+      "debug-diagnostic-names",
+      llvm::cl::desc("Include diagnostic names when printing"));
+
+  llvm::cl::opt<swift::UnavailableDeclOptimization>
+      UnavailableDeclOptimization =
+          llvm::cl::opt<swift::UnavailableDeclOptimization>(
+              "unavailable-decl-optimization",
+              llvm::cl::desc("Optimization mode for unavailable declarations"),
+              llvm::cl::values(
+                  clEnumValN(swift::UnavailableDeclOptimization::None, "none",
+                             "Don't optimize unavailable decls"),
+                  clEnumValN(swift::UnavailableDeclOptimization::Stub, "stub",
+                             "Lower unavailable functions to stubs"),
+                  clEnumValN(
+                      swift::UnavailableDeclOptimization::Complete, "complete",
+                      "Eliminate unavailable decls from lowered SIL/IR")),
+              llvm::cl::init(swift::UnavailableDeclOptimization::None));
 };
 
 /// Regular expression corresponding to the value given in one of the
@@ -603,6 +630,10 @@ int sil_opt_main(ArrayRef<const char *> argv, void *MainAddr) {
     Invocation.getLangOptions().Features.insert(
         Feature::OldOwnershipOperatorSpellings);
   }
+  Invocation.getLangOptions().BypassResilienceChecks =
+      options.BypassResilienceChecks;
+  Invocation.getDiagnosticOptions().PrintDiagnosticNames =
+      options.DebugDiagnosticNames;
   for (auto &featureName : options.ExperimentalFeatures) {
     if (auto feature = getExperimentalFeature(featureName)) {
       Invocation.getLangOptions().Features.insert(*feature);
@@ -616,6 +647,8 @@ int sil_opt_main(ArrayRef<const char *> argv, void *MainAddr) {
   Invocation.getLangOptions().EnableObjCInterop =
     options.EnableObjCInterop ? true :
     options.DisableObjCInterop ? false : llvm::Triple(options.Target).isOSDarwin();
+
+  Invocation.getLangOptions().Features.insert(Feature::LayoutPrespecialization);
 
   Invocation.getLangOptions().OptimizationRemarkPassedPattern =
       createOptRemarkRegex(options.PassRemarksPassed);
@@ -631,6 +664,9 @@ int sil_opt_main(ArrayRef<const char *> argv, void *MainAddr) {
   }
 
   Invocation.getLangOptions().EnableCXXInterop = options.EnableCxxInterop;
+
+  Invocation.getLangOptions().UnavailableDeclOptimizationMode =
+      options.UnavailableDeclOptimization;
 
   Invocation.getDiagnosticOptions().VerifyMode =
     options.VerifyMode ? DiagnosticOptions::Verify : DiagnosticOptions::NoVerify;
@@ -679,6 +715,7 @@ int sil_opt_main(ArrayRef<const char *> argv, void *MainAddr) {
   SILOpts.EmitSortedSIL |= options.EmitSortedSIL;
 
   SILOpts.EnableSpeculativeDevirtualization = options.EnableSpeculativeDevirtualization;
+  SILOpts.EnableAsyncDemotion = options.EnableAsyncDemotion;
   SILOpts.IgnoreAlwaysInline = options.IgnoreAlwaysInline;
   SILOpts.EnableOSSAModules = options.EnableOSSAModules;
   SILOpts.EnableSILOpaqueValues = options.EnableSILOpaqueValues;

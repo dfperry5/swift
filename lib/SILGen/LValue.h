@@ -115,6 +115,7 @@ public:
     WritebackPseudoKind,        // a fake component to customize writeback
     OpenNonOpaqueExistentialKind,  // opened class or metatype existential
     LogicalKeyPathApplicationKind, // applying a key path
+    InitAccessorKind,           // init accessor
     
     // Translation LValue kinds (a subtype of logical)
     OrigToSubstKind,            // generic type substitution
@@ -529,7 +530,7 @@ public:
                                  SGFAccessKind selfAccess,
                                  SGFAccessKind otherAccess);
 
-  void dump() const;
+  SWIFT_DEBUG_DUMP;
   void dump(raw_ostream &os, unsigned indent = 0) const;
 };
   

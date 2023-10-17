@@ -32,9 +32,11 @@
 
 namespace swift {
 
+class AbstractFunctionDecl;
 class AnyFunctionType;
 class SourceFile;
 class SILFunctionType;
+class SILResultInfo;
 class TupleType;
 class VarDecl;
 
@@ -245,11 +247,16 @@ inline llvm::raw_ostream &operator<<(llvm::raw_ostream &s,
   return s;
 }
 
-/// A semantic function result type: either a formal function result type or
-/// an `inout` parameter type. Used in derivative function type calculation.
+/// A semantic function result type: either a formal function result type or a
+/// semantic result (an `inout`) parameter type. Used in derivative function type
+/// calculation.
 struct AutoDiffSemanticFunctionResultType {
   Type type;
-  bool isInout;
+  unsigned index : 30;
+  bool isSemanticResultParameter : 1;
+
+  AutoDiffSemanticFunctionResultType(Type t, unsigned idx, bool param)
+    : type(t), index(idx), isSemanticResultParameter(param) { }
 };
 
 /// Key for caching SIL derivative function types.
@@ -400,9 +407,6 @@ public:
   enum class Kind {
     /// Original function type has no semantic results.
     NoSemanticResults,
-    /// Original function type has multiple semantic results.
-    // TODO(TF-1250): Support function types with multiple semantic results.
-    MultipleSemanticResults,
     /// Differentiability parmeter indices are empty.
     NoDifferentiabilityParameters,
     /// A differentiability parameter does not conform to `Differentiable`.
@@ -431,7 +435,6 @@ public:
   explicit DerivativeFunctionTypeError(AnyFunctionType *functionType, Kind kind)
       : functionType(functionType), kind(kind), value(Value()) {
     assert(kind == Kind::NoSemanticResults ||
-           kind == Kind::MultipleSemanticResults ||
            kind == Kind::NoDifferentiabilityParameters);
   };
 
@@ -574,15 +577,22 @@ namespace autodiff {
 /// `inout` parameter types.
 ///
 /// The function type may have at most two parameter lists.
-///
-/// Remaps the original semantic result using `genericEnv`, if specified.
-void getFunctionSemanticResultTypes(
-    AnyFunctionType *functionType,
-    SmallVectorImpl<AutoDiffSemanticFunctionResultType> &result,
-    GenericEnvironment *genericEnv = nullptr);
+void getFunctionSemanticResults(
+    const AnyFunctionType *functionType,
+    const IndexSubset *parameterIndices,
+    SmallVectorImpl<AutoDiffSemanticFunctionResultType> &resultTypes);
+
+/// Returns the indices of semantic results for a given function.
+IndexSubset *getFunctionSemanticResultIndices(
+    const AnyFunctionType *functionType,
+    const IndexSubset *parameterIndices);
+
+IndexSubset *getFunctionSemanticResultIndices(
+    const AbstractFunctionDecl *AFD,
+    const IndexSubset *parameterIndices);
 
 /// Returns the lowered SIL parameter indices for the given AST parameter
-/// indices and `AnyfunctionType`.
+/// indices and `AnyFunctionType`.
 ///
 /// Notable lowering-related changes:
 /// - AST tuple parameter types are exploded when lowered to SIL.
@@ -612,8 +622,16 @@ void getFunctionSemanticResultTypes(
 IndexSubset *getLoweredParameterIndices(IndexSubset *astParameterIndices,
                                         AnyFunctionType *functionType);
 
+/// Collects the semantic results of the given function type in
+/// `originalResults`. The semantic results are formal results followed by
+/// semantic result parameters, in type order.
+void
+getSemanticResults(SILFunctionType *functionType,
+                   IndexSubset *parameterIndices,
+                   SmallVectorImpl<SILResultInfo> &originalResults);
+
 /// "Constrained" derivative generic signatures require all differentiability
-/// parameters to conform to the `Differentiable` protocol.
+/// parameters / results to conform to the `Differentiable` protocol.
 ///
 /// "Constrained" transpose generic signatures additionally require all
 /// linearity parameters to satisfy `Self == Self.TangentVector`.
@@ -621,9 +639,11 @@ IndexSubset *getLoweredParameterIndices(IndexSubset *astParameterIndices,
 /// Returns the "constrained" derivative/transpose generic signature given:
 /// - An original SIL function type.
 /// - Differentiability/linearity parameter indices.
+/// - Differentiability/linearity result indices.
 /// - A possibly "unconstrained" derivative/transpose generic signature.
 GenericSignature getConstrainedDerivativeGenericSignature(
-    SILFunctionType *originalFnTy, IndexSubset *diffParamIndices,
+    SILFunctionType *originalFnTy,
+    IndexSubset *diffParamIndices, IndexSubset *diffResultIndices,
     GenericSignature derivativeGenSig, LookupConformanceFn lookupConformance,
     bool isTranspose = false);
 

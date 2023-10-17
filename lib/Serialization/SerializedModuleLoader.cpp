@@ -457,6 +457,15 @@ SerializedModuleLoaderBase::scanModuleFile(Twine modulePath, bool isFramework) {
   if (!binaryModuleImports)
     return binaryModuleImports.getError();
 
+  // Lookup optional imports of this module also
+  auto binaryModuleOptionalImports = getImportsOfModule(
+      modulePath, ModuleLoadingBehavior::Optional, isFramework,
+      isRequiredOSSAModules(), Ctx.LangOpts.SDKName, Ctx.LangOpts.PackageName,
+      Ctx.SourceMgr.getFileSystem().get(),
+      Ctx.SearchPathOpts.DeserializedPathRecoverer);
+  if (!binaryModuleOptionalImports)
+    return binaryModuleImports.getError();
+
   auto importedModuleSet = binaryModuleImports.get().moduleImports;
   std::vector<std::string> importedModuleNames;
   importedModuleNames.reserve(importedModuleSet.size());
@@ -468,18 +477,31 @@ SerializedModuleLoaderBase::scanModuleFile(Twine modulePath, bool isFramework) {
 
   auto importedHeaderSet = binaryModuleImports.get().headerImports;
   std::vector<std::string> importedHeaders;
-  importedHeaders.reserve(importedHeaderSet.size());
-  llvm::transform(importedHeaderSet.keys(),
-                  std::back_inserter(importedHeaders),
-                  [](llvm::StringRef N) {
-                     return N.str();
-                  });
+  // FIXME: We only record these dependencies in CAS mode, because
+  // we require explicit PCH tasks to be produced for imported header
+  // of binary module dependencies. In the meantime, in non-CAS mode
+  // loading clients will consume the `.h` files encoded in the `.swiftmodules`
+  // directly.
+  if (Ctx.ClangImporterOpts.CASOpts) {
+    importedHeaders.reserve(importedHeaderSet.size());
+    llvm::transform(importedHeaderSet.keys(),
+                    std::back_inserter(importedHeaders),
+                    [](llvm::StringRef N) {
+      return N.str();
+    });
+  }
+
+  auto &importedOptionalModuleSet = binaryModuleOptionalImports.get().moduleImports;
+  std::vector<std::string> importedOptionalModuleNames;
+  for (const auto optionalImportedModule : importedOptionalModuleSet.keys())
+    if (!importedModuleSet.contains(optionalImportedModule))
+      importedOptionalModuleNames.push_back(optionalImportedModule.str());
 
   // Map the set of dependencies over to the "module dependencies".
   auto dependencies = ModuleDependencyInfo::forSwiftBinaryModule(
        modulePath.str(), moduleDocPath, sourceInfoPath,
-       importedModuleNames, importedHeaders, isFramework,
-       /*module-cache-key*/ "");
+       importedModuleNames, importedOptionalModuleNames,
+       importedHeaders, isFramework, /*module-cache-key*/ "");
 
   return std::move(dependencies);
 }
@@ -826,6 +848,7 @@ LoadedFile *SerializedModuleLoaderBase::loadAST(
     fileUnit = new (Ctx) SerializedASTFile(M, *loadedModuleFile);
     M.setStaticLibrary(loadedModuleFile->isStaticLibrary());
     M.setHasHermeticSealAtLink(loadedModuleFile->hasHermeticSealAtLink());
+    M.setIsEmbeddedSwiftModule(loadedModuleFile->isEmbeddedSwiftModule());
     if (loadedModuleFile->isTestable())
       M.setTestingEnabled();
     if (loadedModuleFile->arePrivateImportsEnabled())
@@ -849,6 +872,8 @@ LoadedFile *SerializedModuleLoaderBase::loadAST(
     for (auto name: loadedModuleFile->getAllowableClientNames()) {
       M.addAllowableClientName(Ctx.getIdentifier(name));
     }
+    if (Ctx.LangOpts.BypassResilienceChecks)
+      M.setBypassResilience();
     auto diagLocOrInvalid = diagLoc.value_or(SourceLoc());
     loadInfo.status = loadedModuleFile->associateWithFileContext(
         fileUnit, diagLocOrInvalid, Ctx.LangOpts.AllowModuleWithCompilerErrors);
@@ -912,6 +937,18 @@ LoadedFile *SerializedModuleLoaderBase::loadAST(
   if (M.hasHermeticSealAtLink() && !Ctx.LangOpts.HermeticSealAtLink) {
     Ctx.Diags.diagnose(diagLoc.value_or(SourceLoc()),
                        diag::need_hermetic_seal_to_import_module, M.getName());
+  }
+
+  if (M.isEmbeddedSwiftModule() &&
+      !Ctx.LangOpts.hasFeature(Feature::Embedded)) {
+    Ctx.Diags.diagnose(diagLoc.value_or(SourceLoc()),
+                       diag::cannot_import_embedded_module, M.getName());
+  }
+
+  if (!M.isEmbeddedSwiftModule() &&
+      Ctx.LangOpts.hasFeature(Feature::Embedded)) {
+    Ctx.Diags.diagnose(diagLoc.value_or(SourceLoc()),
+                       diag::cannot_import_non_embedded_module, M.getName());
   }
 
   // Non-resilient modules built with C++ interoperability enabled

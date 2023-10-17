@@ -72,6 +72,7 @@
 #include "GenPack.h"
 #include "GenPointerAuth.h"
 #include "GenPoly.h"
+#include "GenTuple.h"
 #include "GenType.h"
 #include "GenericRequirement.h"
 #include "IRGenDebugInfo.h"
@@ -1189,7 +1190,7 @@ getWitnessTableLazyAccessFunction(IRGenModule &IGM,
 static const ProtocolConformance *
 mapConformanceIntoContext(const RootProtocolConformance *conf) {
   if (auto *genericEnv = conf->getDeclContext()->getGenericEnvironmentOfContext())
-    return conf->subst(genericEnv->getForwardingSubstitutionMap());
+    return conf->subst(genericEnv->getForwardingSubstitutionMap()).getConcrete();
   return conf;
 }
 
@@ -1831,7 +1832,7 @@ void ResilientWitnessTableBuilder::collectResilientWitnesses(
       const auto &witness = entry.getBaseProtocolWitness();
       auto baseProto = witness.Requirement;
       auto proto = SILWT->getProtocol();
-      CanType selfType = proto->getProtocolSelfType()->getCanonicalType();
+      CanType selfType = proto->getSelfInterfaceType()->getCanonicalType();
       AssociatedConformance requirement(proto, selfType, baseProto);
       ProtocolConformanceRef inheritedConformance =
         ConformanceInContext.getAssociatedConformance(selfType, baseProto);
@@ -1984,7 +1985,7 @@ namespace {
       // Add a relative reference to the type, with the type reference
       // kind stored in the flags.
       auto ref = IGM.getTypeEntityReference(
-                   Conformance->getType()->getAnyNominal());
+                   Conformance->getDeclContext()->getSelfNominalTypeDecl());
       B.addRelativeAddress(ref.getValue());
       Flags = Flags.withTypeReferenceKind(ref.getKind());
     }
@@ -2393,6 +2394,10 @@ static void addWTableTypeMetadata(IRGenModule &IGM,
 }
 
 void IRGenModule::emitSILWitnessTable(SILWitnessTable *wt) {
+  if (Context.LangOpts.hasFeature(Feature::Embedded)) {
+    return;
+  }
+
   // Don't emit a witness table if it is a declaration.
   if (wt->isDeclaration())
     return;
@@ -2474,8 +2479,9 @@ void IRGenModule::emitSILWitnessTable(SILWitnessTable *wt) {
   // Record this conformance descriptor.
   addProtocolConformance(std::move(description));
 
-  IRGen.noteUseOfTypeContextDescriptor(conf->getType()->getAnyNominal(),
-                                       RequireMetadata);
+  IRGen.noteUseOfTypeContextDescriptor(
+      conf->getDeclContext()->getSelfNominalTypeDecl(),
+      RequireMetadata);
 }
 
 /// True if a function's signature in LLVM carries polymorphic parameters.
@@ -2491,6 +2497,10 @@ bool irgen::hasPolymorphicParameters(CanSILFunctionType ty) {
   case SILFunctionTypeRepresentation::Thin:
   case SILFunctionTypeRepresentation::Method:
   case SILFunctionTypeRepresentation::Closure:
+  case SILFunctionTypeRepresentation::KeyPathAccessorGetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorSetter:
+  case SILFunctionTypeRepresentation::KeyPathAccessorEquals:
+  case SILFunctionTypeRepresentation::KeyPathAccessorHash:
     return ty->isPolymorphic();
 
   case SILFunctionTypeRepresentation::CFunctionPointer:
@@ -3183,6 +3193,38 @@ MetadataResponse MetadataPath::followComponent(IRGenFunction &IGF,
     return MetadataResponse::forComplete(capturedWTable);
   }
 
+  case Component::Kind::TuplePack: {
+    assert(component.getPrimaryIndex() == 0);
+
+    auto tupleType = cast<TupleType>(sourceKey.Type);
+    auto packType = tupleType.getInducedPackType();
+
+    sourceKey.Kind = LocalTypeDataKind::forFormalTypeMetadata();
+    sourceKey.Type = packType;
+
+    if (!source) return MetadataResponse();
+
+    auto sourceMetadata = source.getMetadata();
+    return emitInducedTupleTypeMetadataPackRef(IGF, packType,
+                                               sourceMetadata);
+  }
+
+  case Component::Kind::TupleShape: {
+    assert(component.getPrimaryIndex() == 0);
+
+    auto tupleType = cast<TupleType>(sourceKey.Type);
+
+    sourceKey.Kind = LocalTypeDataKind::forPackShapeExpression();
+    sourceKey.Type = tupleType.getInducedPackType();
+
+    if (!source) return MetadataResponse();
+
+    auto sourceMetadata = source.getMetadata();
+    auto count = irgen::emitTupleTypeMetadataLength(IGF, sourceMetadata);
+
+    return MetadataResponse::forComplete(count);
+  }
+
   case Component::Kind::Impossible:
     llvm_unreachable("following an impossible path!");
 
@@ -3221,10 +3263,16 @@ void MetadataPath::print(llvm::raw_ostream &out) const {
       out << "pack_expansion_count[" << component.getPrimaryIndex() << "]";
       break;
     case Component::Kind::PackExpansionPattern:
-      out << "pack_expansion_patttern[" << component.getPrimaryIndex() << "]";
+      out << "pack_expansion_pattern[" << component.getPrimaryIndex() << "]";
       break;
     case Component::Kind::ConditionalConformance:
       out << "conditional_conformance[" << component.getPrimaryIndex() << "]";
+      break;
+    case Component::Kind::TuplePack:
+      out << "tuple_pack";
+      break;
+    case Component::Kind::TupleShape:
+      out << "tuple_shape";
       break;
     case Component::Kind::Impossible:
       out << "impossible";
@@ -3313,6 +3361,8 @@ llvm::Value *irgen::emitWitnessTableRef(IRGenFunction &IGF,
                                         CanType srcType,
                                         llvm::Value **srcMetadataCache,
                                         ProtocolConformanceRef conformance) {
+  assert(!srcType->getASTContext().LangOpts.hasFeature(Feature::Embedded));
+
   auto proto = conformance.getRequirement();
   assert(Lowering::TypeConverter::protocolRequiresWitnessTable(proto)
          && "protocol does not have witness tables?!");

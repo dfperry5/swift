@@ -142,10 +142,12 @@ void LinearMapInfo::populateBranchingTraceDecl(SILBasicBlock *originalBB,
       heapAllocatedContext = true;
       decl->setInterfaceType(astCtx.TheRawPointerType);
     } else { // Otherwise the payload is the linear map tuple.
-      auto linearMapStructTy = getLinearMapTupleType(predBB)->getCanonicalType();
+      auto *linearMapStructTy = getLinearMapTupleType(predBB);
+      assert(linearMapStructTy && "must have linear map struct type for predecessor BB");
+      auto canLinearMapStructTy = linearMapStructTy->getCanonicalType();
       decl->setInterfaceType(
-          linearMapStructTy->hasArchetype()
-              ? linearMapStructTy->mapTypeOutOfContext() : linearMapStructTy);
+          canLinearMapStructTy->hasArchetype()
+              ? canLinearMapStructTy->mapTypeOutOfContext() : canLinearMapStructTy);
     }
     // Create enum element and enum case declarations.
     auto *paramList = ParameterList::create(astCtx, {decl});
@@ -177,7 +179,7 @@ Type LinearMapInfo::getLinearMapType(ADContext &context, ApplyInst *ai) {
   auto hasActiveResults = llvm::any_of(allResults, [&](SILValue res) {
     return activityInfo.isActive(res, config);
   });
-  bool hasActiveInoutArgument = false;
+  bool hasActiveSemanticResultArgument = false;
   bool hasActiveArguments = false;
   auto numIndirectResults = ai->getNumIndirectResults();
   for (auto argIdx : range(ai->getSubstCalleeConv().getNumParameters())) {
@@ -186,13 +188,13 @@ Type LinearMapInfo::getLinearMapType(ADContext &context, ApplyInst *ai) {
       hasActiveArguments = true;
       auto paramInfo = ai->getSubstCalleeConv().getParamInfoForSILArg(
           numIndirectResults + argIdx);
-      if (paramInfo.isIndirectMutating())
-        hasActiveInoutArgument = true;
+      if (paramInfo.isAutoDiffSemanticResult())
+        hasActiveSemanticResultArgument = true;
     }
   }
   if (!hasActiveArguments)
     return {};
-  if (!hasActiveResults && !hasActiveInoutArgument)
+  if (!hasActiveResults && !hasActiveSemanticResultArgument)
     return {};
 
   // Compute differentiability parameters.
@@ -213,9 +215,8 @@ Type LinearMapInfo::getLinearMapType(ADContext &context, ApplyInst *ai) {
         ai->getArgumentsWithoutIndirectResults().size(), activeParamIndices);
   }
   // Compute differentiability results.
-  auto numResults = remappedOrigFnSubstTy->getNumResults() +
-                    remappedOrigFnSubstTy->getNumIndirectMutatingParameters();
-  auto *results = IndexSubset::get(original->getASTContext(), numResults,
+  auto *results = IndexSubset::get(original->getASTContext(),
+                                   remappedOrigFnSubstTy->getNumAutoDiffSemanticResults(),
                                    activeResultIndices);
   // Create autodiff indices for the `apply` instruction.
   AutoDiffConfig applyConfig(parameters, results);
@@ -234,10 +235,11 @@ Type LinearMapInfo::getLinearMapType(ADContext &context, ApplyInst *ai) {
     for (auto resultIndex : applyConfig.resultIndices->getIndices()) {
       SILType remappedResultType;
       if (resultIndex >= origFnTy->getNumResults()) {
-        auto inoutArgIdx = resultIndex - origFnTy->getNumResults();
-        auto inoutArg =
-            *std::next(ai->getInoutArguments().begin(), inoutArgIdx);
-        remappedResultType = inoutArg->getType();
+        auto semanticResultArgIdx = resultIndex - origFnTy->getNumResults();
+        auto semanticResultArg =
+            *std::next(ai->getAutoDiffSemanticResultArguments().begin(),
+                       semanticResultArgIdx);
+        remappedResultType = semanticResultArg->getType();
       } else {
         remappedResultType =
             origFnTy->getResults()[resultIndex].getSILStorageInterfaceType();
@@ -277,8 +279,9 @@ Type LinearMapInfo::getLinearMapType(ADContext &context, ApplyInst *ai) {
   SmallVector<AnyFunctionType::Param, 8> params;
   for (auto &param : silFnTy->getParameters()) {
     ParameterTypeFlags flags;
-    if (param.isIndirectMutating())
+    if (param.isAutoDiffSemanticResult())
       flags = flags.withInOut(true);
+
     params.push_back(
         AnyFunctionType::Param(param.getInterfaceType(), Identifier(), flags));
   }
@@ -330,10 +333,28 @@ void LinearMapInfo::generateDifferentiationDataStructures(
   }
 
   // Add linear map fields to the linear map tuples.
-  for (auto &origBB : *original) {
+  //
+  // Now we need to be very careful as we're having a very subtle
+  // chicken-and-egg problem. We need lowered branch trace enum type for the
+  // linear map typle type. However branch trace enum type lowering depends on
+  // the lowering of its elements (at very least, the type classification of
+  // being trivial / non-trivial). As the lowering is cached we need to ensure
+  // we compute lowered type for the branch trace enum when the corresponding
+  // EnumDecl is fully complete: we cannot add more entries without causing some
+  // very subtle issues later on. However, the elements of the enum are linear
+  // map tuples of predecessors, that correspondingly may contain branch trace
+  // enums of corresponding predecessor BBs.
+  //
+  // Traverse all BBs in reverse post-order traversal order to ensure we process
+  // each BB before its predecessors.
+  llvm::ReversePostOrderTraversal<SILFunction *> RPOT(original);
+  for (auto Iter = RPOT.begin(), E = RPOT.end(); Iter != E; ++Iter) {
+    auto *origBB = *Iter;
     SmallVector<TupleTypeElt, 4> linearTupleTypes;
-    if (!origBB.isEntry()) {
-      CanType traceEnumType = getBranchingTraceEnumLoweredType(&origBB).getASTType();
+    if (!origBB->isEntry()) {
+      populateBranchingTraceDecl(origBB, loopInfo);
+
+      CanType traceEnumType = getBranchingTraceEnumLoweredType(origBB).getASTType();
       linearTupleTypes.emplace_back(traceEnumType,
                                     astCtx.getIdentifier(traceEnumFieldName));
     }
@@ -342,7 +363,7 @@ void LinearMapInfo::generateDifferentiationDataStructures(
       // Do not add linear map fields for semantic member accessors, which have
       // special-case pullback generation. Linear map tuples should be empty.
     } else {
-      for (auto &inst : origBB) {
+      for (auto &inst : *origBB) {
         if (auto *ai = dyn_cast<ApplyInst>(&inst)) {
           // Add linear map field to struct for active `apply` instructions.
           // Skip array literal intrinsic applications since array literal
@@ -362,11 +383,8 @@ void LinearMapInfo::generateDifferentiationDataStructures(
       }
     }
 
-    linearMapTuples.insert({&origBB, TupleType::get(linearTupleTypes, astCtx)});
+    linearMapTuples.insert({origBB, TupleType::get(linearTupleTypes, astCtx)});
   }
-
-  for (auto &origBB : *original)
-    populateBranchingTraceDecl(&origBB, loopInfo);
 
   // Print generated linear map structs and branching trace enums.
   // These declarations do not show up with `-emit-sil` because they are
@@ -435,6 +453,19 @@ bool LinearMapInfo::shouldDifferentiateApplySite(FullApplySite applySite) {
   return hasActiveResults && hasActiveArguments;
 }
 
+static bool shouldDifferentiateInjectEnumAddr(
+    const InjectEnumAddrInst &inject,
+    const DifferentiableActivityInfo &activityInfo,
+    const AutoDiffConfig &config) {
+  SILValue en = inject.getOperand();
+  for (auto use : en->getUses()) {
+    auto *init = dyn_cast<InitEnumDataAddrInst>(use->getUser());
+    if (init && activityInfo.isActive(init, config))
+      return true;
+  }
+  return false;
+}
+
 /// Returns a flag indicating whether the instruction should be differentiated,
 /// given the differentiation indices of the instruction's parent function.
 /// Whether the instruction should be differentiated is determined sequentially
@@ -488,6 +519,13 @@ bool LinearMapInfo::shouldDifferentiateInstruction(SILInstruction *inst) {
         isa<DestroyValueInst>(inst) || isa<DestroyAddrInst>(inst))
       return true;
   }
+
+  // Should differentiate `inject_enum_addr` if the corresponding
+  // `init_enum_addr` has an active operand.
+  if (auto inject = dyn_cast<InjectEnumAddrInst>(inst))
+    if (shouldDifferentiateInjectEnumAddr(*inject, activityInfo, config))
+      return true;
+
   return false;
 }
 

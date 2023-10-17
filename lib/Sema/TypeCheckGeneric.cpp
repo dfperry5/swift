@@ -299,9 +299,7 @@ void TypeChecker::checkProtocolSelfRequirements(ValueDecl *decl) {
           req.getFirstType()->is<GenericTypeParamType>())
         continue;
 
-      ctx.Diags.diagnose(decl,
-                         diag::requirement_restricts_self,
-                         decl->getDescriptiveKind(), decl->getName(),
+      ctx.Diags.diagnose(decl, diag::requirement_restricts_self, decl,
                          req.getFirstType().getString(),
                          static_cast<unsigned>(req.getKind()),
                          req.getSecondType().getString());
@@ -343,6 +341,25 @@ void TypeChecker::checkReferencedGenericParams(GenericContext *dc) {
         ReferencedGenericParams.insert(ty->getCanonicalType());
         return Action::SkipChildren;
       }
+
+      // Skip the count type, which is always a generic parameter;
+      // we don't consider it a reference because it only binds the
+      // shape and not the metadata.
+      if (auto *expansionTy = ty->getAs<PackExpansionType>()) {
+        expansionTy->getPatternType().walk(*this);
+        return Action::SkipChildren;
+      }
+
+      // Don't walk into generic type alias substitutions. This does
+      // not constrain `T`:
+      //
+      //   typealias Foo<T> = Int
+      //   func foo<T>(_: Foo<T>) {}
+      if (auto *aliasTy = dyn_cast<TypeAliasType>(ty.getPointer())) {
+        Type(aliasTy->getSinglyDesugaredType()).walk(*this);
+        return Action::SkipChildren;
+      }
+
       return Action::Continue;
     }
 
@@ -525,18 +542,16 @@ void TypeChecker::checkShadowedGenericParams(GenericContext *dc) {
       auto *existingParamDecl = found->second;
 
       if (existingParamDecl->getDeclContext() == dc) {
-        genericParamDecl->diagnose(
-            diag::invalid_redecl,
-            genericParamDecl->getName());
+        genericParamDecl->diagnose(diag::invalid_redecl, genericParamDecl);
       } else {
         genericParamDecl->diagnose(
             diag::shadowed_generic_param,
-            genericParamDecl->getName()).warnUntilSwiftVersion(6);
+            genericParamDecl).warnUntilSwiftVersion(6);
       }
 
       if (existingParamDecl->getLoc()) {
         existingParamDecl->diagnose(diag::invalid_redecl_prev,
-                                    existingParamDecl->getName());
+                                    existingParamDecl);
       }
 
       continue;
@@ -550,10 +565,13 @@ void TypeChecker::checkShadowedGenericParams(GenericContext *dc) {
 /// Generic types
 ///
 
-/// Collect additional requirements into \p sameTypeReqs.
+/// Collect additional requirements into \p extraReqs.
 static void collectAdditionalExtensionRequirements(
-    Type type, SmallVectorImpl<Requirement> &sameTypeReqs) {
+    Type type, SmallVectorImpl<Requirement> &extraReqs) {
   if (type->is<ErrorType>())
+    return;
+
+  if (type->is<TupleType>())
     return;
 
   // Find the nominal type declaration and its parent type.
@@ -569,7 +587,7 @@ static void collectAdditionalExtensionRequirements(
 
     paramProtoTy->getRequirements(
         protoTy->getDecl()->getSelfInterfaceType(),
-        sameTypeReqs);
+        extraReqs);
   }
 
   Type parentType = type->getNominalParent();
@@ -577,7 +595,7 @@ static void collectAdditionalExtensionRequirements(
 
   // Visit the parent type, if there is one.
   if (parentType) {
-    collectAdditionalExtensionRequirements(parentType, sameTypeReqs);
+    collectAdditionalExtensionRequirements(parentType, extraReqs);
   }
 
   // Find the nominal type.
@@ -586,6 +604,8 @@ static void collectAdditionalExtensionRequirements(
   if (!nominal) {
     type = typealias->getUnderlyingType();
     nominal = type->getNominalOrBoundGenericNominal();
+    if (!nominal && type->is<TupleType>())
+      nominal = type->getASTContext().getBuiltinTupleDecl();
   }
 
   // If we have a bound generic type, add same-type requirements for each of
@@ -596,8 +616,8 @@ static void collectAdditionalExtensionRequirements(
       auto *gp = genericParams->getParams()[gpIndex];
       auto gpType = gp->getDeclaredInterfaceType();
 
-      sameTypeReqs.emplace_back(RequirementKind::SameType, gpType,
-                                currentBoundType->getGenericArgs()[gpIndex]);
+      extraReqs.emplace_back(RequirementKind::SameType, gpType,
+                             currentBoundType->getGenericArgs()[gpIndex]);
     }
   }
 
@@ -605,7 +625,7 @@ static void collectAdditionalExtensionRequirements(
   // generic signature.
   if (typealias && TypeChecker::isPassThroughTypealias(typealias, nominal)) {
     for (auto req : typealias->getGenericSignature().getRequirements())
-      sameTypeReqs.push_back(req);
+      extraReqs.push_back(req);
   }
 }
 
@@ -680,7 +700,7 @@ GenericSignatureRequest::evaluate(Evaluator &evaluator,
 
   GenericSignature parentSig;
   SmallVector<TypeLoc, 2> inferenceSources;
-  SmallVector<Requirement, 2> sameTypeReqs;
+  SmallVector<Requirement, 2> extraReqs;
   if (auto VD = dyn_cast<ValueDecl>(GC->getAsDecl())) {
     parentSig = GC->getParentForLookup()->getGenericSignatureOfContext();
 
@@ -733,6 +753,31 @@ GenericSignatureRequest::evaluate(Evaluator &evaluator,
         inferenceSources.emplace_back(typeRepr, type);
       }
 
+      // Handle the thrown error type.
+      auto effectiveFunc = func ? func
+                                : subscr ? subscr->getEffectfulGetAccessor()
+                                : nullptr;
+      if (effectiveFunc) {
+        // Infer constraints from the thrown type of a declaration.
+        if (auto thrownTypeRepr = effectiveFunc->getThrownTypeRepr()) {
+          auto thrownOptions = baseOptions | TypeResolutionFlags::Direct;
+          const auto thrownType = resolution.withOptions(thrownOptions)
+              .resolveType(thrownTypeRepr);
+
+          // Add this type as an inference source.
+          inferenceSources.emplace_back(thrownTypeRepr, thrownType);
+
+          // Add conformance of this type to the Error protocol.
+          if (thrownType->isTypeParameter()) {
+            if (auto errorProtocol = ctx.getErrorDecl()) {
+              extraReqs.push_back(
+                  Requirement(RequirementKind::Conformance, thrownType,
+                              errorProtocol->getDeclaredInterfaceType()));
+            }
+          }
+        }
+      }
+
       // Gather requirements from the result type.
       auto *resultTypeRepr = [&subscr, &func, &macro]() -> TypeRepr * {
         if (subscr) {
@@ -754,13 +799,23 @@ GenericSignatureRequest::evaluate(Evaluator &evaluator,
       }
     }
   } else if (auto *ext = dyn_cast<ExtensionDecl>(GC)) {
-    parentSig = ext->getExtendedNominal()->getGenericSignatureOfContext();
-    genericParams = nullptr;
+    collectAdditionalExtensionRequirements(ext->getExtendedType(), extraReqs);
 
-    collectAdditionalExtensionRequirements(ext->getExtendedType(), sameTypeReqs);
+    auto *extendedNominal = ext->getExtendedNominal();
+
+    if (isa<BuiltinTupleDecl>(extendedNominal)) {
+      genericParams = ext->getGenericParams();
+    } else {
+      parentSig = extendedNominal->getGenericSignatureOfContext();
+      genericParams = nullptr;
+    }
 
     // Re-use the signature of the type being extended by default.
-    if (sameTypeReqs.empty() && !ext->getTrailingWhereClause()) {
+    // For tuple extensions, always build a new signature to get
+    // the right sugared types, since we don't want to expose the
+    // name of the generic parameter of BuiltinTupleDecl itself.
+    if (extraReqs.empty() && !ext->getTrailingWhereClause() &&
+        !isa<BuiltinTupleDecl>(extendedNominal)) {
       return parentSig;
     }
 
@@ -773,7 +828,7 @@ GenericSignatureRequest::evaluate(Evaluator &evaluator,
   auto request = InferredGenericSignatureRequest{
       parentSig.getPointer(),
       genericParams, WhereClauseOwner(GC),
-      sameTypeReqs, inferenceSources,
+      extraReqs, inferenceSources,
       allowConcreteGenericParams};
   auto sig = evaluateOrDefault(ctx.evaluator, request,
                                GenericSignatureWithError()).getPointer();

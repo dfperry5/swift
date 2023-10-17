@@ -518,13 +518,13 @@ public:
 
 #ifndef NDEBUG
   /// Print the ID of the block, bbN.
-  void dumpID() const;
+  void dumpID(bool newline = true) const;
 
   /// Print the ID of the block with \p OS, bbN.
-  void printID(llvm::raw_ostream &OS) const;
+  void printID(llvm::raw_ostream &OS, bool newline = true) const;
 
   /// Print the ID of the block with \p Ctx, bbN.
-  void printID(SILPrintContext &Ctx) const;
+  void printID(SILPrintContext &Ctx, bool newline = true) const;
 #endif
 
   /// getSublistAccess() - returns pointer to member of instruction list
@@ -740,6 +740,29 @@ namespace swift {
 
 inline SILFunction *SILInstruction::getFunction() const {
   return getParent()->getParent();
+}
+
+inline bool SILInstruction::visitPriorInstructions(
+    llvm::function_ref<bool(SILInstruction *)> visitor) {
+  if (auto *previous = getPreviousInstruction()) {
+    return visitor(previous);
+  }
+  for (auto *predecessor : getParent()->getPredecessorBlocks()) {
+    if (!visitor(&predecessor->back()))
+      return false;
+  }
+  return true;
+}
+inline bool SILInstruction::visitSubsequentInstructions(
+    llvm::function_ref<bool(SILInstruction *)> visitor) {
+  if (auto *next = getNextInstruction()) {
+    return visitor(next);
+  }
+  for (auto *successor : getParent()->getSuccessorBlocks()) {
+    if (!visitor(&successor->front()))
+      return false;
+  }
+  return true;
 }
 
 inline SILInstruction *SILInstruction::getPreviousInstruction() {

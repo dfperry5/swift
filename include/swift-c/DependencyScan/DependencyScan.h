@@ -25,7 +25,7 @@
 /// SWIFTSCAN_VERSION_MINOR should increase when there are API additions.
 /// SWIFTSCAN_VERSION_MAJOR is intended for "major" source/ABI breaking changes.
 #define SWIFTSCAN_VERSION_MAJOR 0
-#define SWIFTSCAN_VERSION_MINOR 4
+#define SWIFTSCAN_VERSION_MINOR 5
 
 SWIFTSCAN_BEGIN_DECLS
 
@@ -430,37 +430,63 @@ SWIFTSCAN_PUBLIC int invoke_swift_compiler(int argc, const char **argv);
 
 //=== Scanner CAS Operations ----------------------------------------------===//
 
+/// Opaque container for a CASOptions that describe how CAS should be created.
+typedef struct swiftscan_cas_options_s *swiftscan_cas_options_t;
+
 /// Opaque container for a CAS instance that includes both ObjectStore and
 /// ActionCache.
 typedef struct swiftscan_cas_s *swiftscan_cas_t;
 
-/// Enum types for output types for cache key computation.
-/// TODO: complete the list.
-typedef enum {
-  SWIFTSCAN_OUTPUT_TYPE_OBJECT = 0,
-  SWIFTSCAN_OUTPUT_TYPE_SWIFTMODULE = 1,
-  SWIFTSCAN_OUTPUT_TYPE_SWIFTINTERFACE = 2,
-  SWIFTSCAN_OUTPUT_TYPE_SWIFTPRIAVEINTERFACE = 3,
-  SWIFTSCAN_OUTPUT_TYPE_CLANG_MODULE = 4,
-  SWIFTSCAN_OUTPUT_TYPE_CLANG_PCH = 5
-} swiftscan_output_kind_t;
+/// Create a \c CASOptions for creating CAS inside scanner specified.
+SWIFTSCAN_PUBLIC swiftscan_cas_options_t swiftscan_cas_options_create(void);
 
-/// Create a \c cas instance that points to path.
-SWIFTSCAN_PUBLIC swiftscan_cas_t swiftscan_cas_create(const char *path);
+/// Dispose \c CASOptions.
+SWIFTSCAN_PUBLIC void
+swiftscan_cas_options_dispose(swiftscan_cas_options_t options);
+
+/// Set on-disk path for the \c cas.
+SWIFTSCAN_PUBLIC void
+swiftscan_cas_options_set_ondisk_path(swiftscan_cas_options_t options,
+                                      const char *path);
+
+/// Set plugin path for the \c cas.
+SWIFTSCAN_PUBLIC void
+swiftscan_cas_options_set_plugin_path(swiftscan_cas_options_t options,
+                                      const char *path);
+
+/// Set option using a name/value pair. Return true if error.
+/// If error happens, the error message is returned via `error` parameter, and
+/// caller needs to free the error message via `swiftscan_string_dispose`.
+SWIFTSCAN_PUBLIC bool
+swiftscan_cas_options_set_option(swiftscan_cas_options_t options,
+                                 const char *name, const char *value,
+                                 swiftscan_string_ref_t *error);
+
+/// Create a \c cas instance from plugin. Return NULL if error.
+/// If error happens, the error message is returned via `error` parameter, and
+/// caller needs to free the error message via `swiftscan_string_dispose`.
+SWIFTSCAN_PUBLIC swiftscan_cas_t swiftscan_cas_create_from_options(
+    swiftscan_cas_options_t options, swiftscan_string_ref_t *error);
 
 /// Dispose the \c cas instance.
 SWIFTSCAN_PUBLIC void swiftscan_cas_dispose(swiftscan_cas_t cas);
 
-/// Store content into CAS. Return \c CASID as string.
-SWIFTSCAN_PUBLIC swiftscan_string_ref_t swiftscan_cas_store(swiftscan_cas_t cas,
-                                                            uint8_t *data,
-                                                            unsigned size);
-
-/// Compute \c CacheKey for output of \c kind from the compiler invocation \c
-/// argc and \c argv with \c input. Return \c CacheKey as string.
+/// Store content into CAS. Return \c CASID as string. Return NULL on error.
+/// If error happens, the error message is returned via `error` parameter, and
+/// caller needs to free the error message via `swiftscan_string_dispose`.
 SWIFTSCAN_PUBLIC swiftscan_string_ref_t
-swiftscan_compute_cache_key(swiftscan_cas_t cas, int argc, const char **argv,
-                            const char *input, swiftscan_output_kind_t kind);
+swiftscan_cas_store(swiftscan_cas_t cas, uint8_t *data, unsigned size,
+                    swiftscan_string_ref_t *error);
+
+/// Compute \c CacheKey for the outputs of a primary input file from a compiler
+/// invocation with command-line \c argc and \c argv. When primary input file
+/// is not available for compilation, e.g., using WMO, primary file is the first
+/// swift input on the command-line by convention. Return \c CacheKey as string.
+/// If error happens, the error message is returned via `error` parameter, and
+/// caller needs to free the error message via `swiftscan_string_dispose`.
+SWIFTSCAN_PUBLIC swiftscan_string_ref_t
+swiftscan_cache_compute_key(swiftscan_cas_t cas, int argc, const char **argv,
+                            const char *input, swiftscan_string_ref_t *error);
 
 //===----------------------------------------------------------------------===//
 

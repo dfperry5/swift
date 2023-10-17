@@ -57,11 +57,11 @@ public:
              .getTypeExpansionContext()
              .shouldLookThroughOpaqueTypeArchetypes())
       return ty;
-    // Remap types containing opaque result types in the current context.
-    return getBuilder()
-        .getTypeLowering(SILType::getPrimitiveObjectType(ty))
-        .getLoweredType()
-        .getASTType();
+
+    return substOpaqueTypesWithUnderlyingTypes(
+        ty,
+        TypeExpansionContext(getBuilder().getFunction()),
+        /*allowLoweredTypes=*/false);
   }
 
   ProtocolConformanceRef remapConformance(Type ty,
@@ -206,17 +206,15 @@ static bool hasOpaqueArchetype(TypeExpansionContext context,
   case SILInstructionKind::ExplicitCopyValueInst:
   case SILInstructionKind::MoveValueInst:
   case SILInstructionKind::DropDeinitInst:
-  case SILInstructionKind::MarkMustCheckInst:
+  case SILInstructionKind::MarkUnresolvedNonCopyableValueInst:
   case SILInstructionKind::MarkUnresolvedReferenceBindingInst:
   case SILInstructionKind::CopyableToMoveOnlyWrapperValueInst:
   case SILInstructionKind::MoveOnlyWrapperToCopyableValueInst:
-#define UNCHECKED_REF_STORAGE(Name, ...)                                       \
-  case SILInstructionKind::StrongCopy##Name##ValueInst:
-#define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
+  case SILInstructionKind::UnownedCopyValueInst:
+  case SILInstructionKind::WeakCopyValueInst:
+#define REF_STORAGE(Name, ...)                                                 \
   case SILInstructionKind::StrongCopy##Name##ValueInst:
 #include "swift/AST/ReferenceStorage.def"
-#undef UNCHECKED_REF_STORAGE
-#undef ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE
   case SILInstructionKind::UncheckedOwnershipConversionInst:
   case SILInstructionKind::IsUniqueInst:
   case SILInstructionKind::IsEscapingClosureInst:
@@ -243,6 +241,7 @@ static bool hasOpaqueArchetype(TypeExpansionContext context,
   case SILInstructionKind::ObjectInst:
   case SILInstructionKind::TupleInst:
   case SILInstructionKind::TupleExtractInst:
+  case SILInstructionKind::TuplePackExtractInst:
   case SILInstructionKind::TupleElementAddrInst:
   case SILInstructionKind::StructInst:
   case SILInstructionKind::StructExtractInst:
@@ -304,7 +303,8 @@ static bool hasOpaqueArchetype(TypeExpansionContext context,
   case SILInstructionKind::RetainValueAddrInst:
   case SILInstructionKind::ReleaseValueInst:
   case SILInstructionKind::ReleaseValueAddrInst:
-  case SILInstructionKind::SetDeallocatingInst:
+  case SILInstructionKind::BeginDeallocRefInst:
+  case SILInstructionKind::EndInitLetRefInst:
   case SILInstructionKind::AutoreleaseValueInst:
   case SILInstructionKind::BindMemoryInst:
   case SILInstructionKind::RebindMemoryInst:

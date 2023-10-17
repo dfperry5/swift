@@ -31,11 +31,13 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/PackConformance.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SILLayout.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/TypeLoc.h"
 #include "swift/AST/TypeRepr.h"
+#include "swift/Basic/Compiler.h"
 #include "clang/AST/Type.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -155,14 +157,18 @@ bool TypeBase::isMarkerExistential() {
   return true;
 }
 
-bool TypeBase::isPureMoveOnly() {
+bool TypeBase::isNoncopyable() {
   if (auto *nom = getAnyNominal())
     return nom->isMoveOnly();
+
+  if (auto *expansion = getAs<PackExpansionType>()) {
+    return expansion->getPatternType()->isNoncopyable();
+  }
 
   // if any components of the tuple are move-only, then the tuple is move-only.
   if (auto *tupl = getCanonicalType()->getAs<TupleType>()) {
     for (auto eltTy : tupl->getElementTypes())
-      if (eltTy->isPureMoveOnly())
+      if (eltTy->isNoncopyable())
         return true;
   }
 
@@ -261,6 +267,7 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
   case TypeKind::PackExpansion:
   case TypeKind::PackElement:
   case TypeKind::SILPack:
+  case TypeKind::BuiltinTuple:
 #define REF_STORAGE(Name, ...) \
   case TypeKind::Name##Storage:
 #include "swift/AST/ReferenceStorage.def"
@@ -270,8 +277,6 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
   case TypeKind::DependentMember:
     assert(sig && "dependent types can't answer reference semantics query");
     return sig->requiresClass(type);
-  case TypeKind::BuiltinTuple:
-    llvm_unreachable("Should not get a BuiltinTupleType here");
   }
 
   llvm_unreachable("Unhandled type kind!");
@@ -1744,6 +1749,9 @@ CanType TypeBase::computeCanonicalType() {
   case TypeKind::GenericFunction: {
     AnyFunctionType *funcTy = cast<AnyFunctionType>(this);
 
+    PrettyStackTraceType trace(funcTy->getResult()->getASTContext(),
+                               "computing canonical type for ", this);
+
     CanGenericSignature genericSig;
     if (auto *genericFnTy = dyn_cast<GenericFunctionType>(this))
       genericSig = genericFnTy->getGenericSignature().getCanonicalSignature();
@@ -2037,8 +2045,8 @@ Identifier GenericTypeParamType::getName() const {
   llvm::SmallString<10> nameBuf;
   llvm::raw_svector_ostream os(nameBuf);
 
-  static const char *tau = u8"\u03C4_";
-  
+  static const char *tau = SWIFT_UTF8("\u03C4_");
+
   os << tau << getDepth() << '_' << getIndex();
   Identifier name = C.getIdentifier(os.str());
   names.insert({depthIndex, name});
@@ -3313,7 +3321,7 @@ static bool matchesFunctionType(CanAnyFunctionType fn1, CanAnyFunctionType fn2,
     if (ext2.isThrowing() &&
         !(ext2.isAsync() &&
           matchMode.contains(TypeMatchFlags::AllowABICompatible))) {
-      ext1 = ext1.withThrows(true);
+      ext1 = ext1.withThrows(true, ext2.getThrownError());
     }
 
     // Removing '@Sendable' is ABI-compatible because there's nothing wrong with
@@ -3703,8 +3711,9 @@ PackArchetypeType::PackArchetypeType(
     ArrayRef<ProtocolDecl *> ConformsTo, Type Superclass,
     LayoutConstraint Layout, PackShape Shape)
     : ArchetypeType(TypeKind::PackArchetype, Ctx,
-                    RecursiveTypeProperties::HasArchetype, InterfaceType,
-                    ConformsTo, Superclass, Layout, GenericEnv) {
+                    RecursiveTypeProperties::HasArchetype |
+                        RecursiveTypeProperties::HasPackArchetype,
+                    InterfaceType, ConformsTo, Superclass, Layout, GenericEnv) {
   assert(InterfaceType->isParameterPack());
   *getTrailingObjects<PackShape>() = Shape;
 }
@@ -3991,6 +4000,17 @@ ClangTypeInfo AnyFunctionType::getClangTypeInfo() const {
   }
 }
 
+Type AnyFunctionType::getThrownError() const {
+  switch (getKind()) {
+  case TypeKind::Function:
+    return cast<FunctionType>(this)->getThrownError();
+  case TypeKind::GenericFunction:
+    return cast<GenericFunctionType>(this)->getThrownError();
+  default:
+    llvm_unreachable("Illegal type kind for AnyFunctionType.");
+  }
+}
+
 Type AnyFunctionType::getGlobalActor() const {
   switch (getKind()) {
   case TypeKind::Function:
@@ -4004,6 +4024,39 @@ Type AnyFunctionType::getGlobalActor() const {
 
 ClangTypeInfo AnyFunctionType::getCanonicalClangTypeInfo() const {
   return getClangTypeInfo().getCanonical();
+}
+
+ASTExtInfo
+AnyFunctionType::getCanonicalExtInfo(bool useClangFunctionType) const {
+  assert(hasExtInfo());
+  Type globalActor = getGlobalActor();
+  if (globalActor)
+    globalActor = globalActor->getCanonicalType();
+
+  // When there is an explicitly-specified thrown error, canonicalize it's type.
+  auto bits = Bits.AnyFunctionType.ExtInfoBits;
+  Type thrownError = getThrownError();
+  if (thrownError) {
+    thrownError = thrownError->getCanonicalType();
+
+    //   - If the thrown error is `any Error`, the function throws and we
+    //     drop the thrown error.
+    if (thrownError->isEqual(
+            thrownError->getASTContext().getErrorExistentialType())) {
+      thrownError = Type();
+
+      //   - If the thrown error is `Never`, the function does not throw and
+      //     we drop the thrown error.
+    } else if (thrownError->isNever()) {
+      thrownError = Type();
+      bits = bits & ~ASTExtInfoBuilder::ThrowsMask;
+    }
+  }
+
+  return ExtInfo(bits,
+                 useClangFunctionType ? getCanonicalClangTypeInfo()
+                                      : ClangTypeInfo(),
+                 globalActor, thrownError);
 }
 
 bool AnyFunctionType::hasNonDerivableClangType() {
@@ -4677,7 +4730,7 @@ case TypeKind::Id:
       return Type();
 
     Type transformedCount =
-        expand->getCountType().transformWithPosition(pos, fn);
+        expand->getCountType().transformWithPosition(TypePosition::Shape, fn);
     if (!transformedCount)
       return Type();
 
@@ -4756,8 +4809,9 @@ case TypeKind::Id:
     if (!anyChanged)
       return *this;
 
-    // If the transform would yield a singleton tuple, and we didn't
-    // start with one, flatten to produce the element type.
+    // Handle vanishing tuples -- If the transform would yield a singleton
+    // tuple, and we didn't start with one, flatten to produce the
+    // element type.
     if (elements.size() == 1 &&
         !elements[0].getType()->is<PackExpansionType>() &&
         !(tuple->getNumElements() == 1 &&
@@ -4844,6 +4898,18 @@ case TypeKind::Id:
     if (resultTy.getPointer() != function->getResult().getPointer())
       isUnchanged = false;
 
+    // Transform the thrown error.
+    Type thrownError;
+    if (Type origThrownError = function->getThrownError()) {
+      thrownError = origThrownError.transformWithPosition(
+          TypePosition::Invariant, fn);
+      if (!thrownError)
+        return Type();
+
+      if (thrownError.getPointer() != origThrownError.getPointer())
+        isUnchanged = false;
+    }
+    
     // Transform the global actor.
     Type globalActorType;
     if (Type origGlobalActorType = function->getGlobalActor()) {
@@ -4873,18 +4939,22 @@ case TypeKind::Id:
       auto genericSig = genericFnType->getGenericSignature();
       if (!function->hasExtInfo())
         return GenericFunctionType::get(genericSig, substParams, resultTy);
-      return GenericFunctionType::get(genericSig, substParams, resultTy,
-                                      function->getExtInfo()
-                                          .withGlobalActor(globalActorType));
+      return GenericFunctionType::get(
+               genericSig, substParams, resultTy,
+               function->getExtInfo()
+                 .withGlobalActor(globalActorType)
+                 .withThrows(function->isThrowing(), thrownError));
     }
 
     if (isUnchanged) return *this;
 
     if (!function->hasExtInfo())
       return FunctionType::get(substParams, resultTy);
-    return FunctionType::get(substParams, resultTy,
-                             function->getExtInfo()
-                                 .withGlobalActor(globalActorType));
+    return FunctionType::get(
+             substParams, resultTy,
+             function->getExtInfo()
+               .withGlobalActor(globalActorType)
+               .withThrows(function->isThrowing(), thrownError));
   }
 
   case TypeKind::ArraySlice: {
@@ -5345,8 +5415,33 @@ AnyFunctionType *AnyFunctionType::getWithoutDifferentiability() const {
 }
 
 AnyFunctionType *AnyFunctionType::getWithoutThrowing() const {
-  auto info = getExtInfo().intoBuilder().withThrows(false).build();
+  auto info = getExtInfo().intoBuilder().withThrows(false, Type()).build();
   return withExtInfo(info);
+}
+
+llvm::Optional<Type> AnyFunctionType::getEffectiveThrownErrorType() const {
+  // A non-throwing function... has no thrown interface type.
+  if (!isThrowing())
+    return llvm::None;
+
+  // If there is no specified thrown error type, it throws "any Error".
+  Type thrownError = getThrownError();
+  if (!thrownError)
+    return getASTContext().getErrorExistentialType();
+
+  // If the thrown interface type is "Never", this function does not throw.
+  if (thrownError->isEqual(getASTContext().getNeverType()))
+    return llvm::None;
+
+  // Otherwise, return the typed error.
+  return thrownError;
+}
+
+Type AnyFunctionType::getEffectiveThrownErrorTypeOrNever() const {
+  if (auto thrown = getEffectiveThrownErrorType())
+    return *thrown;
+
+  return getASTContext().getNeverType();
 }
 
 llvm::Optional<TangentSpace>
@@ -5549,31 +5644,36 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
   getSubsetParameters(parameterIndices, diffParams,
                       /*reverseCurryLevels*/ !makeSelfParamFirst);
 
-  // Get the original semantic result type.
+  // Get the original non-inout semantic result types.
   SmallVector<AutoDiffSemanticFunctionResultType, 1> originalResults;
-  autodiff::getFunctionSemanticResultTypes(this, originalResults);
+  autodiff::getFunctionSemanticResults(this, parameterIndices, originalResults);
   // Error if no original semantic results.
   if (originalResults.empty())
     return llvm::make_error<DerivativeFunctionTypeError>(
         this, DerivativeFunctionTypeError::Kind::NoSemanticResults);
-  // Error if multiple original semantic results.
-  // TODO(TF-1250): Support functions with multiple semantic results.
-  if (originalResults.size() > 1)
-    return llvm::make_error<DerivativeFunctionTypeError>(
-        this, DerivativeFunctionTypeError::Kind::MultipleSemanticResults);
-  auto originalResult = originalResults.front();
-  auto originalResultType = originalResult.type;
 
-  // Get the original semantic result type's `TangentVector` associated type.
-  auto resultTan =
-      originalResultType->getAutoDiffTangentSpace(lookupConformance);
-  // Error if original semantic result has no tangent space.
-  if (!resultTan) {
-    return llvm::make_error<DerivativeFunctionTypeError>(
+  // Accumulate non-semantic result tangent spaces.
+  SmallVector<Type, 1> resultTanTypes, inoutTanTypes;
+  for (auto i : range(originalResults.size())) {
+    auto originalResult = originalResults[i];
+    auto originalResultType = originalResult.type;
+
+    // Voids currently have a defined tangent vector, so ignore them.
+    if (originalResultType->isVoid())
+      continue;
+
+    // Get the original semantic result type's `TangentVector` associated type.
+    // Error if a semantic result has no tangent space.
+    auto resultTan =
+        originalResultType->getAutoDiffTangentSpace(lookupConformance);
+    if (!resultTan)
+      return llvm::make_error<DerivativeFunctionTypeError>(
         this, DerivativeFunctionTypeError::Kind::NonDifferentiableResult,
-        std::make_pair(originalResultType, /*index*/ 0));
+        std::make_pair(originalResultType, unsigned(originalResult.index)));
+
+    if (!originalResult.isSemanticResultParameter)
+      resultTanTypes.push_back(resultTan->getType());
   }
-  auto resultTanType = resultTan->getType();
 
   // Compute the result linear map function type.
   FunctionType *linearMapType;
@@ -5585,34 +5685,40 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
     // - Original:     `(T0, T1, ...) -> R`
     // - Differential: `(T0.Tan, T1.Tan, ...) -> R.Tan`
     //
-    // Case 2: original function has a non-wrt `inout` parameter.
+    // Case 2: original function has a wrt `inout` parameter.
     // - Original:      `(T0, inout T1, ...) -> Void`
-    // - Differential: `(T0.Tan, ...) -> T1.Tan`
-    //
-    // Case 3: original function has a wrt `inout` parameter.
-    // - Original:     `(T0, inout T1, ...) -> Void`
-    // - Differential: `(T0.Tan, inout T1.Tan, ...) -> Void`
+    // - Differential:  `(T0.Tan, inout T1.Tan, ...) -> Void`
     SmallVector<AnyFunctionType::Param, 4> differentialParams;
-    bool hasInoutDiffParameter = false;
     for (auto i : range(diffParams.size())) {
       auto diffParam = diffParams[i];
       auto paramType = diffParam.getPlainType();
       auto paramTan = paramType->getAutoDiffTangentSpace(lookupConformance);
       // Error if parameter has no tangent space.
-      if (!paramTan) {
+      if (!paramTan)
         return llvm::make_error<DerivativeFunctionTypeError>(
             this,
             DerivativeFunctionTypeError::Kind::
                 NonDifferentiableDifferentiabilityParameter,
             std::make_pair(paramType, i));
-      }
+
       differentialParams.push_back(AnyFunctionType::Param(
           paramTan->getType(), Identifier(), diffParam.getParameterFlags()));
-      if (diffParam.isInOut())
-        hasInoutDiffParameter = true;
     }
-    auto differentialResult =
-        hasInoutDiffParameter ? Type(ctx.TheEmptyTupleType) : resultTanType;
+    Type differentialResult;
+    if (resultTanTypes.empty()) {
+      differentialResult = ctx.TheEmptyTupleType;
+    } else if (resultTanTypes.size() == 1) {
+      differentialResult = resultTanTypes.front();
+    } else {
+      SmallVector<TupleTypeElt, 2> differentialResults;
+      for (auto i : range(resultTanTypes.size())) {
+        auto resultTanType = resultTanTypes[i];
+        differentialResults.push_back(
+            TupleTypeElt(resultTanType, Identifier()));
+      }
+      differentialResult = TupleType::get(differentialResults, ctx);
+    }
+
     // FIXME: Verify ExtInfo state is correct, not working by accident.
     FunctionType::ExtInfo info;
     linearMapType =
@@ -5626,29 +5732,27 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
     // - Original: `(T0, T1, ...) -> R`
     // - Pullback: `R.Tan -> (T0.Tan, T1.Tan, ...)`
     //
-    // Case 2: original function has a non-wrt `inout` parameter.
-    // - Original: `(T0, inout T1, ...) -> Void`
-    // - Pullback: `(T1.Tan) -> (T0.Tan, ...)`
-    //
-    // Case 3: original function has a wrt `inout` parameter.
-    // - Original: `(T0, inout T1, ...) -> Void`
-    // - Pullback: `(inout T1.Tan) -> (T0.Tan, ...)`
+    // Case 2: original function has wrt `inout` parameters.
+    // - Original: `(T0, inout T1, ...) -> R`
+    // - Pullback: `(R.Tan, inout T1.Tan) -> (T0.Tan, ...)`
     SmallVector<TupleTypeElt, 4> pullbackResults;
-    bool hasInoutDiffParameter = false;
+    SmallVector<AnyFunctionType::Param, 2> semanticResultParams;
     for (auto i : range(diffParams.size())) {
       auto diffParam = diffParams[i];
       auto paramType = diffParam.getPlainType();
       auto paramTan = paramType->getAutoDiffTangentSpace(lookupConformance);
       // Error if parameter has no tangent space.
-      if (!paramTan) {
+      if (!paramTan)
         return llvm::make_error<DerivativeFunctionTypeError>(
             this,
             DerivativeFunctionTypeError::Kind::
                 NonDifferentiableDifferentiabilityParameter,
             std::make_pair(paramType, i));
-      }
-      if (diffParam.isInOut()) {
-        hasInoutDiffParameter = true;
+
+      if (diffParam.isAutoDiffSemanticResult()) {
+        if (paramType->isVoid())
+          continue;
+        semanticResultParams.push_back(diffParam);
         continue;
       }
       pullbackResults.emplace_back(paramTan->getType());
@@ -5661,15 +5765,31 @@ AnyFunctionType::getAutoDiffDerivativeFunctionLinearMapType(
     } else {
       pullbackResult = TupleType::get(pullbackResults, ctx);
     }
-    auto flags = ParameterTypeFlags().withInOut(hasInoutDiffParameter);
-    auto pullbackParam =
-        AnyFunctionType::Param(resultTanType, Identifier(), flags);
+    // First accumulate non-inout results as pullback parameters.
+    SmallVector<FunctionType::Param, 2> pullbackParams;
+    for (auto i : range(resultTanTypes.size())) {
+      auto resultTanType = resultTanTypes[i];
+      auto flags = ParameterTypeFlags().withInOut(false);
+      pullbackParams.push_back(AnyFunctionType::Param(
+          resultTanType, Identifier(), flags));
+    }
+    // Then append semantic result parameters.
+    for (auto i : range(semanticResultParams.size())) {
+      auto semanticResultParam = semanticResultParams[i];
+      auto semanticResultParamType = semanticResultParam.getPlainType();
+      auto semanticResultParamTan =
+          semanticResultParamType->getAutoDiffTangentSpace(lookupConformance);
+      auto flags = ParameterTypeFlags().withInOut(true);
+      pullbackParams.push_back(AnyFunctionType::Param(
+          semanticResultParamTan->getType(), Identifier(), flags));
+    }
     // FIXME: Verify ExtInfo state is correct, not working by accident.
     FunctionType::ExtInfo info;
-    linearMapType = FunctionType::get({pullbackParam}, pullbackResult, info);
+    linearMapType = FunctionType::get(pullbackParams, pullbackResult, info);
     break;
   }
   }
+
   assert(linearMapType && "Expected linear map type");
   return linearMapType;
 }

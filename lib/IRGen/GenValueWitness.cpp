@@ -389,7 +389,7 @@ static Address getArgAsBuffer(IRGenFunction &IGF,
 /// Don't add new callers of this, it doesn't make any sense.
 static CanType getFormalTypeInPrimaryContext(CanType abstractType) {
   auto *nominal = abstractType.getAnyNominal();
-  if (abstractType->isEqual(nominal->getDeclaredType())) {
+  if (nominal && abstractType->isEqual(nominal->getDeclaredType())) {
     return nominal->mapTypeIntoContext(nominal->getDeclaredInterfaceType())
       ->getCanonicalType();
   }
@@ -905,6 +905,9 @@ static llvm::Constant *getEnumTagFunction(IRGenModule &IGM,
   if (!typeLayoutEntry->layoutString(IGM, genericSig) &&
       !isRuntimeInstatiatedLayoutString(IGM, typeLayoutEntry)) {
     return nullptr;
+  } else if (typeLayoutEntry->copyDestroyKind(IGM) !=
+             EnumTypeLayoutEntry::CopyDestroyStrategy::Normal) {
+    return nullptr;
   } else if (typeLayoutEntry->isSingleton()) {
     return IGM.getSingletonEnumGetEnumTagFn();
   } else if (!typeLayoutEntry->isFixedSize(IGM)) {
@@ -939,8 +942,11 @@ getDestructiveInjectEnumTagFunction(IRGenModule &IGM,
   if ((!typeLayoutEntry->layoutString(IGM, genericSig) &&
        !isRuntimeInstatiatedLayoutString(IGM, typeLayoutEntry))) {
     return nullptr;
-  } else if (typeLayoutEntry->isSingleton()) {
+  } else if (typeLayoutEntry->copyDestroyKind(IGM) !=
+             EnumTypeLayoutEntry::CopyDestroyStrategy::Normal) {
     return nullptr;
+  } else if (typeLayoutEntry->isSingleton()) {
+    return IGM.getSingletonEnumDestructiveInjectEnumTagFn();
   } else if (!typeLayoutEntry->isFixedSize(IGM)) {
     if (typeLayoutEntry->isMultiPayloadEnum()) {
       return IGM.getMultiPayloadEnumGenericDestructiveInjectEnumTagFn();
@@ -960,7 +966,7 @@ getDestructiveInjectEnumTagFunction(IRGenModule &IGM,
          (tzCount % toCount != 0))) {
       return nullptr;
     } else {
-      return nullptr;
+      return IGM.getEnumSimpleDestructiveInjectEnumTagFn();
     }
   }
 }
@@ -1254,12 +1260,20 @@ addValueWitness(IRGenModule &IGM, ConstantStructBuilder &B, ValueWitness index,
   llvm_unreachable("bad value witness kind");
 
  standard:
-  llvm::Function *fn =
-    IGM.getAddrOfValueWitness(abstractType, index, ForDefinition);
-  if (fn->empty())
-    buildValueWitnessFunction(IGM, fn, index, packing, abstractType,
-                              concreteType, concreteTI);
+  llvm::Function *fn = IGM.getOrCreateValueWitnessFunction(
+      index, packing, abstractType, concreteType, concreteTI);
   addFunction(fn);
+ }
+
+ llvm::Function *IRGenModule::getOrCreateValueWitnessFunction(
+     ValueWitness index, FixedPacking packing, CanType abstractType,
+     SILType concreteType, const TypeInfo &type) {
+  llvm::Function *fn =
+      getAddrOfValueWitness(abstractType, index, ForDefinition);
+  if (fn->empty())
+  buildValueWitnessFunction(*this, fn, index, packing, abstractType,
+                            concreteType, type);
+  return fn;
  }
 
 static bool shouldAddEnumWitnesses(CanType abstractType) {

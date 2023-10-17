@@ -299,6 +299,13 @@ private:
   /// Name of a section if @_section attribute was used, otherwise empty.
   StringRef Section;
 
+  /// Name of a Wasm export if @_expose(wasm) attribute was used, otherwise
+  /// empty.
+  StringRef WasmExportName;
+
+  /// Name of a Wasm import module and field if @_extern(wasm) attribute
+  llvm::Optional<std::pair<StringRef, StringRef>> WasmImportModuleAndField;
+
   /// Has value if there's a profile for this function
   /// Contains Function Entry Count
   ProfileCounter EntryCount;
@@ -779,6 +786,12 @@ public:
   // Returns true if the function has indirect out parameters.
   bool hasIndirectFormalResults() const {
     return getLoweredFunctionType()->hasIndirectFormalResults();
+  }
+
+  // Returns true if the function has any generic arguments.
+  bool isGeneric() const {
+    auto s = getLoweredFunctionType()->getInvocationGenericSignature();
+    return s && !s->areAllParamsConcrete();
   }
 
   /// Returns true if this function ie either a class method, or a
@@ -1264,6 +1277,28 @@ public:
   StringRef section() const { return Section; }
   void setSection(StringRef value) { Section = value; }
 
+  /// Return Wasm export name if @_expose(wasm) was used, otherwise empty
+  StringRef wasmExportName() const { return WasmExportName; }
+  void setWasmExportName(StringRef value) { WasmExportName = value; }
+
+  /// Return Wasm import module name if @_extern(wasm) was used otherwise empty
+  StringRef wasmImportModuleName() const {
+    if (WasmImportModuleAndField)
+      return WasmImportModuleAndField->first;
+    return StringRef();
+  }
+
+  /// Return Wasm import field name if @_extern(wasm) was used otherwise empty
+  StringRef wasmImportFieldName() const {
+    if (WasmImportModuleAndField)
+      return WasmImportModuleAndField->second;
+    return StringRef();
+  }
+
+  void setWasmImportModuleAndField(StringRef module, StringRef field) {
+    WasmImportModuleAndField = std::make_pair(module, field);
+  }
+
   /// Returns true if this function belongs to a declaration that returns
   /// an opaque result type with one or more availability conditions that are
   /// allowed to produce a different underlying type at runtime.
@@ -1419,6 +1454,14 @@ public:
   const SILArgument *getSelfArgument() const {
     assert(hasSelfParam() && "This method can only be called if the "
                              "SILFunction has a self parameter");
+    return getArguments().back();
+  }
+
+  /// Like getSelfArgument() except it returns a nullptr if we do not have a
+  /// selfparam.
+  const SILArgument *maybeGetSelfArgument() const {
+    if (!hasSelfParam())
+      return nullptr;
     return getArguments().back();
   }
 

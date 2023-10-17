@@ -40,9 +40,8 @@ namespace swift {
 
 SourceLoc InheritedDeclsReferencedRequest::getNearestLoc() const {
   const auto &storage = getStorage();
-  auto &typeLoc = getInheritedTypeLocAtIndex(std::get<0>(storage),
-                                             std::get<1>(storage));
-  return typeLoc.getLoc();
+  auto inheritedTypes = InheritedTypes(std::get<0>(storage));
+  return inheritedTypes.getEntry(std::get<1>(storage)).getLoc();
 }
 
 //----------------------------------------------------------------------------//
@@ -362,10 +361,6 @@ void LookupInModuleRequest::writeDependencySink(
   }
 }
 
-//----------------------------------------------------------------------------//
-// LookupConformanceInModuleRequest computation.
-//----------------------------------------------------------------------------//
-
 void swift::simple_display(llvm::raw_ostream &out,
                            const LookupConformanceDescriptor &desc) {
   out << "looking up conformance to ";
@@ -375,6 +370,10 @@ void swift::simple_display(llvm::raw_ostream &out,
   out << " in ";
   simple_display(out, desc.Mod);
 }
+
+//----------------------------------------------------------------------------//
+// AnyObjectLookupRequest computation.
+//----------------------------------------------------------------------------//
 
 void AnyObjectLookupRequest::writeDependencySink(
     evaluator::DependencyCollector &reqTracker,

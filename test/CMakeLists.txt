@@ -92,6 +92,7 @@ function(get_test_dependencies SDK result_var_name)
       llvm-readobj
       llvm-size
       llvm-strings
+      llvm-readtapi
       not
       split-file)
   endif()
@@ -110,7 +111,8 @@ function(get_test_dependencies SDK result_var_name)
      ("${SDK}" STREQUAL "OPENBSD") OR
      ("${SDK}" STREQUAL "ANDROID") OR
      ("${SDK}" STREQUAL "WINDOWS") OR
-     ("${SDK}" STREQUAL "HAIKU"))
+     ("${SDK}" STREQUAL "HAIKU") OR
+     ("${SDK}" STREQUAL "WASI"))
     # No extra dependencies.
   else()
     message(FATAL_ERROR "Unknown SDK: ${SDK}")
@@ -150,8 +152,14 @@ if(NOT SWIFT_INCLUDE_TOOLS)
       )
   endif()
   if(SWIFT_BUILD_STDLIB)
-    list(APPEND SWIFT_LIT_ARGS
-         "--param" "test_resource_dir=${SWIFTLIB_DIR}")
+    # If building only static stdlib, use `swift_static` resources directory.
+    if(NOT SWIFT_BUILD_DYNAMIC_STDLIB AND SWIFT_BUILD_STATIC_STDLIB)
+      list(APPEND SWIFT_LIT_ARGS
+           "--param" "test_resource_dir=${SWIFTSTATICLIB_DIR}")
+    else()
+      list(APPEND SWIFT_LIT_ARGS
+           "--param" "test_resource_dir=${SWIFTLIB_DIR}")
+    endif()
   endif()
 endif()
 
@@ -182,7 +190,6 @@ normalize_boolean_spelling(SWIFT_ASAN_BUILD)
 normalize_boolean_spelling(SWIFT_ENABLE_SOURCEKIT_TESTS)
 normalize_boolean_spelling(SWIFT_ENABLE_EXPERIMENTAL_DIFFERENTIABLE_PROGRAMMING)
 normalize_boolean_spelling(SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY)
-normalize_boolean_spelling(SWIFT_BACK_DEPLOY_CONCURRENCY)
 normalize_boolean_spelling(SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED)
 normalize_boolean_spelling(SWIFT_ENABLE_EXPERIMENTAL_STRING_PROCESSING)
 normalize_boolean_spelling(SWIFT_ENABLE_EXPERIMENTAL_OBSERVATION)
@@ -201,18 +208,10 @@ normalize_boolean_spelling(SWIFT_STDLIB_ENABLE_UNICODE_DATA)
 normalize_boolean_spelling(SWIFT_ENABLE_DISPATCH)
 normalize_boolean_spelling(SWIFT_STDLIB_ENABLE_OBJC_INTEROP)
 normalize_boolean_spelling(SWIFT_ENABLE_BACKTRACING)
+normalize_boolean_spelling(SWIFT_BUILD_SWIFT_SYNTAX)
 is_build_type_optimized("${SWIFT_STDLIB_BUILD_TYPE}" SWIFT_OPTIMIZED)
 
-# Get 'SWIFT_HOST_TRIPLE' and 'SWIFT_HOST_SDKROOT' for lit.site.cfg.in
-if(SWIFT_HOST_VARIANT_SDK IN_LIST SWIFT_DARWIN_PLATFORMS)
-  set(DEPLOYMENT_VERSION "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_DEPLOYMENT_VERSION}")
-endif()
-if(SWIFT_HOST_VARIANT_SDK STREQUAL ANDROID)
-  set(DEPLOYMENT_VERSION ${SWIFT_ANDROID_API_LEVEL})
-endif()
-get_target_triple(SWIFT_HOST_TRIPLE SWIFT_HOST_TRIPLE_VARIANT "${SWIFT_HOST_VARIANT_SDK}" "${SWIFT_HOST_VARIANT_ARCH}"
-  MACCATALYST_BUILD_FLAVOR ""
-  DEPLOYMENT_VERSION "${DEPLOYMENT_VERSION}")
+# Get 'SWIFT_HOST_SDKROOT' for lit.site.cfg.in
 set(SWIFT_HOST_SDKROOT "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${SWIFT_HOST_VARIANT_ARCH}_PATH}")
 
 set(profdata_merge_worker
@@ -384,10 +383,6 @@ foreach(SDK ${SWIFT_SDKS})
 
         if(SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY)
           list(APPEND LIT_ARGS "--param" "concurrency")
-        endif()
-
-        if(SWIFT_BACK_DEPLOY_CONCURRENCY)
-          list(APPEND LIT_ARGS "--param" "back_deploy_concurrency")
         endif()
 
         if(SWIFT_ENABLE_EXPERIMENTAL_DISTRIBUTED)

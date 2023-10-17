@@ -289,12 +289,9 @@ public:
   void *_reserved;
 
   void fillWithSuccess(AsyncTask::FutureFragment *future) {
-    fillWithSuccess(future->getStoragePtr(), future->getResultType(),
-                    successResultPointer);
-  }
-  void fillWithSuccess(OpaqueValue *src, const Metadata *successType,
-                       OpaqueValue *result) {
-    successType->vw_initializeWithCopy(result, src);
+    OpaqueValue *src = future->getStoragePtr();
+    OpaqueValue *result = successResultPointer;
+    future->getResultType().vw_initializeWithCopy(result, src);
   }
 
   void fillWithError(AsyncTask::FutureFragment *future) {
@@ -781,8 +778,10 @@ struct AsyncTask::PrivateStorage {
 
   // Destroy the opaque storage of the task
   void destroy() {
+#ifndef NDEBUG
     auto oldStatus = _status().load(std::memory_order_relaxed);
     assert(oldStatus.isComplete());
+#endif
 
     this->~PrivateStorage();
   }

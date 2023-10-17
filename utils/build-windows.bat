@@ -134,7 +134,7 @@ git -C "%source_root%\swift" checkout-index --force --all
 @set "skip_repositories_arg=%skip_repositories_arg% --skip-repository tensorflow-swift-apis"
 @set "skip_repositories_arg=%skip_repositories_arg% --skip-repository yams"
 
-call "%source_root%\swift\utils\update-checkout.cmd" %scheme_arg% %skip_repositories_arg% --clone --skip-history --skip-tags --github-comment "%ghprbCommentBody%" >NUL
+call "%source_root%\swift\utils\update-checkout.cmd" %scheme_arg% %skip_repositories_arg% --clone --reset-to-remote --skip-history --skip-tags --github-comment "%ghprbCommentBody%" >NUL
 
 goto :eof
 endlocal
@@ -274,6 +274,7 @@ cmake^
     -DCMAKE_EXE_LINKER_FLAGS:STRING=/INCREMENTAL:NO^
     -DCMAKE_SHARED_LINKER_FLAGS:STRING=/INCREMENTAL:NO^
     -DSWIFT_LIT_ARGS="--time-tests"^
+    -DSWIFT_BUILD_SWIFT_SYNTAX=YES ^
     -DSWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE:PATH=%source_root%\swift-syntax^
     -S "%source_root%\swift" %exitOnError%
 
@@ -318,6 +319,7 @@ cmake^
     -DLLDB_DISABLE_PYTHON=YES^
     -DLLDB_INCLUDE_TESTS:BOOL=NO^
     -DLLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON^
+    -DSWIFT_BUILD_SWIFT_SYNTAX=YES ^
     -S "%source_root%\llvm-project\lldb" %exitOnError%
 
 cmake --build "%build_root%\lldb" %exitOnError%

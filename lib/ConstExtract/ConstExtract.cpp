@@ -71,6 +71,7 @@ std::string toFullyQualifiedTypeNameString(const swift::Type &Type) {
   Options.AlwaysDesugarArraySliceTypes = true;
   Options.AlwaysDesugarDictionaryTypes = true;
   Options.AlwaysDesugarOptionalTypes = true;
+  Options.PrintTypeAliasUnderlyingType = true;
   Options.OpaqueReturnTypePrinting =
     PrintOptions::OpaqueReturnTypePrintingMode::WithOpaqueKeyword;
   Type.print(OutputStream, Options);
@@ -85,7 +86,10 @@ std::string toFullyQualifiedProtocolNameString(const swift::ProtocolDecl &Protoc
 }
 
 std::string toMangledTypeNameString(const swift::Type &Type) {
-  return Mangle::ASTMangler().mangleTypeWithoutPrefix(Type->getCanonicalType());
+  auto PrintingType = Type;
+  if (Type->hasArchetype())
+    PrintingType = Type->mapTypeOutOfContext();
+  return Mangle::ASTMangler().mangleTypeWithoutPrefix(PrintingType->getCanonicalType());
 }
 
 } // namespace
@@ -394,23 +398,13 @@ extractPropertyWrapperAttrValues(VarDecl *propertyDecl) {
   return customAttrValues;
 }
 
-static AttrValueVector
-extractRuntimeMetadataAttrValues(VarDecl *propertyDecl) {
-  AttrValueVector customAttrValues;
-  for (auto *runtimeMetadataAttribute : propertyDecl->getRuntimeDiscoverableAttrs())
-    customAttrValues.push_back(extractAttributeValue(runtimeMetadataAttribute));
-  return customAttrValues;
-}
-
 static ConstValueTypePropertyInfo
 extractTypePropertyInfo(VarDecl *propertyDecl) {
   if (const auto binding = propertyDecl->getParentPatternBinding()) {
     if (const auto originalInit = binding->getInit(0)) {
-      if (propertyDecl->hasAttachedPropertyWrapper() ||
-          propertyDecl->hasRuntimeMetadataAttributes()) {
+      if (propertyDecl->hasAttachedPropertyWrapper()) {
         return {propertyDecl, extractCompileTimeValue(originalInit),
-                extractPropertyWrapperAttrValues(propertyDecl),
-                extractRuntimeMetadataAttrValues(propertyDecl)};
+                extractPropertyWrapperAttrValues(propertyDecl)};
       }
 
       return {propertyDecl, extractCompileTimeValue(originalInit)};
@@ -449,7 +443,7 @@ extractEnumCases(NominalTypeDecl *Decl) {
                     : llvm::Optional<std::string>(
                           Parameter->getParameterName().str().str());
 
-            Parameters.push_back({Label, Parameter->getType()});
+            Parameters.push_back({Label, Parameter->getInterfaceType()});
           }
         }
 
@@ -696,21 +690,6 @@ void writePropertyWrapperAttributes(
   });
 }
 
-void writeRuntimeMetadataAttributes(
-    llvm::json::OStream &JSON,
-    llvm::Optional<AttrValueVector> RuntimeMetadataAttributes,
-    const ASTContext &ctx) {
-  if (!RuntimeMetadataAttributes.has_value() ||
-      RuntimeMetadataAttributes.value().empty()) {
-    return;
-  }
-
-  JSON.attributeArray("runtimeMetadataAttributes", [&] {
-    for (auto RMA : RuntimeMetadataAttributes.value())
-      writeAttributeInfo(JSON, RMA, ctx);;
-  });
-}
-
 void writeEnumCases(
     llvm::json::OStream &JSON,
     llvm::Optional<std::vector<EnumElementDeclValue>> EnumElements) {
@@ -811,78 +790,41 @@ void writeAttrInformation(llvm::json::OStream &JSON,
   });
 }
 
-void writeParameterizedProtocolSameTypeRequirements(
-    llvm::json::OStream &JSON,
-    const ParameterizedProtocolType &ParameterizedProtoTy) {
-  auto Protocol = ParameterizedProtoTy.getProtocol();
-  auto Requirements = Protocol->getProtocolRequirements();
-  auto ParameterTypeNames = Protocol->getPrimaryAssociatedTypeNames();
-  auto ProtocolArguments = ParameterizedProtoTy.getArgs();
-  llvm::dbgs() << Requirements.size() << "\n";
-  assert(ProtocolArguments.size() >= ParameterTypeNames.size());
-
-  for (size_t i = 0; i < ProtocolArguments.size(); ++i) {
-    auto ProtocolArgumentTy = ProtocolArguments[i];
-    std::string ArgumentName = ParameterTypeNames.size() > i
-                                   ? ParameterTypeNames[i].first.str().str()
-                                   : "unknown";
-
-    JSON.object([&] {
-      auto QualifiedTypeAliasName = toFullyQualifiedProtocolNameString(
-                                        *ParameterizedProtoTy.getProtocol()) +
-                                    "." + ArgumentName;
-      JSON.attribute("typeAliasName", QualifiedTypeAliasName);
-      JSON.attribute("substitutedTypeName",
-                     toFullyQualifiedTypeNameString(ProtocolArgumentTy));
-      JSON.attribute("substitutedMangledTypeName",
-                     toMangledTypeNameString(ProtocolArgumentTy));
-    });
-  }
-}
-
-void writeOpaqueTypeProtocolCompositionSameTypeRequirements(
-    llvm::json::OStream &JSON,
-    const ProtocolCompositionType &ProtocolCompositionTy) {
-  for (auto CompositionMemberProto : ProtocolCompositionTy.getMembers()) {
-    if (auto ParameterizedProtoTy =
-            CompositionMemberProto->getAs<ParameterizedProtocolType>()) {
-      writeParameterizedProtocolSameTypeRequirements(JSON,
-                                                     *ParameterizedProtoTy);
-    }
-  }
-}
-
 void writeSubstitutedOpaqueTypeAliasDetails(
     llvm::json::OStream &JSON, const OpaqueTypeArchetypeType &OpaqueTy) {
+  auto Signature = OpaqueTy.getDecl()->getOpaqueInterfaceGenericSignature();
+
   JSON.attributeArray("opaqueTypeProtocolRequirements", [&] {
-    auto ConformsToProtocols = OpaqueTy.getConformsTo();
-    for (auto Proto : ConformsToProtocols) {
-      JSON.value(toFullyQualifiedProtocolNameString(*Proto));
+    for (const auto Requirement : Signature.getRequirements()) {
+      // Ignore requirements whose subject type is that of the owner decl
+      if (!Requirement.getFirstType()->isEqual(OpaqueTy.getInterfaceType()))
+        continue;
+      if (Requirement.getKind() == RequirementKind::Conformance)
+        JSON.value(
+            toFullyQualifiedProtocolNameString(*Requirement.getProtocolDecl()));
     }
   });
+
   JSON.attributeArray("opaqueTypeSameTypeRequirements", [&] {
-    auto GenericSig = OpaqueTy.getDecl()
-                          ->getNamingDecl()
-                          ->getInnermostDeclContext()
-                          ->getGenericSignatureOfContext();
-    auto ConstraintTy = OpaqueTy.getExistentialType();
-    if (auto existential = ConstraintTy->getAs<ExistentialType>())
-      ConstraintTy = existential->getConstraintType();
-
-    // Opaque archetype substitutions are always canonical, so
-    // re-sugar the constraint type using the owning
-    // declaration's generic parameter names.
-    if (GenericSig)
-      ConstraintTy = GenericSig->getSugaredType(ConstraintTy);
-
-    if (auto ParameterizedProtoTy =
-            ConstraintTy->getAs<ParameterizedProtocolType>()) {
-      writeParameterizedProtocolSameTypeRequirements(JSON,
-                                                     *ParameterizedProtoTy);
-    } else if (auto ProtocolCompositionTy =
-                   ConstraintTy->getAs<ProtocolCompositionType>()) {
-      writeOpaqueTypeProtocolCompositionSameTypeRequirements(
-          JSON, *ProtocolCompositionTy);
+    for (const auto Requirement : Signature.getRequirements()) {
+      if (Requirement.getKind() == RequirementKind::SameType) {
+        auto TypeAliasType = Requirement.getFirstType();
+        auto TypeWitness = Requirement.getSecondType();
+        JSON.object([&] {
+          auto TypeAliasName = toFullyQualifiedTypeNameString(TypeAliasType);
+          if (auto DependentMemberTy =
+                  TypeAliasType->getAs<DependentMemberType>())
+            if (const auto *Assoc = DependentMemberTy->getAssocType())
+              TypeAliasName =
+                  toFullyQualifiedProtocolNameString(*Assoc->getProtocol()) +
+                  "." + DependentMemberTy->getName().str().str();
+          JSON.attribute("typeAliasName", TypeAliasName);
+          JSON.attribute("substitutedTypeName",
+                         toFullyQualifiedTypeNameString(TypeWitness));
+          JSON.attribute("substitutedMangledTypeName",
+                         toMangledTypeNameString(TypeWitness));
+        });
+      }
     }
   });
 }
@@ -917,17 +859,15 @@ void writeProperties(llvm::json::OStream &JSON,
       JSON.object([&] {
         const auto *decl = PropertyInfo.VarDecl;
         JSON.attribute("label", decl->getName().str().str());
-        JSON.attribute("type", toFullyQualifiedTypeNameString(decl->getType()));
-        JSON.attribute("mangledTypeName", toMangledTypeNameString(decl->getType()));
+        JSON.attribute("type", toFullyQualifiedTypeNameString(
+            decl->getInterfaceType()));
+        JSON.attribute("mangledTypeName", "n/a - deprecated");
         JSON.attribute("isStatic", decl->isStatic() ? "true" : "false");
         JSON.attribute("isComputed", !decl->hasStorage() ? "true" : "false");
         writeLocationInformation(JSON, decl->getLoc(),
                                  decl->getDeclContext()->getASTContext());
         writeValue(JSON, PropertyInfo.Value);
         writePropertyWrapperAttributes(JSON, PropertyInfo.PropertyWrappers,
-                                       decl->getASTContext());
-        writeRuntimeMetadataAttributes(JSON,
-                                       PropertyInfo.RuntimeMetadataAttributes,
                                        decl->getASTContext());
         writeResultBuilderInformation(JSON, &NomTypeDecl, decl);
         writeAttrInformation(JSON, decl->getAttrs());

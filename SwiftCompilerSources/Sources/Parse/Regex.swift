@@ -92,8 +92,8 @@ public func _RegexLiteralParsingFn(
   _ versionOut: UnsafeMutablePointer<CUnsignedInt>,
   _ captureStructureOut: UnsafeMutableRawPointer,
   _ captureStructureSize: CUnsignedInt,
-  _ bridgedDiagnosticBaseLoc: swift.SourceLoc,
-  _ bridgedDiagnosticEngine: BridgedDiagnosticEngine
+  _ bridgedDiagnosticBaseLoc: BridgedSourceLoc,
+  _ bridgedDiagnosticEngine: BridgedDiagEngine
 ) -> Bool {
   let str = String(cString: inputPtr)
   let captureBuffer = UnsafeMutableRawBufferPointer(

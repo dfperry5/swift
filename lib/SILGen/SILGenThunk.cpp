@@ -20,11 +20,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Callee.h"
 #include "ManagedValue.h"
 #include "SILGenFunction.h"
 #include "SILGenFunctionBuilder.h"
 #include "Scope.h"
 #include "swift/AST/ASTMangler.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/FileUnit.h"
 #include "swift/AST/ForeignAsyncConvention.h"
@@ -84,14 +86,15 @@ SILGenFunction::emitDynamicMethodRef(SILLocation loc, SILDeclRef constant,
   if (constant.isForeignToNativeThunk()) {
     if (!SGM.hasFunction(constant))
       SGM.emitForeignToNativeThunk(constant);
-    return ManagedValue::forUnmanaged(B.createFunctionRefFor(
+    return ManagedValue::forObjectRValueWithoutOwnership(B.createFunctionRefFor(
         loc, SGM.getFunction(constant, NotForDefinition)));
   }
 
   // Otherwise, we need a dynamic dispatch thunk.
   SILFunction *F = SGM.getDynamicThunk(constant, constantTy);
 
-  return ManagedValue::forUnmanaged(B.createFunctionRefFor(loc, F));
+  return ManagedValue::forObjectRValueWithoutOwnership(
+      B.createFunctionRefFor(loc, F));
 }
 
 void SILGenModule::emitForeignToNativeThunk(SILDeclRef thunk) {
@@ -197,12 +200,12 @@ static const clang::Type *prependParameterType(
 }
 
 SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
-    CanSILFunctionType blockType, CanType continuationTy,
-    AbstractionPattern origFormalType, CanGenericSignature sig,
-    ForeignAsyncConvention convention,
-    llvm::Optional<ForeignErrorConvention> foreignError) {
-  // Extract the result and error types from the continuation type.
-  auto resumeType = cast<BoundGenericType>(continuationTy).getGenericArgs()[0];
+    CanSILFunctionType blockType, CanType blockStorageType,
+    CanType continuationType, AbstractionPattern origFormalType,
+    CanGenericSignature sig, CalleeTypeInfo &calleeInfo) {
+  auto convention = *calleeInfo.foreign.async;
+  auto resumeType =
+      calleeInfo.substResultType->mapTypeOutOfContext()->getReducedType(sig);
 
   CanAnyFunctionType completionHandlerOrigTy = [&]() {
     auto completionHandlerOrigTy =
@@ -235,10 +238,9 @@ SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
   // block buffer. The block storage holds the continuation we feed the
   // result values into.
   SmallVector<SILParameterInfo, 4> implArgs;
-  auto blockStorageTy = SILBlockStorageType::get(continuationTy);
-  implArgs.push_back(SILParameterInfo(blockStorageTy,
-                                ParameterConvention::Indirect_InoutAliasable));
-  
+  implArgs.push_back(SILParameterInfo(
+      blockStorageType, ParameterConvention::Indirect_InoutAliasable));
+
   std::copy(blockType->getParameters().begin(),
             blockType->getParameters().end(),
             std::back_inserter(implArgs));
@@ -246,7 +248,7 @@ SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
   auto newClangTy = prependParameterType(
       getASTContext(),
       blockType->getClangTypeInfo().getType(),
-      getASTContext().getClangTypeForIRGen(blockStorageTy));
+      getASTContext().getClangTypeForIRGen(blockStorageType));
 
   auto implTy = SILFunctionType::get(
       sig,
@@ -292,10 +294,33 @@ SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
 
       // Get the continuation out of the block object.
       auto blockStorage = params[0].getValue();
-      auto continuationAddr = SGF.B.createProjectBlockStorage(loc, blockStorage);
-      auto continuationVal = SGF.B.createLoad(loc, continuationAddr,
-                                           LoadOwnershipQualifier::Trivial);
-      auto continuation = ManagedValue::forUnmanaged(continuationVal);
+      SILValue continuationAddr =
+          SGF.B.createProjectBlockStorage(loc, blockStorage);
+
+      auto &ctx = SGF.getASTContext();
+
+      bool checkedBridging = ctx.LangOpts.UseCheckedAsyncObjCBridging;
+
+      ManagedValue continuation;
+      if (checkedBridging) {
+        FormalEvaluationScope scope(SGF);
+
+        auto underlyingValueTy = OpenedArchetypeType::get(ctx.TheAnyType, sig);
+
+        auto underlyingValueAddr = SGF.emitOpenExistential(
+            loc, ManagedValue::forTrivialAddressRValue(continuationAddr),
+            SGF.getLoweredType(underlyingValueTy), AccessKind::Read);
+
+        continuation = SGF.B.createUncheckedAddrCast(
+            loc, underlyingValueAddr,
+            SILType::getPrimitiveAddressType(
+                F->mapTypeIntoContext(continuationType)->getCanonicalType()));
+      } else {
+        auto continuationVal = SGF.B.createLoad(
+            loc, continuationAddr, LoadOwnershipQualifier::Trivial);
+        continuation =
+            ManagedValue::forObjectRValueWithoutOwnership(continuationVal);
+      }
 
       // Check for an error if the convention includes one.
       // Increment the error and flag indices if present.  They do not account
@@ -309,8 +334,12 @@ SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
 
       SILBasicBlock *returnBB = nullptr;
       if (errorIndex) {
-        resumeIntrinsic = getResumeUnsafeThrowingContinuation();
-        auto errorIntrinsic = getResumeUnsafeThrowingContinuationWithError();
+        resumeIntrinsic = checkedBridging
+                              ? getResumeCheckedThrowingContinuation()
+                              : getResumeUnsafeThrowingContinuation();
+        auto errorIntrinsic =
+            checkedBridging ? getResumeCheckedThrowingContinuationWithError()
+                            : getResumeUnsafeThrowingContinuationWithError();
 
         auto errorArgument = params[*errorIndex];
         auto someErrorBB = SGF.createBasicBlock(FunctionSection::Postmatter);
@@ -382,10 +411,13 @@ SILFunction *SILGenModule::getOrCreateForeignAsyncCompletionHandlerImplFunction(
         errorScope.pop();
         SGF.B.createBranch(loc, returnBB);
         SGF.B.emitBlock(noneErrorBB);
-      } else if (foreignError) {
-        resumeIntrinsic = getResumeUnsafeThrowingContinuation();
+      } else if (auto foreignError = calleeInfo.foreign.error) {
+        resumeIntrinsic = checkedBridging
+                              ? getResumeCheckedThrowingContinuation()
+                              : getResumeUnsafeThrowingContinuation();
       } else {
-        resumeIntrinsic = getResumeUnsafeContinuation();
+        resumeIntrinsic = checkedBridging ? getResumeCheckedContinuation()
+                                          : getResumeUnsafeContinuation();
       }
 
       auto loweredResumeTy = SGF.getLoweredType(AbstractionPattern::getOpaque(),
@@ -550,11 +582,14 @@ SILFunction *SILGenModule::getOrCreateDerivativeVTableThunk(
   SILGenFunctionBuilder builder(*this);
   auto originalFnDeclRef = derivativeFnDeclRef.asAutoDiffOriginalFunction();
   Mangle::ASTMangler mangler;
+  auto *resultIndices = autodiff::getFunctionSemanticResultIndices(
+    originalFnDeclRef.getAbstractFunctionDecl(),
+    derivativeId->getParameterIndices());
   auto name = mangler.mangleAutoDiffDerivativeFunction(
       originalFnDeclRef.getAbstractFunctionDecl(),
       derivativeId->getKind(),
       AutoDiffConfig(derivativeId->getParameterIndices(),
-                     IndexSubset::get(getASTContext(), 1, {0}),
+                     resultIndices,
                      derivativeId->getDerivativeGenericSignature()),
       /*isVTableThunk*/ true);
   auto *thunk = builder.getOrCreateFunction(
@@ -574,7 +609,12 @@ SILFunction *SILGenModule::getOrCreateDerivativeVTableThunk(
   auto *loweredParamIndices = autodiff::getLoweredParameterIndices(
       derivativeId->getParameterIndices(),
       derivativeFnDecl->getInterfaceType()->castTo<AnyFunctionType>());
-  auto *loweredResultIndices = IndexSubset::get(getASTContext(), 1, {0});
+  // FIXME: Do we need to lower the result indices? Likely yes.
+  auto *loweredResultIndices =
+    autodiff::getFunctionSemanticResultIndices(
+      originalFnDeclRef.getAbstractFunctionDecl(),
+      derivativeId->getParameterIndices()
+    );
   auto diffFn = SGF.B.createDifferentiableFunction(
       loc, loweredParamIndices, loweredResultIndices, originalFn);
   auto derivativeFn = SGF.B.createDifferentiableFunctionExtract(

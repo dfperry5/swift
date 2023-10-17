@@ -9,7 +9,7 @@
 // CHECK:   mutating func callAsFunction(_ x: Int32, _ y: Int32) -> Int32
 // CHECK: }
 
-// CHECK: struct LoadableBoolWrapper {
+// CHECK: struct LoadableBoolWrapper
 // CHECK:   prefix static func ! (lhs: inout LoadableBoolWrapper) -> LoadableBoolWrapper
 // CHECK:   func __convertToBool() -> Bool
 // CHECK: }
@@ -94,7 +94,7 @@
 
 // CHECK: struct TemplatedArray<T> {
 // CHECK: }
-// CHECK: struct TemplatedArray<Double> {
+// CHECK: struct TemplatedArray<CDouble> {
 // CHECK:   subscript(i: Int32) -> Double
 
 // CHECK:   @available(*, unavailable, message: "use subscript")
@@ -103,7 +103,7 @@
 // CHECK:   @available(*, unavailable, message: "use subscript")
 // CHECK:   func __operatorSubscriptConst(_ i: Int32) -> UnsafePointer<Double>
 // CHECK: }
-// CHECK: typealias TemplatedDoubleArray = TemplatedArray<Double>
+// CHECK: typealias TemplatedDoubleArray = TemplatedArray<CDouble>
 
 
 // CHECK: struct TemplatedSubscriptArray {
@@ -140,12 +140,12 @@
 
 // CHECK: struct TemplatedArrayByVal<T> {
 // CHECK: }
-// CHECK: struct TemplatedArrayByVal<Double> {
+// CHECK: struct TemplatedArrayByVal<CDouble> {
 // CHECK:   subscript(i: Int32) -> Double { mutating get }
 // CHECK:   @available(*, unavailable, message: "use subscript")
 // CHECK:   mutating func __operatorSubscriptConst(_ i: Int32) -> Double
 // CHECK: }
-// CHECK: typealias TemplatedDoubleArrayByVal = TemplatedArrayByVal<Double>
+// CHECK: typealias TemplatedDoubleArrayByVal = TemplatedArrayByVal<CDouble>
 
 // CHECK: struct TemplatedByVal<T> {
 // CHECK-NEXT: }
@@ -206,7 +206,7 @@
 // CHECK: }
 
 // CHECK: struct Iterator {
-// CHECK:   var pointee: Int32 { mutating get }
+// CHECK:   var pointee: Int32 { mutating get set }
 // CHECK:   @available(*, unavailable, message: "use .pointee property")
 // CHECK:   mutating func __operatorStar() -> UnsafeMutablePointer<Int32>
 // CHECK: }
@@ -224,8 +224,8 @@
 // CHECK: }
 
 // CHECK: struct AmbiguousOperatorStar {
-// CHECK-NEXT:   var pointee: Int32 { get }
 // CHECK-NEXT:   init()
+// CHECK-NEXT:   var pointee: Int32
 // CHECK-NEXT:   @available(*, unavailable, message: "use .pointee property")
 // CHECK-NEXT:   mutating func __operatorStar() -> UnsafeMutablePointer<Int32>
 // CHECK-NEXT:   @available(*, unavailable, message: "use .pointee property")
@@ -233,8 +233,8 @@
 // CHECK-NEXT: }
 
 // CHECK: struct AmbiguousOperatorStar2 {
-// CHECK-NEXT:   var pointee: Int32 { get }
 // CHECK-NEXT:   init()
+// CHECK-NEXT:   var pointee: Int32
 // CHECK-NEXT:   @available(*, unavailable, message: "use .pointee property")
 // CHECK-NEXT:   mutating func __operatorStar() -> UnsafeMutablePointer<Int32>
 // CHECK-NEXT:   @available(*, unavailable, message: "use .pointee property")

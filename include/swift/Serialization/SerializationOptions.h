@@ -18,6 +18,10 @@
 #include "swift/Basic/PathRemapper.h"
 #include "llvm/Support/VersionTuple.h"
 
+#include <set>
+#include <string>
+#include <vector>
+
 namespace swift {
 
   class SerializationOptions {
@@ -151,7 +155,10 @@ namespace swift {
     bool DisableCrossModuleIncrementalInfo = false;
     bool StaticLibrary = false;
     bool HermeticSealAtLink = false;
+    bool EmbeddedSwiftModule = false;
     bool IsOSSA = false;
+    bool SkipNonExportableDecls = false;
+    bool ExplicitModuleBuild = false;
   };
 
 } // end namespace swift

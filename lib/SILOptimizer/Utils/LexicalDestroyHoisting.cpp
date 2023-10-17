@@ -19,9 +19,11 @@
 #include "swift/SIL/SILBasicBlock.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILValue.h"
+#include "swift/SIL/Test.h"
 #include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/Reachability.h"
 #include "swift/SILOptimizer/Analysis/VisitBarrierAccessScopes.h"
+#include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CanonicalizeBorrowScope.h"
 #include "swift/SILOptimizer/Utils/InstOptUtils.h"
 #include "swift/SILOptimizer/Utils/InstructionDeleter.h"
@@ -182,6 +184,10 @@ private:
   void visitBarrierPhi(SILBasicBlock *block) { barriers.phis.push_back(block); }
 
   void visitBarrierBlock(SILBasicBlock *block) {
+    barriers.blocks.push_back(block);
+  }
+
+  void visitInitialBlock(SILBasicBlock *block) {
     barriers.blocks.push_back(block);
   }
 };
@@ -401,3 +407,25 @@ bool swift::hoistDestroysOfOwnedLexicalValue(
                                           calleeAnalysis);
   return LexicalDestroyHoisting::run(context);
 }
+
+namespace swift::test {
+// Arguments:
+// - bool: pruneDebug
+// - bool: maximizeLifetimes
+// - bool: "respectAccessScopes", whether to contract lifetimes to end within
+//         access scopes which they previously enclosed but can't be hoisted
+//         before
+// - SILValue: value to canonicalize
+// Dumps:
+// - function after value canonicalization
+static FunctionTest LexicalDestroyHoistingTest(
+    "lexical_destroy_hoisting",
+    [](auto &function, auto &arguments, auto &test) {
+      auto *calleeAnalysis = test.template getAnalysis<BasicCalleeAnalysis>();
+      InstructionDeleter deleter;
+      auto value = arguments.takeValue();
+      hoistDestroysOfOwnedLexicalValue(value, *value->getFunction(), deleter,
+                                       calleeAnalysis);
+      function.print(llvm::outs());
+    });
+} // end namespace swift::test

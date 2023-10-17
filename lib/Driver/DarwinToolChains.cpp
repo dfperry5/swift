@@ -24,6 +24,7 @@
 #include "swift/Driver/Compilation.h"
 #include "swift/Driver/Driver.h"
 #include "swift/Driver/Job.h"
+#include "swift/IDETool/CompilerInvocation.h"
 #include "swift/Option/Options.h"
 #include "clang/Basic/DarwinSDKInfo.h"
 #include "clang/Basic/Version.h"
@@ -121,6 +122,31 @@ std::string toolchains::Darwin::sanitizerRuntimeLibName(StringRef Sanitizer,
           getDarwinLibraryNameSuffixForTriple(this->getTriple()) +
           (shared ? "_dynamic.dylib" : ".a"))
       .str();
+}
+
+void
+toolchains::Darwin::addPluginArguments(const ArgList &Args,
+                                       ArgStringList &Arguments) const {
+  SmallString<64> pluginPath;
+  auto programPath = getDriver().getSwiftProgramPath();
+  CompilerInvocation::computeRuntimeResourcePathFromExecutablePath(
+      programPath, /*shared=*/true, pluginPath);
+
+  auto defaultPluginPath = pluginPath;
+  llvm::sys::path::append(defaultPluginPath, "host", "plugins");
+
+  // Default plugin path.
+  Arguments.push_back("-plugin-path");
+  Arguments.push_back(Args.MakeArgString(defaultPluginPath));
+
+  // Local plugin path.
+  llvm::sys::path::remove_filename(pluginPath); // Remove "swift"
+  llvm::sys::path::remove_filename(pluginPath); // Remove "lib"
+  llvm::sys::path::append(pluginPath, "local", "lib");
+  llvm::sys::path::append(pluginPath, "swift");
+  llvm::sys::path::append(pluginPath, "host", "plugins");
+  Arguments.push_back("-plugin-path");
+  Arguments.push_back(Args.MakeArgString(pluginPath));
 }
 
 static void addLinkRuntimeLibRPath(const ArgList &Args,
@@ -660,6 +686,15 @@ void toolchains::Darwin::addPlatformSpecificPluginFrontendArgs(
     llvm::sys::path::remove_filename(platformPath); // specific SDK
     llvm::sys::path::remove_filename(platformPath); // SDKs
     llvm::sys::path::remove_filename(platformPath); // Developer
+
+    StringRef platformName = llvm::sys::path::filename(platformPath);
+    if (platformName.endswith("Simulator.platform")){
+      StringRef devicePlatformName =
+          platformName.drop_back(strlen("Simulator.platform"));
+      llvm::sys::path::remove_filename(platformPath); // Platform
+      llvm::sys::path::append(platformPath, devicePlatformName + "OS.platform");
+    }
+
     llvm::sys::path::append(platformPath, "Developer");
     addExternalPluginFrontendArgs(platformPath, inputArgs, arguments);
   }

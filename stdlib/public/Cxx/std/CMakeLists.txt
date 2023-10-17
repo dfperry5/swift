@@ -1,3 +1,24 @@
+#
+# API Notes for the C++ Standard Library
+#
+set(output_dir "${SWIFTLIB_DIR}/apinotes")
+add_custom_command_target(unused_var
+    CUSTOM_TARGET_NAME CxxStdlib-apinotes
+    COMMAND ${CMAKE_COMMAND} "-E" "make_directory" "${output_dir}"
+    COMMAND ${CMAKE_COMMAND} "-E" "copy_if_different" "${CMAKE_CURRENT_SOURCE_DIR}/std.apinotes" "${output_dir}"
+    COMMENT "Copying CxxStdlib API Notes to ${output_dir}"
+    OUTPUT "${output_dir}/std.apinotes"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/std.apinotes")
+
+swift_install_in_component(FILES std.apinotes
+    DESTINATION "lib/swift/apinotes"
+    COMPONENT compiler)
+
+set_property(TARGET CxxStdlib-apinotes PROPERTY FOLDER "Miscellaneous")
+add_dependencies(sdk-overlay CxxStdlib-apinotes)
+add_dependencies(compiler CxxStdlib-apinotes)
+
+
 # Swift compiler currently assumes that the Darwin overlay is a dependency of
 # CxxStdlib, and fails to build CxxStdlib if Darwin.swiftmodule in build dir
 # is built with a different (older) version of the compiler. To workaround this,
@@ -10,7 +31,9 @@ endif()
 #
 # C++ Standard Library Overlay.
 #
-add_swift_target_library(swiftCxxStdlib STATIC NO_LINK_NAME IS_STDLIB IS_SWIFT_ONLY
+# The overlay is fragile (i.e. it does not use library evolution)
+# as it's not ABI stable.
+add_swift_target_library(swiftCxxStdlib STATIC NO_LINK_NAME IS_STDLIB IS_SWIFT_ONLY IS_FRAGILE
     std.swift
     String.swift
 
@@ -29,7 +52,7 @@ add_swift_target_library(swiftCxxStdlib STATIC NO_LINK_NAME IS_STDLIB IS_SWIFT_O
     ${SWIFT_SDK_LINUX_CXX_OVERLAY_SWIFT_COMPILE_FLAGS}
 
     LINK_FLAGS "${SWIFT_RUNTIME_SWIFT_LINK_FLAGS}"
-    TARGET_SDKS ALL_APPLE_PLATFORMS LINUX
+    TARGET_SDKS ALL_APPLE_PLATFORMS LINUX WINDOWS
     INSTALL_IN_COMPONENT compiler
     INSTALL_WITH_SHARED
-    DEPENDS libstdcxx-modulemap libcxxshim_modulemap)
+    DEPENDS libstdcxx-modulemap libcxxshim_modulemap CxxStdlib-apinotes)

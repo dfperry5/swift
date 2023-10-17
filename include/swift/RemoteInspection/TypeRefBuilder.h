@@ -424,6 +424,18 @@ private:
   /// Cache for field info lookups.
   std::unordered_map<std::string, RemoteRef<FieldDescriptor>> FieldTypeInfoCache;
 
+  /// Cache for normalized reflection name lookups.
+  std::unordered_map<uint64_t /* remote address */, llvm::Optional<std::string>>
+      NormalizedReflectionNameCache;
+
+  /// Cache for built-in type descriptor lookups.
+  std::unordered_map<std::string /* normalized name */,
+                     RemoteRef<BuiltinTypeDescriptor>>
+      BuiltInTypeDescriptorCache;
+
+  /// The index of the last ReflectionInfo cached by BuiltInTypeDescriptorCache.
+  uint32_t NormalizedReflectionNameCacheLastReflectionInfoCache = 0;
+
   std::vector<std::unique_ptr<const GenericSignatureRef>> SignatureRefPool;
 
   TypeConverter TC;
@@ -743,8 +755,9 @@ public:
   }
 
   const TupleTypeRef *createTupleType(llvm::ArrayRef<const TypeRef *> elements,
-                                      std::string &&labels) {
-    return TupleTypeRef::create(*this, elements, std::move(labels));
+                                      llvm::ArrayRef<StringRef> labels) {
+    std::vector<std::string> labelsVec(labels.begin(), labels.end());
+    return TupleTypeRef::create(*this, elements, labelsVec);
   }
 
   const TypeRef *createPackType(llvm::ArrayRef<const TypeRef *> elements) {
@@ -758,10 +771,22 @@ public:
     return nullptr;
   }
 
-  const TypeRef *createPackExpansionType(const TypeRef *patternType,
-                                         const TypeRef *countType) {
+  size_t beginPackExpansion(const TypeRef *countType) {
+    // FIXME: Remote mirrors support for variadic generics.
+    return 0;
+  }
+
+  void advancePackExpansion(size_t index) {
+    // FIXME: Remote mirrors support for variadic generics.
+  }
+
+  const TypeRef *createExpandedPackElement(const TypeRef *patternType) {
     // FIXME: Remote mirrors support for variadic generics.
     return nullptr;
+  }
+
+  void endPackExpansion() {
+    // FIXME: Remote mirrors support for variadic generics.
   }
 
   const FunctionTypeRef *createFunctionType(
@@ -825,7 +850,7 @@ public:
       break;
     }
 
-    auto result = createTupleType({}, "");
+    auto result = createTupleType({}, llvm::ArrayRef<llvm::StringRef>());
     return FunctionTypeRef::create(
         *this, {}, result, funcFlags, diffKind, nullptr);
   }
@@ -885,8 +910,12 @@ public:
     return MetatypeTypeRef::create(*this, instance, WasAbstract);
   }
 
+  void pushGenericParams(llvm::ArrayRef<std::pair<unsigned, unsigned>> parameterPacks) {}
+  void popGenericParams() {}
+
   const GenericTypeParameterTypeRef *
   createGenericTypeParameterType(unsigned depth, unsigned index) {
+    // FIXME: variadic generics
     return GenericTypeParameterTypeRef::create(*this, depth, index);
   }
 

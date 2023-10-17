@@ -250,6 +250,16 @@ option(SWIFT_STDLIB_USE_RELATIVE_PROTOCOL_WITNESS_TABLES
        "Use relative protocol witness tables"
        FALSE)
 
+if("${SWIFT_HOST_VARIANT_SDK}" IN_LIST SWIFT_DARWIN_PLATFORMS)
+  set(SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS_default TRUE)
+else()
+  set(SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS_default FALSE)
+endif()
+
+option(SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS
+       "Install a parent module map for Swift shims."
+       ${SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS_default})
+
 set(SWIFT_RUNTIME_FIXED_BACKTRACER_PATH "" CACHE STRING
   "If set, provides a fixed path to the swift-backtrace binary.  This
    will disable dynamic determination of the path and will also disable
@@ -262,7 +272,7 @@ if(SWIFT_ENABLE_EXPERIMENTAL_CONCURRENCY AND "${SWIFT_CONCURRENCY_GLOBAL_EXECUTO
   set(SWIFT_CONCURRENCY_USES_DISPATCH TRUE)
 endif()
 
-if(SWIFT_CONCURRENCY_USES_DISPATCH AND NOT CMAKE_SYSTEM_NAME STREQUAL Darwin)
+if(SWIFT_CONCURRENCY_USES_DISPATCH AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   if(NOT EXISTS "${SWIFT_PATH_TO_LIBDISPATCH_SOURCE}")
     message(SEND_ERROR "Concurrency requires libdispatch on non-Darwin hosts.  Please specify SWIFT_PATH_TO_LIBDISPATCH_SOURCE")
   endif()

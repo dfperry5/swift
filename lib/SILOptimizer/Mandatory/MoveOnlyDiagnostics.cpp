@@ -87,7 +87,8 @@ static void getVariableNameForValue(SILValue value2,
     }
   }
 
-  // Otherwise, we need to look at our mark_must_check's operand.
+  // Otherwise, we need to look at our mark_unresolved_non_copyable_value's
+  // operand.
   StackList<llvm::PointerUnion<SILInstruction *, SILValue>> variableNamePath(
       value2->getFunction());
   while (true) {
@@ -126,7 +127,7 @@ static void getVariableNameForValue(SILValue value2,
     // through.
     if (isa<BeginBorrowInst>(searchValue) || isa<LoadInst>(searchValue) ||
         isa<LoadBorrowInst>(searchValue) || isa<BeginAccessInst>(searchValue) ||
-        isa<MarkMustCheckInst>(searchValue) ||
+        isa<MarkUnresolvedNonCopyableValueInst>(searchValue) ||
         isa<ProjectBoxInst>(searchValue) || isa<CopyValueInst>(searchValue)) {
       searchValue = cast<SingleValueInstruction>(searchValue)->getOperand(0);
       continue;
@@ -161,7 +162,7 @@ static void getVariableNameForValue(SILValue value2,
   }
 }
 
-static void getVariableNameForValue(MarkMustCheckInst *mmci,
+static void getVariableNameForValue(MarkUnresolvedNonCopyableValueInst *mmci,
                                     SmallString<64> &resultingString) {
   return getVariableNameForValue(mmci, mmci->getOperand(), resultingString);
 }
@@ -171,7 +172,7 @@ static void getVariableNameForValue(MarkMustCheckInst *mmci,
 //===----------------------------------------------------------------------===//
 
 void DiagnosticEmitter::emitCheckerDoesntUnderstandDiagnostic(
-    MarkMustCheckInst *markedValue) {
+    MarkUnresolvedNonCopyableValueInst *markedValue) {
   // If we failed to canonicalize ownership, there was something in the SIL
   // that copy propagation did not understand. Emit a we did not understand
   // error.
@@ -245,6 +246,7 @@ void DiagnosticEmitter::emitMissingConsumeInDiscardingContext(
       case StmtKind::Return:
       case StmtKind::Yield:
       case StmtKind::Break:
+      case StmtKind::Then:
       case StmtKind::Fail:
       case StmtKind::PoundAssert:
         return true;
@@ -331,7 +333,7 @@ void DiagnosticEmitter::emitMissingConsumeInDiscardingContext(
 //===----------------------------------------------------------------------===//
 
 void DiagnosticEmitter::emitObjectGuaranteedDiagnostic(
-    MarkMustCheckInst *markedValue) {
+    MarkUnresolvedNonCopyableValueInst *markedValue) {
   auto &astContext = fn->getASTContext();
   SmallString<64> varName;
   getVariableNameForValue(markedValue, varName);
@@ -373,7 +375,7 @@ void DiagnosticEmitter::emitObjectGuaranteedDiagnostic(
 }
 
 void DiagnosticEmitter::emitObjectOwnedDiagnostic(
-    MarkMustCheckInst *markedValue) {
+    MarkUnresolvedNonCopyableValueInst *markedValue) {
   registerDiagnosticEmitted(markedValue);
 
   auto &astContext = fn->getASTContext();
@@ -544,8 +546,11 @@ void DiagnosticEmitter::emitObjectDiagnosticsForPartialApplyUses(
 //                         MARK: Address Diagnostics
 //===----------------------------------------------------------------------===//
 
-static bool isClosureCapture(MarkMustCheckInst *markedValue) {
+static bool isClosureCapture(MarkUnresolvedNonCopyableValueInst *markedValue) {
   SILValue val = markedValue->getOperand();
+
+  // Sometimes we've mark-must-check'd a begin_access.
+  val = stripAccessMarkers(val);
 
   // look past any project-box
   if (auto *pbi = dyn_cast<ProjectBoxInst>(val))
@@ -558,7 +563,8 @@ static bool isClosureCapture(MarkMustCheckInst *markedValue) {
 }
 
 void DiagnosticEmitter::emitAddressExclusivityHazardDiagnostic(
-    MarkMustCheckInst *markedValue, SILInstruction *consumingUser) {
+    MarkUnresolvedNonCopyableValueInst *markedValue,
+    SILInstruction *consumingUser) {
   if (!useWithDiagnostic.insert(consumingUser).second)
     return;
   registerDiagnosticEmitted(markedValue);
@@ -577,11 +583,10 @@ void DiagnosticEmitter::emitAddressExclusivityHazardDiagnostic(
            diag::sil_movechecking_consuming_use_here);
 }
 
-void DiagnosticEmitter::emitAddressDiagnostic(MarkMustCheckInst *markedValue,
-                                              SILInstruction *lastLiveUser,
-                                              SILInstruction *violatingUser,
-                                              bool isUseConsuming,
-                                              bool isInOutEndOfFunction) {
+void DiagnosticEmitter::emitAddressDiagnostic(
+    MarkUnresolvedNonCopyableValueInst *markedValue,
+    SILInstruction *lastLiveUser, SILInstruction *violatingUser,
+    bool isUseConsuming, bool isInOutEndOfFunction) {
   if (!useWithDiagnostic.insert(violatingUser).second)
     return;
   registerDiagnosticEmitted(markedValue);
@@ -640,7 +645,8 @@ void DiagnosticEmitter::emitAddressDiagnostic(MarkMustCheckInst *markedValue,
 }
 
 void DiagnosticEmitter::emitInOutEndOfFunctionDiagnostic(
-    MarkMustCheckInst *markedValue, SILInstruction *violatingUser) {
+    MarkUnresolvedNonCopyableValueInst *markedValue,
+    SILInstruction *violatingUser) {
   if (!useWithDiagnostic.insert(violatingUser).second)
     return;
   registerDiagnosticEmitted(markedValue);
@@ -669,7 +675,8 @@ void DiagnosticEmitter::emitInOutEndOfFunctionDiagnostic(
 }
 
 void DiagnosticEmitter::emitAddressDiagnosticNoCopy(
-    MarkMustCheckInst *markedValue, SILInstruction *consumingUser) {
+    MarkUnresolvedNonCopyableValueInst *markedValue,
+    SILInstruction *consumingUser) {
   if (!useWithDiagnostic.insert(consumingUser).second)
     return;
 
@@ -691,7 +698,8 @@ void DiagnosticEmitter::emitAddressDiagnosticNoCopy(
 }
 
 void DiagnosticEmitter::emitObjectDestructureNeededWithinBorrowBoundary(
-    MarkMustCheckInst *markedValue, SILInstruction *destructureNeedingUser,
+    MarkUnresolvedNonCopyableValueInst *markedValue,
+    SILInstruction *destructureNeedingUser,
     TypeTreeLeafTypeRange destructureSpan,
     FieldSensitivePrunedLivenessBoundary &boundary) {
   if (!useWithDiagnostic.insert(destructureNeedingUser).second)
@@ -725,7 +733,8 @@ void DiagnosticEmitter::emitObjectDestructureNeededWithinBorrowBoundary(
 }
 
 void DiagnosticEmitter::emitObjectInstConsumesValueTwice(
-    MarkMustCheckInst *markedValue, Operand *firstUse, Operand *secondUse) {
+    MarkUnresolvedNonCopyableValueInst *markedValue, Operand *firstUse,
+    Operand *secondUse) {
   assert(firstUse->getUser() == secondUse->getUser());
   assert(firstUse->isConsuming());
   assert(secondUse->isConsuming());
@@ -750,7 +759,7 @@ void DiagnosticEmitter::emitObjectInstConsumesValueTwice(
 }
 
 void DiagnosticEmitter::emitObjectInstConsumesAndUsesValue(
-    MarkMustCheckInst *markedValue, Operand *consumingUse,
+    MarkUnresolvedNonCopyableValueInst *markedValue, Operand *consumingUse,
     Operand *nonConsumingUse) {
   assert(consumingUse->getUser() == nonConsumingUse->getUser());
   assert(consumingUse->isConsuming());
@@ -776,7 +785,7 @@ void DiagnosticEmitter::emitObjectInstConsumesAndUsesValue(
 }
 
 bool DiagnosticEmitter::emitGlobalOrClassFieldLoadedAndConsumed(
-    MarkMustCheckInst *markedValue) {
+    MarkUnresolvedNonCopyableValueInst *markedValue) {
   SmallString<64> varName;
   getVariableNameForValue(markedValue, varName);
 
@@ -806,7 +815,7 @@ bool DiagnosticEmitter::emitGlobalOrClassFieldLoadedAndConsumed(
 }
 
 void DiagnosticEmitter::emitAddressEscapingClosureCaptureLoadedAndConsumed(
-    MarkMustCheckInst *markedValue) {
+    MarkUnresolvedNonCopyableValueInst *markedValue) {
   SmallString<64> varName;
   getVariableNameForValue(markedValue, varName);
   diagnose(markedValue->getModule().getASTContext(),
@@ -817,7 +826,7 @@ void DiagnosticEmitter::emitAddressEscapingClosureCaptureLoadedAndConsumed(
 }
 
 void DiagnosticEmitter::emitPromotedBoxArgumentError(
-    MarkMustCheckInst *markedValue, SILFunctionArgument *arg) {
+    MarkUnresolvedNonCopyableValueInst *markedValue, SILFunctionArgument *arg) {
   auto &astContext = fn->getASTContext();
   SmallString<64> varName;
   getVariableNameForValue(markedValue, varName);
@@ -840,9 +849,9 @@ void DiagnosticEmitter::emitPromotedBoxArgumentError(
   }
 }
 
-void DiagnosticEmitter::emitCannotDestructureDeinitNominalError(
-    MarkMustCheckInst *markedValue, StringRef pathString,
-    NominalTypeDecl *deinitedNominal, SILInstruction *consumingUser) {
+void DiagnosticEmitter::emitCannotPartiallyConsumeError(
+    MarkUnresolvedNonCopyableValueInst *markedValue, StringRef pathString,
+    NominalTypeDecl *nominal, SILInstruction *consumingUser, bool isForDeinit) {
   auto &astContext = fn->getASTContext();
 
   SmallString<64> varName;
@@ -851,44 +860,67 @@ void DiagnosticEmitter::emitCannotDestructureDeinitNominalError(
   if (!pathString.empty())
     varName.append(pathString);
 
-  diagnose(
-      astContext, consumingUser,
-      diag::sil_movechecking_cannot_destructure_has_deinit,
-      varName);
-  registerDiagnosticEmitted(markedValue);
+  bool hasPartialConsumption =
+      astContext.LangOpts.hasFeature(Feature::MoveOnlyPartialConsumption);
+  (void)hasPartialConsumption;
 
-  // point to the deinit if we know where it is.
-  if (auto deinitLoc =
-      deinitedNominal->getValueTypeDestructor()->getLoc(/*SerializedOK=*/false))
-    astContext.Diags.diagnose(deinitLoc, diag::sil_movechecking_deinit_here);
-}
-
-void DiagnosticEmitter::emitCannotDestructureNominalError(
-    MarkMustCheckInst *markedValue, StringRef pathString,
-    NominalTypeDecl *nominal, SILInstruction *consumingUser,
-    bool isDueToDeinit) {
-  auto &astContext = fn->getASTContext();
-
-  SmallString<64> varName;
-  getVariableNameForValue(markedValue, varName);
-
-  if (!pathString.empty())
-    varName.append(pathString);
-
-  assert(
-      astContext.LangOpts.hasFeature(Feature::MoveOnlyPartialConsumption) ==
-          isDueToDeinit &&
-      "Should only emit deinit error if we have partial consumption enabled");
-  if (isDueToDeinit) {
+  if (isForDeinit) {
+    assert(hasPartialConsumption);
     diagnose(astContext, consumingUser,
              diag::sil_movechecking_cannot_destructure_has_deinit, varName);
+
   } else {
+    assert(!hasPartialConsumption);
     diagnose(astContext, consumingUser,
              diag::sil_movechecking_cannot_destructure, varName);
   }
+
   registerDiagnosticEmitted(markedValue);
 
-  if (!isDueToDeinit)
+  if (!isForDeinit)
+    return;
+
+  // Point to the deinit if we know where it is.
+  assert(nominal);
+  if (auto deinitLoc =
+          nominal->getValueTypeDestructor()->getLoc(/*SerializedOK=*/false))
+    astContext.Diags.diagnose(deinitLoc, diag::sil_movechecking_deinit_here);
+}
+
+void DiagnosticEmitter::emitCannotPartiallyReinitError(
+    MarkUnresolvedNonCopyableValueInst *markedValue, StringRef pathString,
+    NominalTypeDecl *nominal, SILInstruction *initingUser,
+    SILInstruction *consumingUser, bool isForDeinit) {
+  auto &astContext = fn->getASTContext();
+
+  SmallString<64> varName;
+  getVariableNameForValue(markedValue, varName);
+
+  if (!pathString.empty())
+    varName.append(pathString);
+
+  bool hasPartialConsumption =
+      astContext.LangOpts.hasFeature(Feature::MoveOnlyPartialConsumption);
+  (void)hasPartialConsumption;
+
+  if (isForDeinit) {
+    assert(hasPartialConsumption);
+    diagnose(astContext, initingUser,
+             diag::sil_movechecking_cannot_partially_reinit_has_deinit,
+             varName);
+
+  } else {
+    assert(!hasPartialConsumption);
+    diagnose(astContext, initingUser,
+             diag::sil_movechecking_cannot_partially_reinit, varName);
+  }
+
+  diagnose(astContext, consumingUser,
+           diag::sil_movechecking_consuming_use_here);
+
+  registerDiagnosticEmitted(markedValue);
+
+  if (!isForDeinit)
     return;
 
   // Point to the deinit if we know where it is.

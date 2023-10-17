@@ -659,9 +659,6 @@ def create_argument_parser():
     option(['-b', '--llbuild'], toggle_true('build_llbuild'),
            help='build llbuild')
 
-    option(['--back-deploy-concurrency'], toggle_true('build_backdeployconcurrency'),
-           help='build back-deployment support for concurrency')
-
     option('--install-llvm', toggle_true,
            help='install llvm')
 
@@ -1225,6 +1222,7 @@ def create_argument_parser():
     option('--skip-clean-swift-driver', toggle_false('clean_swift_driver'),
            help='skip cleaning up Swift driver')
     option('--skip-test-cmark', toggle_false('test_cmark'),
+           default=False,
            help='skip testing cmark')
     option('--skip-test-swiftpm', toggle_false('test_swiftpm'),
            help='skip testing swiftpm')
@@ -1261,7 +1259,7 @@ def create_argument_parser():
            help='enable building llvm using modules')
 
     option('--llvm-targets-to-build', store,
-           default='X86;ARM;AArch64;PowerPC;SystemZ;Mips',
+           default='X86;ARM;AArch64;PowerPC;SystemZ;Mips;RISCV',
            help='LLVM target generators to build')
 
     option('--llvm-ninja-targets', append,

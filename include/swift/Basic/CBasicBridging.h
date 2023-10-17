@@ -14,28 +14,10 @@
 #define SWIFT_C_BASIC_BASICBRIDGING_H
 
 #include "swift/Basic/Compiler.h"
+#include "swift/Basic/Nullability.h"
 
-// NOTE: DO NOT #include any stdlib headers here. e.g. <stdint.h>. Those are
-// part of "Darwin"/"Glibc" module, so when a Swift file imports this header,
-// it causes importing the "Darwin"/"Glibc" overlay module. That violates
-// layering. i.e. Darwin overlay is created by Swift compiler.
-
-#if __clang__
-// Provide macros to temporarily suppress warning about the use of
-// _Nullable and _Nonnull.
-#define SWIFT_BEGIN_NULLABILITY_ANNOTATIONS                                    \
-  _Pragma("clang diagnostic push")                                             \
-      _Pragma("clang diagnostic ignored \"-Wnullability-extension\"")          \
-          _Pragma("clang assume_nonnull begin")
-
-#define SWIFT_END_NULLABILITY_ANNOTATIONS                                      \
-  _Pragma("clang diagnostic pop") _Pragma("clang assume_nonnull end")
-#else
-#define SWIFT_BEGIN_NULLABILITY_ANNOTATIONS
-#define SWIFT_END_NULLABILITY_ANNOTATIONS
-#define _Nullable
-#define _Nonnull
-#endif
+#include <stddef.h>
+#include <stdint.h>
 
 SWIFT_BEGIN_NULLABILITY_ANNOTATIONS
 
@@ -46,9 +28,17 @@ extern "C" {
 
 #endif
 
+typedef enum ENUM_EXTENSIBILITY_ATTR(open) BridgedFeature {
+#define LANGUAGE_FEATURE(FeatureName, SENumber, Description, Option) \
+FeatureName,
+#include "swift/Basic/Features.def"
+} BridgedFeature;
+
+SWIFT_BEGIN_ASSUME_NONNULL
+
 typedef struct BridgedData {
   const char *_Nullable baseAddress;
-  unsigned long size;
+  size_t size;
 } BridgedData;
 
 void BridgedData_free(BridgedData data);
@@ -77,23 +67,23 @@ _Bool JSON_value_getAsNull(void *valuePtr);
 _Bool JSON_value_getAsBoolean(void *valuePtr, _Bool *result);
 _Bool JSON_value_getAsString(void *valuePtr, BridgedData *result);
 _Bool JSON_value_getAsDouble(void *valuePtr, double *result);
-_Bool JSON_value_getAsInteger(void *valuePtr, long long *result);
+_Bool JSON_value_getAsInteger(void *valuePtr, int64_t *result);
 _Bool JSON_value_getAsObject(void *valuePtr, void *_Nullable *_Nonnull result);
 _Bool JSON_value_getAsArray(void *valuePtr, void *_Nullable *_Nonnull result);
 
-unsigned long JSON_object_getSize(void *objectPtr);
-BridgedData JSON_object_getKey(void *objectPtr, unsigned long i);
+size_t JSON_object_getSize(void *objectPtr);
+BridgedData JSON_object_getKey(void *objectPtr, size_t i);
 _Bool JSON_object_hasKey(void *objectPtr, const char *key);
 void *JSON_object_getValue(void *objectPtr, const char *key);
 
-long long JSON_array_getSize(void *arrayPtr);
-void *JSON_array_getValue(void *arrayPtr, long long index);
+size_t JSON_array_getSize(void *arrayPtr);
+void *JSON_array_getValue(void *arrayPtr, size_t index);
 
 void JSON_value_emplaceNull(void *valuePtr);
 void JSON_value_emplaceBoolean(void *valuePtr, _Bool value);
 void JSON_value_emplaceString(void *valuePtr, const char *value);
 void JSON_value_emplaceDouble(void *valuePtr, double value);
-void JSON_value_emplaceInteger(void *valuePtr, long long value);
+void JSON_value_emplaceInteger(void *valuePtr, int64_t value);
 void *JSON_value_emplaceNewObject(void *valuePtr);
 void *JSON_value_emplaceNewArray(void *valuePtr);
 
@@ -101,7 +91,7 @@ void JSON_object_setNull(void *objectPtr, const char *key);
 void JSON_object_setBoolean(void *objectPtr, const char *key, _Bool value);
 void JSON_object_setString(void *objectPtr, const char *key, const char *value);
 void JSON_object_setDouble(void *objectPtr, const char *key, double value);
-void JSON_object_setInteger(void *objectPtr, const char *key, long long value);
+void JSON_object_setInteger(void *objectPtr, const char *key, int64_t value);
 void *JSON_object_setNewObject(void *objectPtr, const char *key);
 void *JSON_object_setNewArray(void *objectPtr, const char *key);
 void *JSON_object_setNewValue(void *objectPtr, const char *key);
@@ -110,7 +100,7 @@ void JSON_array_pushNull(void *arrayPtr);
 void JSON_array_pushBoolean(void *arrayPtr, _Bool value);
 void JSON_array_pushString(void *arrayPtr, const char *value);
 void JSON_array_pushDouble(void *arrayPtr, double value);
-void JSON_array_pushInteger(void *arrayPtr, long long value);
+void JSON_array_pushInteger(void *arrayPtr, int64_t value);
 void *JSON_array_pushNewObject(void *arrayPtr);
 void *JSON_array_pushNewArray(void *arrayPtr);
 void *JSON_array_pushNewValue(void *arrayPtr);
@@ -119,9 +109,7 @@ void *JSON_array_pushNewValue(void *arrayPtr);
 }
 #endif
 
+SWIFT_END_ASSUME_NONNULL
 SWIFT_END_NULLABILITY_ANNOTATIONS
-
-#undef SWIFT_BEGIN_NULLABILITY_ANNOTATIONS
-#undef SWIFT_END_NULLABILITY_ANNOTATIONS
 
 #endif // SWIFT_C_BASIC_BASICBRIDGING_H

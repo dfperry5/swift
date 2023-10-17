@@ -1075,8 +1075,14 @@ void IRGenModule::emitClassDecl(ClassDecl *D) {
   assert(!IRGen.hasLazyMetadata(D));
 
   // Emit the class metadata.
-  emitClassMetadata(*this, D, fragileLayout, resilientLayout);
-  emitFieldDescriptor(D);
+  if (!D->getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
+    emitClassMetadata(*this, D, fragileLayout, resilientLayout);
+    emitFieldDescriptor(D);
+  } else {
+    if (!D->isGenericContext()) {
+      emitEmbeddedClassMetadata(*this, D, fragileLayout);
+    }
+  }
 
   IRGen.addClassForEagerInitialization(D);
   IRGen.addBackDeployedObjCActorInitialization(D);
@@ -1259,7 +1265,8 @@ namespace {
 
       visitConformances(theExtension);
 
-      for (Decl *member : TheExtension->getImplementationContext()->getMembers())
+      for (Decl *member :
+           TheExtension->getImplementationContext()->getAllMembers())
         visit(member);
     }
 
@@ -1840,7 +1847,7 @@ namespace {
 
     void buildMethod(ConstantArrayBuilder &descriptors,
                      AbstractFunctionDecl *method) {
-      if (Lowering::shouldSkipLowering(method))
+      if (!method->isAvailableDuringLowering())
         return;
 
       auto accessor = dyn_cast<AccessorDecl>(method);
@@ -2894,6 +2901,9 @@ CanType irgen::getSuperclassForMetadata(IRGenModule &IGM, CanType type,
 
 ClassMetadataStrategy
 IRGenModule::getClassMetadataStrategy(const ClassDecl *theClass) {
+  if (Context.LangOpts.hasFeature(Feature::Embedded))
+    return ClassMetadataStrategy::Fixed;
+
   SILType selfType = getSelfType(theClass);
   auto &selfTI = getTypeInfo(selfType).as<ClassTypeInfo>();
 

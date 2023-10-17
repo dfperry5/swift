@@ -31,7 +31,7 @@ SILFunction *SILFunctionBuilder::getOrCreateFunction(
   if (auto fn = mod.lookUpFunction(name)) {
     assert(fn->getLoweredFunctionType() == type);
     assert(stripExternalFromLinkage(fn->getLinkage()) ==
-           stripExternalFromLinkage(linkage));
+           stripExternalFromLinkage(linkage) || mod.getOptions().EmbeddedSwift);
     return fn;
   }
 
@@ -69,7 +69,7 @@ void SILFunctionBuilder::addFunctionAttributes(
             : SILSpecializeAttr::SpecializationKind::Partial;
     assert(!constant.isNull());
     SILFunction *targetFunction = nullptr;
-    auto *attributedFuncDecl = constant.getDecl();
+    auto *attributedFuncDecl = constant.getAbstractFunctionDecl();
     auto *targetFunctionDecl = SA->getTargetFunctionDecl(attributedFuncDecl);
     // Filter out _spi.
     auto spiGroups = SA->getSPIGroups();
@@ -88,16 +88,17 @@ void SILFunctionBuilder::addFunctionAttributes(
     auto availability =
       AvailabilityInference::annotatedAvailableRangeForAttr(SA,
          M.getSwiftModule()->getASTContext());
+    auto specializedSignature = SA->getSpecializedSignature(attributedFuncDecl);
     if (targetFunctionDecl) {
       SILDeclRef declRef(targetFunctionDecl, constant.kind, false);
       targetFunction = getOrCreateDeclaration(targetFunctionDecl, declRef);
       F->addSpecializeAttr(SILSpecializeAttr::create(
-          M, SA->getSpecializedSignature(), SA->getTypeErasedParams(),
+          M, specializedSignature, SA->getTypeErasedParams(),
           SA->isExported(), kind, targetFunction, spiGroupIdent,
           attributedFuncDecl->getModuleContext(), availability));
     } else {
       F->addSpecializeAttr(SILSpecializeAttr::create(
-          M, SA->getSpecializedSignature(), SA->getTypeErasedParams(),
+          M, specializedSignature, SA->getTypeErasedParams(),
           SA->isExported(), kind, nullptr, spiGroupIdent,
           attributedFuncDecl->getModuleContext(), availability));
     }
@@ -129,7 +130,7 @@ void SILFunctionBuilder::addFunctionAttributes(
         // Give up on tuples. Their elements are added as individual
         // arguments. It destroys the 1-1 relation ship between parameters
         // and arguments.
-        if (isa<TupleType>(CanType(pd->getType())))
+        if (pd->getInterfaceType()->is<TupleType>())
           break;
         // First try the "local" parameter name. If there is none, use the
         // API name. E.g. `foo(apiName localName: Type) {}`
@@ -160,6 +161,28 @@ void SILFunctionBuilder::addFunctionAttributes(
   // @_silgen_name and @_cdecl functions may be called from C code somewhere.
   if (Attrs.hasAttribute<SILGenNameAttr>() || Attrs.hasAttribute<CDeclAttr>())
     F->setHasCReferences(true);
+
+  for (auto *EA : Attrs.getAttributes<ExposeAttr>()) {
+    bool shouldExportDecl = true;
+    if (Attrs.hasAttribute<CDeclAttr>()) {
+      // If the function is marked with @cdecl, expose only C compatible
+      // thunk function.
+      shouldExportDecl = constant.isNativeToForeignThunk();
+    }
+    if (EA->getExposureKind() == ExposureKind::Wasm && shouldExportDecl) {
+      // A wasm-level exported function must be retained if it appears in a
+      // compilation unit.
+      F->setMarkedAsUsed(true);
+      if (EA->Name.empty())
+        F->setWasmExportName(F->getName());
+      else
+        F->setWasmExportName(EA->Name);
+    }
+  }
+
+  if (auto *EA = Attrs.getAttribute<ExternAttr>()) {
+    F->setWasmImportModuleAndField(EA->ModuleName, EA->Name);
+  }
 
   if (Attrs.hasAttribute<UsedAttr>())
     F->setMarkedAsUsed(true);
@@ -311,8 +334,6 @@ SILFunction *SILFunctionBuilder::getOrCreateFunction(
   }
 
   IsRuntimeAccessible_t isRuntimeAccessible = IsNotRuntimeAccessible;
-  if (constant.isRuntimeAccessibleFunction())
-    isRuntimeAccessible = IsRuntimeAccessible;
 
   auto *F = SILFunction::create(
       mod, linkage, name, constantType, nullptr, llvm::None, IsNotBare, IsTrans,

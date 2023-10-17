@@ -1,5 +1,4 @@
-// RUN: %empty-directory(%t)
-// RUN: %target-swift-ide-test -batch-code-completion -source-filename %s -filecheck %raw-FileCheck -completion-output-dir %t
+// RUN: %batch-code-completion
 
 // KW_RETURN: Keyword[return]/None: return{{; name=.+$}}
 // KW_NO_RETURN-NOT: Keyword[return]
@@ -256,8 +255,11 @@
 //
 // let and var
 //
-// KW_EXPR-DAG: Keyword[let]/None: let{{; name=.+$}}
-// KW_EXPR-DAG: Keyword[var]/None: var{{; name=.+$}}
+// KW_LETVAR-DAG: Keyword[let]/None: let{{; name=.+$}}
+// KW_LETVAR-DAG: Keyword[var]/None: var{{; name=.+$}}
+//
+// KW_LETVAR_NEG-NOT: Keyword[let]/None: let{{; name=.+$}}
+// KW_LETVAR_NEG-NOT: Keyword[var]/None: var{{; name=.+$}}
 //
 // Literals
 //
@@ -423,24 +425,29 @@ extension SubClass {
 }
 
 func inExpr1() {
-  (#^EXPR_1?check=KW_EXPR;check=KW_EXPR_NEG^#)
+  (#^EXPR_1?check=KW_EXPR;check=KW_LETVAR;check=KW_EXPR_NEG^#)
 }
 func inExpr2() {
-  let x = #^EXPR_2?check=KW_EXPR;check=KW_EXPR_NEG^#
+  let x = #^EXPR_2?check=KW_EXPR;check=KW_LETVAR;check=KW_EXPR_NEG^#
 }
 func inExpr3() {
-  if #^EXPR_3?check=KW_EXPR;check=KW_EXPR_NEG^# {}
+  if #^EXPR_3?check=KW_EXPR;check=KW_LETVAR;check=KW_EXPR_NEG^# {}
 }
 func inExpr4() {
   let x = 1
-  x + #^EXPR_4?check=KW_EXPR;check=KW_EXPR_NEG^#
+  x + #^EXPR_4?check=KW_EXPR;check=KW_LETVAR;check=KW_EXPR_NEG^#
 }
 func inExpr5() {
   var x: Int
-  x = #^EXPR_5?check=KW_EXPR;check=KW_EXPR_NEG^#
+  x = #^EXPR_5?check=KW_EXPR;check=KW_LETVAR;check=KW_EXPR_NEG^#
 }
 func inExpr6() -> Int {
-  return #^EXPR_6?check=KW_EXPR;check=KW_EXPR_NEG^#
+  // Make sure we don't recommend 'let' and 'var' here.
+  return #^EXPR_6?check=KW_EXPR;check=KW_EXPR_NEG;check=KW_LETVAR_NEG^#
+}
+func inExpr7() {
+  // Make sure we don't recommend 'let' and 'var' here.
+  for x in #^EXPR_7?check=KW_EXPR;check=KW_EXPR_NEG;check=KW_LETVAR_NEG^#
 }
 
 func inSwitch(val: Int) {

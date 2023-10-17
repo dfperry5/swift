@@ -334,6 +334,8 @@ void ClangImporter::Implementation::printSwiftName(ImportedName name,
   bool isSetter = false;
   switch (name.getAccessorKind()) {
   case ImportedAccessorKind::None:
+  case ImportedAccessorKind::DereferenceGetter:
+  case ImportedAccessorKind::DereferenceSetter:
     break;
 
   case ImportedAccessorKind::PropertyGetter:
@@ -1916,6 +1918,19 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
       baseName = swiftCtx.getIdentifier(operatorName).str();
       isFunction = true;
       addEmptyArgNamesForClangFunction(functionDecl, argumentNames);
+      if (auto cxxMethod = dyn_cast<clang::CXXMethodDecl>(functionDecl)) {
+        if (op == clang::OverloadedOperatorKind::OO_Star &&
+            cxxMethod->param_empty()) {
+          auto returnType = functionDecl->getReturnType();
+          if ((!returnType->isReferenceType() &&
+               !returnType->isAnyPointerType()) ||
+              returnType->isAnyPointerType() ||
+              returnType->getPointeeType().isConstQualified())
+            result.info.accessorKind = ImportedAccessorKind::DereferenceGetter;
+          else
+            result.info.accessorKind = ImportedAccessorKind::DereferenceSetter;
+        }
+      }
       break;
     }
     case clang::OverloadedOperatorKind::OO_Call:
@@ -2201,6 +2216,37 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
       return importNameImpl(classTemplateSpecDecl->getSpecializedTemplate(),
                             version, givenName);
     if (!isa<clang::ClassTemplatePartialSpecializationDecl>(D)) {
+      auto getSwiftBuiltinTypeName =
+          [&](const clang::BuiltinType *builtin) -> std::optional<std::string> {
+        Type swiftType = nullptr;
+        switch (builtin->getKind()) {
+        case clang::BuiltinType::Void:
+          swiftType = swiftCtx.getNamedSwiftType(swiftCtx.getStdlibModule(),
+                                                 "Void");
+          break;
+#define MAP_BUILTIN_TYPE(CLANG_BUILTIN_KIND, SWIFT_TYPE_NAME)                  \
+        case clang::BuiltinType::CLANG_BUILTIN_KIND:                           \
+          swiftType = swiftCtx.getNamedSwiftType(swiftCtx.getStdlibModule(),   \
+                                                 #SWIFT_TYPE_NAME);            \
+          break;
+#define MAP_BUILTIN_CCHAR_TYPE(CLANG_BUILTIN_KIND, SWIFT_TYPE_NAME)            \
+        case clang::BuiltinType::CLANG_BUILTIN_KIND:                           \
+          swiftType = swiftCtx.getNamedSwiftType(swiftCtx.getStdlibModule(),   \
+                                                 #SWIFT_TYPE_NAME);            \
+          break;
+#include "swift/ClangImporter/BuiltinMappedTypes.def"
+        default:
+          break;
+        }
+
+        if (swiftType) {
+          if (swiftType->is<NominalType>()) {
+            return swiftType->getStringAsComponent();
+          }
+        }
+        return std::nullopt;
+      };
+
       // When constructing the name of a C++ template, don't expand all the
       // template, only expand one layer. Here we want to prioritize
       // readability over total completeness.
@@ -2210,38 +2256,15 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
       buffer << "<";
       llvm::interleaveComma(classTemplateSpecDecl->getTemplateArgs().asArray(),
                             buffer,
-                            [&buffer, this, version](const clang::TemplateArgument& arg) {
+                            [&buffer, this, version, &getSwiftBuiltinTypeName](const clang::TemplateArgument& arg) {
         // Use import name here so builtin types such as "int" map to their
         // Swift equivalent ("Int32").
         if (arg.getKind() == clang::TemplateArgument::Type) {
           auto ty = arg.getAsType().getTypePtr();
           if (auto builtin = dyn_cast<clang::BuiltinType>(ty)) {
-            auto &ctx = swiftCtx;
-            Type swiftType = nullptr;
-            switch (builtin->getKind()) {
-            case clang::BuiltinType::Void:
-              swiftType = ctx.getNamedSwiftType(ctx.getStdlibModule(), "Void");
-              break;
-      #define MAP_BUILTIN_TYPE(CLANG_BUILTIN_KIND, SWIFT_TYPE_NAME)            \
-            case clang::BuiltinType::CLANG_BUILTIN_KIND:                       \
-              swiftType = ctx.getNamedSwiftType(ctx.getStdlibModule(),         \
-                                                #SWIFT_TYPE_NAME);             \
-              break;
-      #define MAP_BUILTIN_CCHAR_TYPE(CLANG_BUILTIN_KIND, SWIFT_TYPE_NAME)      \
-            case clang::BuiltinType::CLANG_BUILTIN_KIND:                       \
-              swiftType = ctx.getNamedSwiftType(ctx.getStdlibModule(),         \
-                                                #SWIFT_TYPE_NAME);             \
-              break;
-      #include "swift/ClangImporter/BuiltinMappedTypes.def"
-              default:
-                break;
-            }
-            
-            if (swiftType) {
-              if (auto nominal = dyn_cast<NominalType>(swiftType->getCanonicalType())) {
-                buffer << nominal->getDecl()->getNameStr();
-                return;
-              }
+            if (auto swiftTypeName = getSwiftBuiltinTypeName(builtin)) {
+              buffer << *swiftTypeName;
+              return;
             }
           } else {
             // FIXME: Generalize this to cover pointer to
@@ -2282,6 +2305,16 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
               return;
             }
           }
+        } else if (arg.getKind() == clang::TemplateArgument::Integral) {
+          buffer << "_";
+          if (arg.getIntegralType()->isBuiltinType()) {
+            if (auto swiftTypeName = getSwiftBuiltinTypeName(
+                    arg.getIntegralType()->getAs<clang::BuiltinType>())) {
+              buffer << *swiftTypeName << "_";
+            }
+          }
+          arg.getAsIntegral().print(buffer, true);
+          return;
         }
         buffer << "_";
       });

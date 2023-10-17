@@ -23,15 +23,15 @@ public struct SourceLoc {
     self.locationInFile = locationInFile
   }
 
-  public init?(bridged: swift.SourceLoc) {
+  public init?(bridged: BridgedSourceLoc) {
     guard bridged.isValid() else {
       return nil
     }
-    self.locationInFile = bridged.__getOpaquePointerValueUnsafe().assumingMemoryBound(to: UInt8.self)
+    self.locationInFile = bridged.uint8Pointer()!
   }
 
-  public var bridged: swift.SourceLoc {
-    .init(llvm.SMLoc.getFromPointer(locationInFile))
+  public var bridged: BridgedSourceLoc {
+    .init(locationInFile)
   }
 }
 
@@ -42,34 +42,24 @@ extension SourceLoc {
 }
 
 extension Optional where Wrapped == SourceLoc {
-  public var bridged: swift.SourceLoc {
+  public var bridged: BridgedSourceLoc {
     self?.bridged ?? .init()
   }
 }
 
 public struct CharSourceRange {
-  private let start: SourceLoc
-  private let byteLength: UInt32
+  public let start: SourceLoc
+  public let byteLength: UInt32
 
   public init(start: SourceLoc, byteLength: UInt32) {
     self.start = start
     self.byteLength = byteLength
   }
 
-  public init?(bridged: swift.CharSourceRange) {
-    guard let start = SourceLoc(bridged: bridged.__getStartUnsafe()) else {
+  public init?(bridgedStart: BridgedSourceLoc, byteLength: UInt32) {
+    guard let start = SourceLoc(bridged: bridgedStart) else {
       return nil
     }
-    self.init(start: start, byteLength: bridged.getByteLength())
-  }
-
-  public var bridged: swift.CharSourceRange {
-    .init(start.bridged, byteLength)
-  }
-}
-
-extension Optional where Wrapped == CharSourceRange {
-  public var bridged: swift.CharSourceRange {
-    self?.bridged ?? .init(.init(), 0)
+    self.init(start: start, byteLength: byteLength)
   }
 }

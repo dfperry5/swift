@@ -1,5 +1,4 @@
-// RUN: %empty-directory(%t)
-// RUN: %target-swift-ide-test -batch-code-completion -source-filename %s -filecheck %raw-FileCheck -completion-output-dir %t
+// RUN: %batch-code-completion
 
 protocol MyProtocol {
   associatedtype Mistery
@@ -167,7 +166,7 @@ func postfixExpr() {
 // POSTFIX_TestProtocol_NODOT-DAG: Decl[InstanceMethod]/CurrNominal:   .foo({#arg1: TestProtocol.Assoc1#}, {#arg2: (Comparable) -> TestProtocol.Assoc1##(Comparable) -> TestProtocol.Assoc1#})[#Comparable#]; name={{.*$}}
 // POSTFIX_TestProtocol_NODOT-DAG: Decl[Subscript]/CurrNominal:        [{#(idx): TestProtocol.Assoc1#}, {#(idx2): Comparable#}][#TestProtocol#]; name={{.*$}}
 // POSTFIX_TestProtocol_NODOT-DAG: Decl[InstanceVar]/CurrNominal:      .value[#(TestProtocol.Assoc1, Comparable)#]; name={{.*$}}
-// POSTFIX_TestProtocol_NODOT-DAG: BuiltinOperator/None:                = {#TestProtocol#}[#Void#]; name={{.*$}}
+// POSTFIX_TestProtocol_NODOT-DAG: BuiltinOperator/None:                = {#TestProtocol#}; name={{.*$}}
 // POSTFIX_TestProtocol_NODOT-DAG: Keyword[self]/CurrNominal:          .self[#TestProtocol#]; name={{.*$}}
 
 protocol TestProtocol2 {

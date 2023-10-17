@@ -17,6 +17,7 @@
 #ifndef SWIFT_REMOTE_METADATAREADER_H
 #define SWIFT_REMOTE_METADATAREADER_H
 
+
 #include "swift/Runtime/Metadata.h"
 #include "swift/Remote/MemoryReader.h"
 #include "swift/Demangling/Demangler.h"
@@ -32,7 +33,6 @@
 
 #include <type_traits>
 #include <vector>
-#include <unordered_map>
 
 #include <inttypes.h>
 
@@ -179,7 +179,6 @@ public:
   using BuiltRequirement = typename BuilderType::BuiltRequirement;
   using BuiltSubstitution = typename BuilderType::BuiltSubstitution;
   using BuiltSubstitutionMap = typename BuilderType::BuiltSubstitutionMap;
-  using BuiltGenericTypeParam = typename BuilderType::BuiltGenericTypeParam;
   using BuiltGenericSignature = typename BuilderType::BuiltGenericSignature;
   using StoredPointer = typename Runtime::StoredPointer;
   using StoredSignedPointer = typename Runtime::StoredSignedPointer;
@@ -194,15 +193,43 @@ private:
   /// amounts of data when we encounter corrupt values for sizes/counts.
   static const uint64_t MaxMetadataSize = 1048576; // 1MB
 
-  /// A cache of built types, keyed by the address of the type.
-  std::unordered_map<StoredPointer, BuiltType> TypeCache;
+  /// The dense map info for a std::pair<StoredPointer, bool>.
+  struct DenseMapInfoTypeCacheKey {
+    using Pair = std::pair<StoredPointer, bool>;
+    using StoredPointerInfo = llvm::DenseMapInfo<StoredPointer>;
+
+    static inline Pair getEmptyKey() {
+      // Since bool doesn't have an empty key implementation, we only use the
+      // StoredPointer's empty key.
+      return std::make_pair(StoredPointerInfo::getEmptyKey(), false);
+    }
+
+    static inline Pair getTombstoneKey() {
+      // Since bool doesn't have a tombstone key implementation, we only use the
+      // StoredPointer's tombstone key.
+      return std::make_pair(StoredPointerInfo::getTombstoneKey(), false);
+    }
+
+    static unsigned getHashValue(const Pair &PairVal) {
+      return llvm::hash_combine(PairVal.first, PairVal.second);
+    }
+
+    static bool isEqual(const Pair &LHS, const Pair &RHS) {
+      return LHS.first == RHS.first && LHS.second == RHS.second;
+    }
+  };
+
+  /// A cache of built types, keyed by the address of the type and whether the
+  /// request ignored articial superclasses or not.
+  llvm::DenseMap<std::pair<StoredPointer, bool>, BuiltType,
+                 DenseMapInfoTypeCacheKey>
+      TypeCache;
 
   using MetadataRef = RemoteRef<const TargetMetadata<Runtime>>;
   using OwnedMetadataRef = MemoryReader::ReadBytesResult;
 
   /// A cache of read type metadata, keyed by the address of the metadata.
-  std::unordered_map<StoredPointer, OwnedMetadataRef>
-    MetadataCache;
+  llvm::DenseMap<StoredPointer, OwnedMetadataRef> MetadataCache;
 
   using ContextDescriptorRef =
       RemoteRef<const TargetContextDescriptor<Runtime>>;
@@ -284,15 +311,14 @@ private:
 
   /// A cache of read nominal type descriptors, keyed by the address of the
   /// nominal type descriptor.
-  std::unordered_map<StoredPointer, OwnedContextDescriptorRef>
-    ContextDescriptorCache;
+  llvm::DenseMap<StoredPointer, OwnedContextDescriptorRef>
+      ContextDescriptorCache;
 
   using OwnedProtocolDescriptorRef =
     std::unique_ptr<const TargetProtocolDescriptor<Runtime>, delete_with_free>;
   /// A cache of read extended existential shape metadata, keyed by the
   /// address of the shape metadata.
-  std::unordered_map<StoredPointer, OwnedShapeRef>
-    ShapeCache;
+  llvm::DenseMap<StoredPointer, OwnedShapeRef> ShapeCache;
 
   enum class IsaEncodingKind {
     /// We haven't checked yet.
@@ -485,6 +511,33 @@ public:
         return dem.createNode(
                           Node::Kind::NonUniqueExtendedExistentialTypeShapeSymbolicReference,
                           resolved.getResolvedAddress().getAddressData());
+      }
+      case Demangle::SymbolicReferenceKind::ObjectiveCProtocol: {
+        // 'resolved' points to a struct of two relative addresses.
+        // The second entry is a relative address to the mangled protocol
+        // without symbolic references.
+        auto addr =
+            resolved.getResolvedAddress().getAddressData() + sizeof(int32_t);
+        int32_t offset;
+        Reader->readInteger(RemoteAddress(addr), &offset);
+        auto addrOfTypeRef = addr + offset;
+        resolved = Reader->getSymbol(RemoteAddress(addrOfTypeRef));
+
+        // Dig out the protocol from the protocol list.
+        auto protocolList = readMangledName(resolved.getResolvedAddress(),
+                                            MangledNameKind::Type, dem);
+        assert(protocolList->getFirstChild()
+                   ->getFirstChild()
+                   ->getFirstChild()
+                   ->getFirstChild()
+                   ->getKind() == Node::Kind::Protocol);
+        auto protocol = protocolList->getFirstChild()
+                            ->getFirstChild()
+                            ->getFirstChild()
+                            ->getFirstChild();
+        auto protocolType = dem.createNode(Node::Kind::Type);
+        protocolType->addChild(protocol, dem);
+        return protocolType;
       }
       }
 
@@ -822,7 +875,9 @@ public:
   readTypeFromMetadata(StoredPointer MetadataAddress,
                        bool skipArtificialSubclasses = false,
                        int recursion_limit = defaultTypeRecursionLimit) {
-    auto Cached = TypeCache.find(MetadataAddress);
+    std::pair<StoredPointer, bool> TypeCacheKey(MetadataAddress,
+                                                skipArtificialSubclasses);
+    auto Cached = TypeCache.find(TypeCacheKey);
     if (Cached != TypeCache.end())
       return Cached->second;
 
@@ -842,7 +897,7 @@ public:
     // Insert a negative result into the cache now so that, if we recur with
     // the same address, we will return the negative result with the check
     // just above.
-    TypeCache.insert({MetadataAddress, BuiltType()});
+    TypeCache.insert({TypeCacheKey, BuiltType()});
 
     auto Meta = readMetadata(MetadataAddress);
     if (!Meta) return BuiltType();
@@ -871,14 +926,27 @@ public:
       }
 
       // Read the labels string.
-      std::string labels;
+      std::string labelStr;
       if (tupleMeta->Labels &&
-          !Reader->readString(RemoteAddress(tupleMeta->Labels), labels))
+          !Reader->readString(RemoteAddress(tupleMeta->Labels), labelStr))
         return BuiltType();
 
+      std::vector<llvm::StringRef> labels;
+      std::string::size_type end, start = 0;
+      while (true) {
+        end = labelStr.find(' ', start);
+        if (end == std::string::npos)
+          break;
+        labels.push_back(llvm::StringRef(labelStr.data() + start, end - start));
+        start = end + 1;
+      }
+      // Pad the vector with empty labels.
+      for (unsigned i = labels.size(); i < elementTypes.size(); ++i)
+        labels.push_back(StringRef());
+
       auto BuiltTuple =
-          Builder.createTupleType(elementTypes, std::move(labels));
-      TypeCache[MetadataAddress] = BuiltTuple;
+          Builder.createTupleType(elementTypes, labels);
+      TypeCache[TypeCacheKey] = BuiltTuple;
       return BuiltTuple;
     }
     case MetadataKind::Function: {
@@ -935,7 +1003,7 @@ public:
 
       auto BuiltFunction = Builder.createFunctionType(
           Parameters, Result, flags, diffKind, globalActor);
-      TypeCache[MetadataAddress] = BuiltFunction;
+      TypeCache[TypeCacheKey] = BuiltFunction;
       return BuiltFunction;
     }
     case MetadataKind::Existential: {
@@ -986,7 +1054,7 @@ public:
       }
       auto BuiltExist = Builder.createProtocolCompositionType(
         Protocols, SuperclassType, HasExplicitAnyObject);
-      TypeCache[MetadataAddress] = BuiltExist;
+      TypeCache[TypeCacheKey] = BuiltExist;
       return BuiltExist;
     }
     case MetadataKind::ExtendedExistential: {
@@ -1064,7 +1132,7 @@ public:
         }
       }
 
-      TypeCache[MetadataAddress] = builtProto;
+      TypeCache[TypeCacheKey] = builtProto;
       return builtProto;
     }
 
@@ -1074,7 +1142,7 @@ public:
           readTypeFromMetadata(Metatype->InstanceType, false, recursion_limit);
       if (!Instance) return BuiltType();
       auto BuiltMetatype = Builder.createMetatypeType(Instance);
-      TypeCache[MetadataAddress] = BuiltMetatype;
+      TypeCache[TypeCacheKey] = BuiltMetatype;
       return BuiltMetatype;
     }
     case MetadataKind::ObjCClassWrapper: {
@@ -1086,7 +1154,7 @@ public:
         return BuiltType();
 
       auto BuiltObjCClass = Builder.createObjCClassType(std::move(className));
-      TypeCache[MetadataAddress] = BuiltObjCClass;
+      TypeCache[TypeCacheKey] = BuiltObjCClass;
       return BuiltObjCClass;
     }
     case MetadataKind::ExistentialMetatype: {
@@ -1095,7 +1163,7 @@ public:
           readTypeFromMetadata(Exist->InstanceType, false, recursion_limit);
       if (!Instance) return BuiltType();
       auto BuiltExist = Builder.createExistentialMetatypeType(Instance);
-      TypeCache[MetadataAddress] = BuiltExist;
+      TypeCache[TypeCacheKey] = BuiltExist;
       return BuiltExist;
     }
     case MetadataKind::ForeignReferenceType:
@@ -1119,7 +1187,7 @@ public:
       auto name = mangling.result();
 
       auto BuiltForeign = Builder.createForeignClassType(std::move(name));
-      TypeCache[MetadataAddress] = BuiltForeign;
+      TypeCache[TypeCacheKey] = BuiltForeign;
       return BuiltForeign;
     }
     case MetadataKind::HeapLocalVariable:
@@ -1130,7 +1198,7 @@ public:
     case MetadataKind::Opaque:
     default: {
       auto BuiltOpaque = Builder.getOpaqueType();
-      TypeCache[MetadataAddress] = BuiltOpaque;
+      TypeCache[TypeCacheKey] = BuiltOpaque;
       return BuiltOpaque;
     }
     }
@@ -3072,9 +3140,12 @@ private:
     // If we've skipped an artificial subclasses, check the cache at
     // the superclass.  (This also protects against recursion.)
     if (skipArtificialSubclasses && metadata != origMetadata) {
-      auto it = TypeCache.find(getAddress(metadata));
-      if (it != TypeCache.end())
+      auto it =
+          TypeCache.find({getAddress(metadata), skipArtificialSubclasses});
+      if (it != TypeCache.end()) {
+        TypeCache.erase({getAddress(origMetadata), skipArtificialSubclasses});
         return it->second;
+      }
     }
 
     // Read the nominal type descriptor.
@@ -3103,12 +3174,12 @@ private:
     if (!nominal)
       return BuiltType();
     
-    TypeCache[getAddress(metadata)] = nominal;
+    TypeCache[{getAddress(metadata), skipArtificialSubclasses}] = nominal;
 
     // If we've skipped an artificial subclass, remove the
     // recursion-protection entry we made for it.
     if (skipArtificialSubclasses && metadata != origMetadata) {
-      TypeCache.erase(getAddress(origMetadata));
+      TypeCache.erase({getAddress(origMetadata), skipArtificialSubclasses});
     }
 
     return nominal;
@@ -3139,7 +3210,7 @@ private:
                                skipArtificialSubclasses, recursion_limit);
     }
 
-    TypeCache[origMetadataPtr] = BuiltObjCClass;
+    TypeCache[{origMetadataPtr, skipArtificialSubclasses}] = BuiltObjCClass;
     return BuiltObjCClass;
   }
 

@@ -496,7 +496,6 @@ public:
       switch (afd->getBodyKind()) {
       case AbstractFunctionDecl::BodyKind::None:
       case AbstractFunctionDecl::BodyKind::TypeChecked:
-      case AbstractFunctionDecl::BodyKind::Skipped:
       case AbstractFunctionDecl::BodyKind::SILSynthesize:
       case AbstractFunctionDecl::BodyKind::Deserialized:
         return true;
@@ -614,8 +613,7 @@ public:
         auto countType = expansion->getCountType();
         if (!(countType->is<PackType>() ||
               countType->is<PackArchetypeType>() ||
-              (countType->is<GenericTypeParamType>() &&
-               countType->castTo<GenericTypeParamType>()->isParameterPack()))) {
+              countType->isRootParameterPack())) {
           Out << "non-pack shape type" << countType->getString() << "\n";
           abort();
         }
@@ -1015,9 +1013,15 @@ public:
     }
 
     void verifyChecked(ThrowStmt *S) {
-      checkSameType(S->getSubExpr()->getType(),
-                    checkExceptionTypeExists("throw expression"),
-                    "throw operand");
+      Type thrownError;
+      if (!Functions.empty()) {
+        if (auto fn = AnyFunctionRef::fromDeclContext(Functions.back()))
+          thrownError = fn->getThrownErrorType();
+      }
+
+      if (!thrownError)
+        thrownError = checkExceptionTypeExists("throw expression");
+      checkSameType(S->getSubExpr()->getType(), thrownError, "throw operand");
       verifyCheckedBase(S);
     }
 
@@ -1215,7 +1219,7 @@ public:
     void verifyChecked(SingleValueStmtExpr *E) {
       using Kind = IsSingleValueStmtResult::Kind;
       switch (E->getStmt()->mayProduceSingleValue(Ctx).getKind()) {
-      case Kind::NoExpressionBranches:
+      case Kind::NoResult:
         // These are allowed as long as the type is Void.
         checkSameType(
             E->getType(), Ctx.getVoidType(),
@@ -1223,6 +1227,7 @@ public:
         break;
       case Kind::UnterminatedBranches:
       case Kind::NonExhaustiveIf:
+      case Kind::NonExhaustiveDoCatch:
       case Kind::UnhandledStmt:
       case Kind::CircularReference:
       case Kind::HasLabel:
@@ -2872,40 +2877,6 @@ public:
           }
 
           continue;
-        }
-      }
-
-      // Make sure we have the right signature conformances.
-      if (!normal->isInvalid()){
-        auto conformances = normal->getSignatureConformances();
-        unsigned idx = 0;
-        auto reqs = proto->getRequirementSignature().getRequirements();
-        for (const auto &req : reqs) {
-          if (req.getKind() != RequirementKind::Conformance)
-            continue;
-
-          if (idx >= conformances.size()) {
-            Out << "error: not enough conformances for requirement signature\n";
-            normal->dump(Out);
-            abort();
-          }
-
-          auto reqProto = req.getProtocolDecl();
-          if (reqProto != conformances[idx].getRequirement()) {
-            Out << "error: wrong protocol in signature conformances: have "
-              << conformances[idx].getRequirement()->getName().str()
-              << ", expected " << reqProto->getName().str()<< "\n";
-            normal->dump(Out);
-            abort();
-          }
-
-          ++idx;
-        }
-
-        if (idx != conformances.size()) {
-          Out << "error: too many conformances for requirement signature\n";
-          normal->dump(Out);
-          abort();
         }
       }
     }

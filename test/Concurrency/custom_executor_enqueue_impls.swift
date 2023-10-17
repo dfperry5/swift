@@ -1,11 +1,13 @@
-// RUN: %target-typecheck-verify-swift -enable-experimental-move-only -disable-availability-checking
+// RUN: %target-swift-frontend -disable-availability-checking -emit-sil -o /dev/null -verify %s
+// RUN: %target-swift-frontend -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=targeted %s
+// RUN: %target-swift-frontend -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=complete %s
+// RUN: %target-swift-frontend -disable-availability-checking -emit-sil -o /dev/null -verify -strict-concurrency=complete -enable-experimental-feature SendNonSendable %s
+
 // REQUIRES: concurrency
+// REQUIRES: asserts
 
 // rdar://106849189 move-only types should be supported in freestanding mode
 // UNSUPPORTED: freestanding
-
-// FIXME: rdar://107112715 test failing on iOS simulator, investigating
-// UNSUPPORTED: OS=ios
 
 // Such type may be encountered since Swift 5.5 (5.1 backdeployed) if someone implemented the
 // not documented, but public Executor types back then already.

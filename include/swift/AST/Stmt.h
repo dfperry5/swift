@@ -144,7 +144,6 @@ public:
 
   /// Whether the statement can produce a single value, and as such may be
   /// treated as an expression.
-  IsSingleValueStmtResult mayProduceSingleValue(Evaluator &eval) const;
   IsSingleValueStmtResult mayProduceSingleValue(ASTContext &ctx) const;
 
   /// isImplicit - Determines whether this statement was implicitly-generated,
@@ -302,6 +301,38 @@ public:
   }
   
   static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Yield; }
+};
+
+/// The statement `then <expr>`. This is used within if/switch expressions to
+/// indicate the value being produced by a given branch.
+class ThenStmt : public Stmt {
+  SourceLoc ThenLoc;
+  Expr *Result;
+
+  ThenStmt(SourceLoc thenLoc, Expr *result, bool isImplicit)
+      : Stmt(StmtKind::Then, isImplicit), ThenLoc(thenLoc), Result(result) {
+    assert(Result && "Must have non-null result");
+  }
+
+public:
+  /// Create a new parsed ThenStmt.
+  static ThenStmt *createParsed(ASTContext &ctx, SourceLoc thenLoc,
+                                Expr *result);
+
+  /// Create an implicit ThenStmt.
+  ///
+  /// Note that such statements will be elided during the result builder
+  /// transform.
+  static ThenStmt *createImplicit(ASTContext &ctx, Expr *result);
+
+  SourceLoc getThenLoc() const { return ThenLoc; }
+
+  SourceRange getSourceRange() const;
+
+  Expr *getResult() const { return Result; }
+  void setResult(Expr *e) { Result = e; }
+
+  static bool classof(const Stmt *S) { return S->getKind() == StmtKind::Then; }
 };
 
 /// DeferStmt - A 'defer' statement.  This runs the substatement it contains
@@ -1386,12 +1417,21 @@ public:
     return {getTrailingObjects<CaseStmt *>(), Bits.DoCatchStmt.NumCatches};
   }
 
+  /// Retrieve the complete set of branches for this do-catch statement.
+  ArrayRef<Stmt *> getBranches(SmallVectorImpl<Stmt *> &scratch) const;
+
   /// Does this statement contain a syntactically exhaustive catch
   /// clause?
   ///
   /// Note that an exhaustive do/catch statement can still throw
   /// errors out of its catch block(s).
   bool isSyntacticallyExhaustive() const;
+
+  // Determines the type of the error that is thrown out of the 'do' block
+  // and caught by the various 'catch' clauses. If this the catch clauses
+  // aren't exhausive, this is also the type of the error that is implicitly
+  // rethrown.
+  Type getCaughtErrorType() const;
 
   static bool classof(const Stmt *S) {
     return S->getKind() == StmtKind::DoCatch;

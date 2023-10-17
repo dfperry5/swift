@@ -9,7 +9,7 @@
 // RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -parse-as-library -disable-availability-checking -DTEST_DIAGNOSTICS
 
 // Check with the imported macro library vs. the local declaration of the macro.
-// RUN: %target-swift-frontend -swift-version 5 -emit-module -o %t/macro_library.swiftmodule %S/Inputs/macro_library.swift -module-name macro_library -load-plugin-library %t/%target-library-name(MacroDefinition)
+// RUN: %target-swift-frontend -enable-experimental-feature ExtensionMacros -swift-version 5 -emit-module -o %t/macro_library.swiftmodule %S/Inputs/macro_library.swift -module-name macro_library -load-plugin-library %t/%target-library-name(MacroDefinition)
 
 // RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -parse-as-library -disable-availability-checking -DIMPORT_MACRO_LIBRARY -I %t -DTEST_DIAGNOSTICS
 
@@ -214,6 +214,13 @@ func testVarPeer() {
   _ = Date().value
 }
 
+#if TEST_DIAGNOSTICS
+// Macros cannot be attached to function parameters
+
+// expected-error@+1{{'peer' macro cannot be attached to parameter ('x')}}
+func test(@declareVarValuePeer x: Int) {}
+#endif
+
 // Stored properties added via peer macros.
 @attached(peer, names: named(_foo))
 macro AddPeerStoredProperty() =
@@ -228,3 +235,18 @@ func testStructWithPeers() {
   let x = SomeStructWithPeerProperties()
   print(x)
 }
+
+
+#if TEST_DIAGNOSTICS
+@available(*, deprecated, message: "This macro is deprecated.")
+@attached(peer, names: overloaded)
+macro deprecatedAddCompletionHandler() = #externalMacro(module: "MacroDefinition", type: "AddCompletionHandler")
+
+
+// expected-warning@+1{{'deprecatedAddCompletionHandler()' is deprecated: This macro is deprecated.}}
+@deprecatedAddCompletionHandler
+func fDeprecated(a: Int, for b: String, _ value: Double) async -> String {
+  return b
+}
+
+#endif

@@ -570,7 +570,7 @@ UnboundImport::UnboundImport(ImportDecl *ID)
 
   import.accessLevel = ID->getAccessLevel();
   if (auto attr = ID->getAttrs().getAttribute<AccessControlAttr>()) {
-    import.accessLevelLoc = attr->getLocation();
+    import.accessLevelRange = attr->getLocation();
   }
 
   if (ID->getAttrs().hasAttribute<SPIOnlyAttr>())
@@ -770,7 +770,7 @@ void UnboundImport::validateInterfaceWithPackageName(ModuleDecl *topLevelModule,
   if (!topLevelModule->getPackageName().empty() &&
       topLevelModule->getPackageName().str() == ctx.LangOpts.PackageName &&
       topLevelModule->isBuiltFromInterface()) {
-      ctx.Diags.diagnose(SourceLoc(),
+      ctx.Diags.diagnose(import.module.getModulePath().front().Loc,
                          diag::in_package_module_not_compiled_from_source,
                          topLevelModule->getBaseIdentifier(),
                          ctx.LangOpts.PackageName,
@@ -781,25 +781,36 @@ void UnboundImport::validateInterfaceWithPackageName(ModuleDecl *topLevelModule,
 
 void UnboundImport::validateResilience(NullablePtr<ModuleDecl> topLevelModule,
                                        SourceFile &SF) {
-  if (import.options.contains(ImportFlags::ImplementationOnly) ||
-      import.accessLevel < AccessLevel::Public)
-    return;
+  ASTContext &ctx = SF.getASTContext();
 
   // Per getTopLevelModule(), we'll only get nullptr here for non-Swift modules,
   // so these two really mean the same thing.
   if (!topLevelModule || topLevelModule.get()->isNonSwiftModule())
     return;
 
-  ASTContext &ctx = SF.getASTContext();
-
   // If the module we're validating is the builtin one, then just return because
   // this module is essentially a header only import and does not concern
   // itself with resiliency. This can occur when one has passed
   // '-enable-builtin-module' and is explicitly importing the Builtin module in
   // their sources.
-  if (topLevelModule.get() == ctx.TheBuiltinModule) {
+  if (topLevelModule.get() == ctx.TheBuiltinModule)
     return;
+
+  // @_implementationOnly is only supported when used from modules built with
+  // library-evolution. Otherwise it can lead to runtime crashes from a lack
+  // of memory layout information when building clients unaware of the
+  // dependency. The missing information is provided at run time by resilient
+  // modules.
+  if (import.options.contains(ImportFlags::ImplementationOnly) &&
+      !SF.getParentModule()->isResilient() && topLevelModule) {
+    ctx.Diags.diagnose(import.importLoc,
+                       diag::implementation_only_requires_library_evolution,
+                       SF.getParentModule()->getName());
   }
+
+  if (import.options.contains(ImportFlags::ImplementationOnly) ||
+      import.accessLevel < AccessLevel::Public)
+    return;
 
   if (!SF.getParentModule()->isResilient() ||
       topLevelModule.get()->isResilient())
@@ -810,14 +821,21 @@ void UnboundImport::validateResilience(NullablePtr<ModuleDecl> topLevelModule,
                                      topLevelModule.get()->getName(),
                                      SF.getParentModule()->getName());
 
-  if (ctx.LangOpts.hasFeature(Feature::AccessLevelOnImport)) {
-    SourceLoc attrLoc = import.accessLevelLoc;
-    if (attrLoc.isValid())
-      inFlight.fixItReplace(attrLoc, "internal");
+  if (ctx.LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
+    // This will catch Swift 6 language mode as well where
+    // it will be reported as an error.
+    inFlight.fixItRemove(import.accessLevelRange);
+  } else {
+    SourceRange attrRange = import.accessLevelRange;
+    if (attrRange.isValid())
+      inFlight.fixItReplace(attrRange, "internal");
     else
       inFlight.fixItInsert(import.importLoc, "internal ");
-  } else {
-    inFlight.limitBehavior(DiagnosticBehavior::Warning);
+
+    // Downgrade to warning only in pre-Swift 6 mode and
+    // when not using the experimental flag.
+    if (!ctx.LangOpts.hasFeature(Feature::AccessLevelOnImport))
+      inFlight.limitBehavior(DiagnosticBehavior::Warning);
   }
 }
 
@@ -1181,7 +1199,7 @@ ScopedImportLookupRequest::evaluate(Evaluator &evaluator,
 
     if (decls.size() == 1)
       ctx.Diags.diagnose(decls.front(), diag::decl_declared_here,
-                         decls.front()->getName());
+                         decls.front());
   }
   return ctx.AllocateCopy(decls);
 }

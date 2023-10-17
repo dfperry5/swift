@@ -4,7 +4,7 @@
 # Add additional libraries to which we need to link when the Swift Swift
 # parser is built in.
 function(add_swift_parser_link_libraries target)
-  if(SWIFT_SWIFT_PARSER)
+  if(SWIFT_BUILD_SWIFT_SYNTAX)
     target_link_libraries(${target}
                           PRIVATE swiftCore)
 
@@ -15,7 +15,7 @@ function(add_swift_parser_link_libraries target)
   endif()
 endfunction()
 
-if(${BOOTSTRAPPING_MODE} MATCHES "BOOTSTRAPPING.*")
+if(BOOTSTRAPPING_MODE MATCHES "BOOTSTRAPPING.*")
 
   # Bootstrapping - level 0
   # For more information on how bootstrapping works, see docs/SwiftInTheCompiler.md

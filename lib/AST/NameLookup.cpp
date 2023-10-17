@@ -112,6 +112,7 @@ void swift::simple_display(llvm::raw_ostream &out,
       {UnqualifiedLookupFlags::IgnoreAccessControl, "IgnoreAccessControl"},
       {UnqualifiedLookupFlags::IncludeOuterResults, "IncludeOuterResults"},
       {UnqualifiedLookupFlags::TypeLookup, "TypeLookup"},
+      {UnqualifiedLookupFlags::MacroLookup, "MacroLookup"},
   };
 
   auto flagsToPrint = llvm::make_filter_range(
@@ -680,11 +681,8 @@ static void recordShadowedDeclsAfterTypeMatch(
         }
       }
 
-      // Next, prefer any other module over the (_)Observation module.
-      auto obsModule = ctx.getLoadedModule(ctx.Id_Observation);
-      if (!obsModule)
-        obsModule = ctx.getLoadedModule(ctx.Id_Observation_);
-      if (obsModule) {
+      // Next, prefer any other module over the Observation module.
+      if (auto obsModule = ctx.getLoadedModule(ctx.Id_Observation)) {
         if ((firstModule == obsModule) != (secondModule == obsModule)) {
           // If second module is (_)Observation, then it is shadowed by
           // first.
@@ -1073,12 +1071,19 @@ directReferencesForTypeRepr(Evaluator &evaluator, ASTContext &ctx,
 /// the given type.
 static DirectlyReferencedTypeDecls directReferencesForType(Type type);
 
+enum class ResolveToNominalFlags : uint8_t {
+  AllowTupleType = 0x1
+};
+
+using ResolveToNominalOptions = OptionSet<ResolveToNominalFlags>;
+
 /// Given a set of type declarations, find all of the nominal type declarations
 /// that they reference, looking through typealiases as appropriate.
 static TinyPtrVector<NominalTypeDecl *>
 resolveTypeDeclsToNominal(Evaluator &evaluator,
                           ASTContext &ctx,
                           ArrayRef<TypeDecl *> typeDecls,
+                          ResolveToNominalOptions options,
                           SmallVectorImpl<ModuleDecl *> &modulesFound,
                           bool &anyObject);
 
@@ -1132,6 +1137,7 @@ SelfBounds SelfBoundsFromWhereClauseRequest::evaluate(
 
     SmallVector<ModuleDecl *, 2> modulesFound;
     auto rhsNominals = resolveTypeDeclsToNominal(evaluator, ctx, rhsDecls,
+                                                 ResolveToNominalOptions(),
                                                  modulesFound,
                                                  result.anyObject);
     result.decls.insert(result.decls.end(),
@@ -1170,7 +1176,8 @@ SelfBounds SelfBoundsFromGenericSignatureRequest::evaluate(
     auto rhsDecls = directReferencesForType(req.getSecondType());
     SmallVector<ModuleDecl *, 2> modulesFound;
     auto rhsNominals = resolveTypeDeclsToNominal(
-        evaluator, ctx, rhsDecls, modulesFound, result.anyObject);
+        evaluator, ctx, rhsDecls, ResolveToNominalOptions(),
+        modulesFound, result.anyObject);
     result.decls.insert(result.decls.end(), rhsNominals.begin(),
                         rhsNominals.end());
   }
@@ -1621,6 +1628,11 @@ namelookup::lookupMacros(DeclContext *dc, DeclNameRef macroName,
   auto moduleScopeDC = dc->getModuleScopeContext();
   ASTContext &ctx = moduleScopeDC->getASTContext();
 
+  // When performing lookup for freestanding macro roles, only consider
+  // macro names, ignoring types.
+  bool onlyMacros = static_cast<bool>(roles & getFreestandingMacroRoles()) &&
+      !(roles - getFreestandingMacroRoles());
+
   // Macro lookup should always exclude macro expansions; macro
   // expansions cannot introduce new macro declarations. Note that
   // the source location here doesn't matter.
@@ -1629,8 +1641,12 @@ namelookup::lookupMacros(DeclContext *dc, DeclNameRef macroName,
     UnqualifiedLookupFlags::ExcludeMacroExpansions
   };
 
+  if (onlyMacros)
+    descriptor.Options |= UnqualifiedLookupFlags::MacroLookup;
+
   auto lookup = evaluateOrDefault(
       ctx.evaluator, UnqualifiedLookupRequest{descriptor}, {});
+
   for (const auto &found : lookup.allResults()) {
     if (auto macro = dyn_cast<MacroDecl>(found.getValueDecl())) {
       auto candidateRoles = macro->getMacroRoles();
@@ -1641,6 +1657,7 @@ namelookup::lookupMacros(DeclContext *dc, DeclNameRef macroName,
       }
     }
   }
+
   return choices;
 }
 
@@ -1749,6 +1766,17 @@ namespace {
   };
 }
 
+/// Given an extension declaration, return the extended nominal type if the
+/// extension was produced by expanding an extension or conformance macro from
+/// the nominal declaration itself.
+static NominalTypeDecl *nominalForExpandedExtensionDecl(ExtensionDecl *ext) {
+  if (!ext->isInMacroExpansionInContext())
+    return nullptr;
+
+
+  return ext->getSelfNominalTypeDecl();
+}
+
 PotentialMacroExpansions PotentialMacroExpansionsInContextRequest::evaluate(
     Evaluator &evaluator, TypeOrExtensionDecl container) const {
   /// The implementation here needs to be kept in sync with
@@ -1758,6 +1786,15 @@ PotentialMacroExpansions PotentialMacroExpansionsInContextRequest::evaluate(
   // Member macros on the type or extension.
   auto containerDecl = container.getAsDecl();
   forEachPotentialAttachedMacro(containerDecl, MacroRole::Member, nameTracker);
+
+  // If the container is an extension that was created from an extension macro,
+  // look at the nominal declaration to find any extension macros.
+  if (auto ext = dyn_cast<ExtensionDecl>(containerDecl)) {
+    if (auto nominal = nominalForExpandedExtensionDecl(ext)) {
+      forEachPotentialAttachedMacro(
+          nominal, MacroRole::Extension, nameTracker);
+    }
+  }
 
   // Peer and freestanding declaration macros.
   auto dc = container.getAsDeclContext();
@@ -1817,13 +1854,15 @@ populateLookupTableEntryFromMacroExpansions(ASTContext &ctx,
   // names match.
   {
     MacroIntroducedNameTracker nameTracker;
-    if (auto nominal = dyn_cast<NominalTypeDecl>(container.getAsDecl())) {
-      forEachPotentialAttachedMacro(nominal, MacroRole::Extension, nameTracker);
-      if (nameTracker.shouldExpandForName(name)) {
-        (void)evaluateOrDefault(
-            ctx.evaluator,
-            ExpandExtensionMacros{nominal},
-            false);
+    if (auto ext = dyn_cast<ExtensionDecl>(container.getAsDecl())) {
+      if (auto nominal = nominalForExpandedExtensionDecl(ext)) {
+        forEachPotentialAttachedMacro(nominal, MacroRole::Extension, nameTracker);
+        if (nameTracker.shouldExpandForName(name)) {
+          (void)evaluateOrDefault(
+              ctx.evaluator,
+              ExpandExtensionMacros{nominal},
+              false);
+        }
       }
     }
   }
@@ -2411,6 +2450,11 @@ QualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
       if ((options & NL_OnlyTypes) && !isa<TypeDecl>(decl))
         continue;
 
+      // If we're performing a macro lookup, don't even attempt to validate
+      // the decl if its not a macro.
+      if ((options & NL_OnlyMacros) && !isa<MacroDecl>(decl))
+        continue;
+
       if (isAcceptableLookupResult(DC, options, decl, onlyCompleteObjectInits))
         decls.push_back(decl);
     }
@@ -2494,8 +2538,8 @@ ModuleQualifiedLookupRequest::evaluate(Evaluator &eval, const DeclContext *DC,
   using namespace namelookup;
   QualifiedLookupResult decls;
 
-  auto kind = (options & NL_OnlyTypes
-               ? ResolutionKind::TypesOnly
+  auto kind = (options & NL_OnlyTypes ? ResolutionKind::TypesOnly
+               : options & NL_OnlyMacros ? ResolutionKind::MacrosOnly
                : ResolutionKind::Overloadable);
   auto topLevelScope = DC->getModuleScopeContext();
   if (module == topLevelScope->getParentModule()) {
@@ -2537,8 +2581,8 @@ AnyObjectLookupRequest::evaluate(Evaluator &evaluator, const DeclContext *dc,
   using namespace namelookup;
   QualifiedLookupResult decls;
 
-  // Type-only lookup won't find anything on AnyObject.
-  if (options & NL_OnlyTypes)
+  // Type-only and macro lookup won't find anything on AnyObject.
+  if (options & (NL_OnlyTypes | NL_OnlyMacros))
     return decls;
 
   // Collect all of the visible declarations.
@@ -2616,6 +2660,7 @@ static TinyPtrVector<NominalTypeDecl *>
 resolveTypeDeclsToNominal(Evaluator &evaluator,
                           ASTContext &ctx,
                           ArrayRef<TypeDecl *> typeDecls,
+                          ResolveToNominalOptions options,
                           SmallVectorImpl<ModuleDecl *> &modulesFound,
                           bool &anyObject,
                           llvm::SmallPtrSetImpl<TypeAliasDecl *> &typealiases) {
@@ -2629,6 +2674,14 @@ resolveTypeDeclsToNominal(Evaluator &evaluator,
   for (auto typeDecl : typeDecls) {
     // Nominal type declarations get copied directly.
     if (auto nominalDecl = dyn_cast<NominalTypeDecl>(typeDecl)) {
+      // ... unless it's the special Builtin.TheTupleType that we return
+      // when resolving a TupleTypeRepr, and the caller isn't asking for
+      // that.
+      if (!options.contains(ResolveToNominalFlags::AllowTupleType) &&
+          isa<BuiltinTupleDecl>(nominalDecl)) {
+        continue;
+      }
+
       addNominalDecl(nominalDecl);
       continue;
     }
@@ -2645,7 +2698,7 @@ resolveTypeDeclsToNominal(Evaluator &evaluator,
 
       auto underlyingNominalReferences
         = resolveTypeDeclsToNominal(evaluator, ctx, underlyingTypeReferences,
-                                    modulesFound, anyObject, typealiases);
+                                    options, modulesFound, anyObject, typealiases);
       std::for_each(underlyingNominalReferences.begin(),
                     underlyingNominalReferences.end(),
                     addNominalDecl);
@@ -2696,11 +2749,12 @@ static TinyPtrVector<NominalTypeDecl *>
 resolveTypeDeclsToNominal(Evaluator &evaluator,
                           ASTContext &ctx,
                           ArrayRef<TypeDecl *> typeDecls,
+                          ResolveToNominalOptions options,
                           SmallVectorImpl<ModuleDecl *> &modulesFound,
                           bool &anyObject) {
   llvm::SmallPtrSet<TypeAliasDecl *, 4> typealiases;
-  return resolveTypeDeclsToNominal(evaluator, ctx, typeDecls, modulesFound,
-                                   anyObject, typealiases);
+  return resolveTypeDeclsToNominal(evaluator, ctx, typeDecls, options,
+                                   modulesFound, anyObject, typealiases);
 }
 
 /// Perform unqualified name lookup for types at the given location.
@@ -2804,8 +2858,9 @@ directReferencesForQualifiedTypeLookup(Evaluator &evaluator,
     SmallVector<ModuleDecl *, 2> moduleDecls;
     bool anyObject = false;
     auto nominalTypeDecls =
-      resolveTypeDeclsToNominal(ctx.evaluator, ctx, baseTypes, moduleDecls,
-                                anyObject);
+      resolveTypeDeclsToNominal(ctx.evaluator, ctx, baseTypes,
+                                ResolveToNominalOptions(),
+                                moduleDecls, anyObject);
 
     dc->lookupQualified(nominalTypeDecls, name, loc, options, members);
 
@@ -2921,6 +2976,8 @@ directReferencesForTypeRepr(Evaluator &evaluator,
       return directReferencesForTypeRepr(evaluator, ctx,
                                          tupleRepr->getElementType(0), dc,
                                          allowUsableFromInline);
+    } else {
+      return { 1, ctx.getBuiltinTupleDecl() };
     }
     return { };
   }
@@ -2961,6 +3018,7 @@ directReferencesForTypeRepr(Evaluator &evaluator,
   case TypeReprKind::OpaqueReturn:
   case TypeReprKind::NamedOpaqueReturn:
   case TypeReprKind::Existential:
+  case TypeReprKind::Inverse:
     return { };
 
   case TypeReprKind::Fixed:
@@ -2983,6 +3041,9 @@ static DirectlyReferencedTypeDecls directReferencesForType(Type type) {
   // If there is a generic declaration, return it.
   if (auto genericDecl = type->getAnyGeneric())
     return { 1, genericDecl };
+
+  if (dyn_cast<TupleType>(type.getPointer()))
+    return { 1, type->getASTContext().getBuiltinTupleDecl() };
 
   if (type->isExistentialType()) {
     DirectlyReferencedTypeDecls result;
@@ -3010,7 +3071,7 @@ DirectlyReferencedTypeDecls InheritedDeclsReferencedRequest::evaluate(
     unsigned index) const {
 
   // Prefer syntactic information when we have it.
-  const TypeLoc &typeLoc = getInheritedTypeLocAtIndex(decl, index);
+  const TypeLoc &typeLoc = InheritedTypes(decl).getEntry(index);
   if (auto typeRepr = typeLoc.getTypeRepr()) {
     // Figure out the context in which name lookup will occur.
     DeclContext *dc;
@@ -3077,7 +3138,7 @@ SuperclassDeclRequest::evaluate(Evaluator &evaluator,
         return classDecl;
   }
 
-  for (unsigned i : indices(subject->getInherited())) {
+  for (unsigned i : subject->getInherited().getIndices()) {
     // Find the inherited declarations referenced at this position.
     auto inheritedTypes = evaluateOrDefault(evaluator,
       InheritedDeclsReferencedRequest{subject, i}, {});
@@ -3087,7 +3148,8 @@ SuperclassDeclRequest::evaluate(Evaluator &evaluator,
     bool anyObject = false;
     auto inheritedNominalTypes
       = resolveTypeDeclsToNominal(evaluator, Ctx,
-                                  inheritedTypes, modulesFound, anyObject);
+                                  inheritedTypes, ResolveToNominalOptions(),
+                                  modulesFound, anyObject);
 
     // Look for a class declaration.
     ClassDecl *superclass = nullptr;
@@ -3156,9 +3218,10 @@ NominalTypeDecl *
 ExtendedNominalRequest::evaluate(Evaluator &evaluator,
                                  ExtensionDecl *ext) const {
   auto typeRepr = ext->getExtendedTypeRepr();
-  if (!typeRepr)
+  if (!typeRepr) {
     // We must've seen 'extension { ... }' during parsing.
     return nullptr;
+  }
 
   ASTContext &ctx = ext->getASTContext();
   DirectlyReferencedTypeDecls referenced =
@@ -3169,19 +3232,14 @@ ExtendedNominalRequest::evaluate(Evaluator &evaluator,
   SmallVector<ModuleDecl *, 2> modulesFound;
   bool anyObject = false;
   auto nominalTypes
-    = resolveTypeDeclsToNominal(evaluator, ctx, referenced, modulesFound,
-                                anyObject);
+    = resolveTypeDeclsToNominal(evaluator, ctx, referenced,
+                                ResolveToNominalFlags::AllowTupleType,
+                                modulesFound, anyObject);
 
   // If there is more than 1 element, we will emit a warning or an error
   // elsewhere, so don't handle that case here.
   if (nominalTypes.empty())
     return nullptr;
-
-  // Diagnose experimental tuple extensions.
-  if (isa<BuiltinTupleDecl>(nominalTypes[0]) &&
-      !ctx.LangOpts.hasFeature(Feature::TupleConformances)) {
-    ext->diagnose(diag::experimental_tuple_extension);
-  }
 
   return nominalTypes[0];
 }
@@ -3222,10 +3280,10 @@ bool TypeRepr::isProtocolOrProtocolComposition(DeclContext *dc){
 static GenericParamList *
 createExtensionGenericParams(ASTContext &ctx,
                              ExtensionDecl *ext,
-                             NominalTypeDecl *nominal) {
+                             DeclContext *source) {
   // Collect generic parameters from all outer contexts.
   SmallVector<GenericParamList *, 2> allGenericParams;
-  nominal->forEachGenericContext([&](GenericParamList *gpList) {
+  source->forEachGenericContext([&](GenericParamList *gpList) {
     allGenericParams.push_back(gpList->clone(ext));
   });
 
@@ -3236,6 +3294,28 @@ createExtensionGenericParams(ASTContext &ctx,
   }
 
   return toParams;
+}
+
+/// If the extended type is a generic typealias whose underlying type is
+/// a tuple, the extension inherits the generic paramter list from the
+/// typealias.
+static GenericParamList *
+createTupleExtensionGenericParams(ASTContext &ctx,
+                                  ExtensionDecl *ext,
+                                  TypeRepr *extendedTypeRepr) {
+  DirectlyReferencedTypeDecls referenced =
+    directReferencesForTypeRepr(ctx.evaluator, ctx,
+                                extendedTypeRepr,
+                                ext->getParent());
+
+  if (referenced.size() != 1 || !isa<TypeAliasDecl>(referenced[0]))
+    return nullptr;
+
+  auto *typeAlias = cast<TypeAliasDecl>(referenced[0]);
+  if (!typeAlias->isGeneric())
+    return nullptr;
+
+  return createExtensionGenericParams(ctx, ext, typeAlias);
 }
 
 CollectedOpaqueReprs swift::collectOpaqueTypeReprs(TypeRepr *r, ASTContext &ctx,
@@ -3359,9 +3439,9 @@ GenericParamListRequest::evaluate(Evaluator &evaluator, GenericContext *value) c
   if (auto *tupleDecl = dyn_cast<BuiltinTupleDecl>(value)) {
     auto &ctx = value->getASTContext();
 
-    // Builtin.TheTupleType has a single pack generic parameter: <Elements...>
+    // Builtin.TheTupleType has a single pack generic parameter: <each Element>
     auto *genericParam = GenericTypeParamDecl::createImplicit(
-        tupleDecl->getDeclContext(), ctx.Id_Elements, /*depth*/ 0, /*index*/ 0,
+        tupleDecl->getDeclContext(), ctx.Id_Element, /*depth*/ 0, /*index*/ 0,
         /*isParameterPack*/ true);
 
     return GenericParamList::create(ctx, SourceLoc(), genericParam,
@@ -3376,6 +3456,21 @@ GenericParamListRequest::evaluate(Evaluator &evaluator, GenericContext *value) c
     if (!nominal) {
       return nullptr;
     }
+
+    // For a tuple extension, the generic parameter list comes from the
+    // extended type alias.
+    if (isa<BuiltinTupleDecl>(nominal)) {
+      if (auto *extendedTypeRepr = ext->getExtendedTypeRepr()) {
+        auto *genericParams = createTupleExtensionGenericParams(
+            ctx, ext, extendedTypeRepr);
+        if (genericParams)
+          return genericParams;
+
+        // Otherwise, just clone the generic parameter list of the
+        // Builtin.TheTupleType. We'll diagnose later.
+      }
+    }
+
     auto *genericParams = createExtensionGenericParams(ctx, ext, nominal);
 
     // Protocol extensions need an inheritance clause due to how name lookup
@@ -3461,40 +3556,19 @@ GenericParamListRequest::evaluate(Evaluator &evaluator, GenericContext *value) c
       parsedGenericParams->getRAngleLoc());
 }
 
-void swift::findMacroForCustomAttr(CustomAttr *attr, DeclContext *dc,
-                                   llvm::TinyPtrVector<ValueDecl *> &macros) {
-  auto *identTypeRepr = dyn_cast_or_null<IdentTypeRepr>(attr->getTypeRepr());
-  if (!identTypeRepr)
-    return;
-
-  // Look for macros at module scope. They can only occur at module scope, and
-  // we need to be sure not to trigger name lookup into type contexts along
-  // the way.
-  auto moduleScopeDC = dc->getModuleScopeContext();
-  ASTContext &ctx = moduleScopeDC->getASTContext();
-  UnqualifiedLookupDescriptor descriptor(
-      identTypeRepr->getNameRef(), moduleScopeDC
-  );
-  auto lookup = evaluateOrDefault(
-      ctx.evaluator, UnqualifiedLookupRequest{descriptor}, {});
-  for (const auto &result : lookup.allResults()) {
-    // Only keep attached macros, which can be spelled as custom attributes.
-    if (auto macro = dyn_cast<MacroDecl>(result.getValueDecl()))
-      if (isAttachedMacro(macro->getMacroRoles()))
-        macros.push_back(macro);
-  }
-}
-
 NominalTypeDecl *
 CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
                                    CustomAttr *attr, DeclContext *dc) const {
   // Look for names at module scope, so we don't trigger name lookup for
   // nested scopes. At this point, we're looking to see whether there are
   // any suitable macros.
-  llvm::TinyPtrVector<ValueDecl *> macros;
-  findMacroForCustomAttr(attr, dc, macros);
-  if (!macros.empty())
-    return nullptr;
+  if (auto *identTypeRepr =
+          dyn_cast_or_null<IdentTypeRepr>(attr->getTypeRepr())) {
+    auto macros = namelookup::lookupMacros(
+        dc, identTypeRepr->getNameRef(), getAttachedMacroRoles());
+    if (!macros.empty())
+      return nullptr;
+  }
 
   // Find the types referenced by the custom attribute.
   auto &ctx = dc->getASTContext();
@@ -3510,6 +3584,7 @@ CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
   SmallVector<ModuleDecl *, 2> modulesFound;
   bool anyObject = false;
   auto nominals = resolveTypeDeclsToNominal(evaluator, ctx, decls,
+                                            ResolveToNominalOptions(),
                                             modulesFound, anyObject);
   if (nominals.size() == 1 && !isa<ProtocolDecl>(nominals.front()))
     return nominals.front();
@@ -3527,6 +3602,7 @@ CustomAttrNominalRequest::evaluate(Evaluator &evaluator,
             identTypeRepr->getNameRef(), identTypeRepr->getLoc(), dc,
             LookupOuterResults::Included);
         nominals = resolveTypeDeclsToNominal(evaluator, ctx, decls,
+                                             ResolveToNominalOptions(),
                                              modulesFound, anyObject);
         if (nominals.size() == 1 && !isa<ProtocolDecl>(nominals.front())) {
           auto nominal = nominals.front();
@@ -3576,16 +3652,17 @@ void swift::getDirectlyInheritedNominalTypeDecls(
   // Resolve those type declarations to nominal type declarations.
   SmallVector<ModuleDecl *, 2> modulesFound;
   auto nominalTypes
-    = resolveTypeDeclsToNominal(ctx.evaluator, ctx, referenced, modulesFound,
-                                anyObject);
+    = resolveTypeDeclsToNominal(ctx.evaluator, ctx, referenced,
+                                ResolveToNominalOptions(),
+                                modulesFound, anyObject);
 
   // Dig out the source location
   // FIXME: This is a hack. We need cooperation from
   // InheritedDeclsReferencedRequest to make this work.
   SourceLoc loc;
   SourceLoc uncheckedLoc;
-  if (TypeRepr *typeRepr = typeDecl ? typeDecl->getInherited()[i].getTypeRepr()
-                                    : extDecl->getInherited()[i].getTypeRepr()){
+  auto inheritedTypes = InheritedTypes(decl);
+  if (TypeRepr *typeRepr = inheritedTypes.getTypeRepr(i)) {
     loc = typeRepr->getLoc();
     uncheckedLoc = typeRepr->findUncheckedAttrLoc();
   }
@@ -3600,17 +3677,15 @@ SmallVector<InheritedNominalEntry, 4>
 swift::getDirectlyInheritedNominalTypeDecls(
     llvm::PointerUnion<const TypeDecl *, const ExtensionDecl *> decl,
     bool &anyObject) {
-  auto typeDecl = decl.dyn_cast<const TypeDecl *>();
-  auto extDecl = decl.dyn_cast<const ExtensionDecl *>();
+  auto inheritedTypes = InheritedTypes(decl);
 
   // Gather results from all of the inherited types.
-  unsigned numInherited = typeDecl ? typeDecl->getInherited().size()
-                                   : extDecl->getInherited().size();
   SmallVector<InheritedNominalEntry, 4> result;
-  for (unsigned i : range(numInherited)) {
+  for (unsigned i : inheritedTypes.getIndices()) {
     getDirectlyInheritedNominalTypeDecls(decl, i, result, anyObject);
   }
 
+  auto *typeDecl = decl.dyn_cast<const TypeDecl *>();
   auto *protoDecl = dyn_cast_or_null<ProtocolDecl>(typeDecl);
   if (protoDecl == nullptr)
     return result;
@@ -3764,8 +3839,9 @@ ProtocolDecl *ImplementsAttrProtocolRequest::evaluate(
   SmallVector<ModuleDecl *, 2> modulesFound;
   bool anyObject = false;
   auto nominalTypes
-    = resolveTypeDeclsToNominal(evaluator, ctx, referenced, modulesFound,
-                                anyObject);
+    = resolveTypeDeclsToNominal(evaluator, ctx, referenced,
+                                ResolveToNominalOptions(),
+                                modulesFound, anyObject);
 
   if (nominalTypes.empty())
     return nullptr;
@@ -4030,6 +4106,7 @@ void swift::simple_display(llvm::raw_ostream &out, NLOptions options) {
     FLAG(NL_RemoveOverridden)
     FLAG(NL_IgnoreAccessControl)
     FLAG(NL_OnlyTypes)
+    FLAG(NL_OnlyMacros)
     FLAG(NL_IncludeAttributeImplements)
 #undef FLAG
   };

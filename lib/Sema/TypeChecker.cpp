@@ -241,20 +241,13 @@ void swift::bindExtensions(ModuleDecl &mod) {
   // typeCheckDecl().
 }
 
-static void typeCheckDelayedFunctions(SourceFile &SF) {
-  unsigned currentFunctionIdx = 0;
-
-  while (currentFunctionIdx < SF.DelayedFunctions.size()) {
-    auto *AFD = SF.DelayedFunctions[currentFunctionIdx];
-    assert(!AFD->getDeclContext()->isLocalContext());
-    (void) AFD->getTypecheckedBody();
-    ++currentFunctionIdx;
+void swift::performTypeChecking(SourceFile &SF) {
+  if (SF.getASTContext().TypeCheckerOpts.EnableLazyTypecheck) {
+    // Skip eager type checking. Instead, let later stages of compilation drive
+    // type checking as needed through request evaluation.
+    return;
   }
 
-  SF.DelayedFunctions.clear();
-}
-
-void swift::performTypeChecking(SourceFile &SF) {
   return (void)evaluateOrDefault(SF.getASTContext().evaluator,
                                  TypeCheckSourceFileRequest{&SF}, {});
 }
@@ -306,11 +299,11 @@ TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
         }
       }
     }
-
-    typeCheckDelayedFunctions(*SF);
+    SF->typeCheckDelayedFunctions();
   }
 
   diagnoseUnnecessaryPreconcurrencyImports(*SF);
+  diagnoseUnnecessaryPublicImports(*SF);
 
   // Check to see if there are any inconsistent imports.
   evaluateOrDefault(
@@ -323,7 +316,7 @@ TypeCheckSourceFileRequest::evaluate(Evaluator &eval, SourceFile *SF) const {
       CheckInconsistentSPIOnlyImportsRequest{SF},
       {});
 
-  if (!Ctx.LangOpts.isSwiftVersionAtLeast(6)) {
+  if (!Ctx.LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
     evaluateOrDefault(
       Ctx.evaluator,
       CheckInconsistentAccessLevelOnImport{SF},
@@ -555,7 +548,7 @@ Expr *swift::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE, DeclContext *Contex
 }
 
 void TypeChecker::checkForForbiddenPrefix(ASTContext &C, DeclBaseName Name) {
-  if (C.TypeCheckerOpts.DebugForbidTypecheckPrefix.empty())
+  if (C.TypeCheckerOpts.DebugForbidTypecheckPrefixes.empty())
     return;
 
   // Don't touch special names or empty names.
@@ -563,8 +556,10 @@ void TypeChecker::checkForForbiddenPrefix(ASTContext &C, DeclBaseName Name) {
     return;
 
   StringRef Str = Name.getIdentifier().str();
-  if (Str.startswith(C.TypeCheckerOpts.DebugForbidTypecheckPrefix)) {
-    llvm::report_fatal_error(Twine("forbidden typecheck occurred: ") + Str);
+  for (auto forbiddenPrefix : C.TypeCheckerOpts.DebugForbidTypecheckPrefixes) {
+    if (Str.startswith(forbiddenPrefix)) {
+      llvm::report_fatal_error(Twine("forbidden typecheck occurred: ") + Str);
+    }
   }
 }
 

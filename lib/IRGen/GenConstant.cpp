@@ -218,7 +218,7 @@ static BuiltinInst *getOffsetSubtract(const TupleExtractInst *TE, SILModule &M) 
     return nullptr;
 
   auto *overflowFlag = dyn_cast<IntegerLiteralInst>(BI->getArguments()[2]);
-  if (!overflowFlag || !overflowFlag->getValue().isNullValue())
+  if (!overflowFlag || !overflowFlag->getValue().isZero())
     return nullptr;
 
   return BI;
@@ -273,6 +273,14 @@ Explosion irgen::emitConstantValue(IRGenModule &IGM, SILValue operand,
                                      irgen::getPhysicalTupleElementStructIndex,
                                      flatten);
   } else if (auto *ei = dyn_cast<EnumInst>(operand)) {
+    auto &strategy = getEnumImplStrategy(IGM, ei->getType());
+    if (strategy.emitPayloadDirectlyIntoConstant()) {
+      if (ei->hasOperand()) {
+        return emitConstantValue(IGM, ei->getOperand(), flatten);
+      }
+      return Explosion();
+    }
+
     Explosion data;
     if (ei->hasOperand()) {
       data = emitConstantValue(IGM, ei->getOperand(), /*flatten=*/ true);
@@ -282,10 +290,9 @@ Explosion irgen::emitConstantValue(IRGenModule &IGM, SILValue operand,
     // arguments to the enum are constant, the builder never has to emit an
     // instruction. Instead it can constant fold everything and just returns
     // the final constant.
-    Explosion out;
     IRBuilder builder(IGM.getLLVMContext(), false);
-    getEnumImplStrategy(IGM, ei->getType())
-      .emitValueInjection(IGM, builder, ei->getElement(), data, out);
+    Explosion out;
+    strategy.emitValueInjection(IGM, builder, ei->getElement(), data, out);
     return replaceUnalignedIntegerValues(IGM, std::move(out));
   } else if (auto *ILI = dyn_cast<IntegerLiteralInst>(operand)) {
     return emitConstantInt(IGM, ILI);
@@ -301,6 +308,10 @@ Explosion irgen::emitConstantValue(IRGenModule &IGM, SILValue operand,
       case BuiltinValueKind::PtrToInt: {
         auto *ptr = emitConstantValue(IGM, args[0]).claimNextConstant();
         return llvm::ConstantExpr::getPtrToInt(ptr, IGM.IntPtrTy);
+      }
+      case BuiltinValueKind::IntToPtr: {
+        auto *num = emitConstantValue(IGM, args[0]).claimNextConstant();
+        return llvm::ConstantExpr::getIntToPtr(num, IGM.Int8PtrTy);
       }
       case BuiltinValueKind::ZExtOrBitCast: {
         auto *val = emitConstantValue(IGM, args[0]).claimNextConstant();
@@ -336,7 +347,7 @@ Explosion irgen::emitConstantValue(IRGenModule &IGM, SILValue operand,
     return llvm::ConstantExpr::getIntToPtr(val, sTy);
 
   } else if (auto *CFI = dyn_cast<ConvertFunctionInst>(operand)) {
-    return emitConstantValue(IGM, CFI->getOperand());
+    return emitConstantValue(IGM, CFI->getOperand(), flatten);
 
   } else if (auto *T2TFI = dyn_cast<ThinToThickFunctionInst>(operand)) {
     SILType type = operand->getType();
@@ -375,6 +386,20 @@ Explosion irgen::emitConstantValue(IRGenModule &IGM, SILValue operand,
     llvm::Type *ty = IGM.getTypeInfo(FRI->getType()).getStorageType();
     fnPtr = llvm::ConstantExpr::getBitCast(fnPtr, ty);
     return fnPtr;
+  } else if (auto *gAddr = dyn_cast<GlobalAddrInst>(operand)) {
+    SILGlobalVariable *var = gAddr->getReferencedGlobal();
+    auto &ti = IGM.getTypeInfo(var->getLoweredType());
+    auto expansion = IGM.getResilienceExpansionForLayout(var);
+    assert(ti.isFixedSize(expansion));
+    if (ti.isKnownEmpty(expansion)) {
+      return llvm::ConstantPointerNull::get(IGM.OpaquePtrTy);
+    }
+
+    Address addr = IGM.getAddrOfSILGlobalVariable(var, ti, NotForDefinition);
+    return addr.getAddress();
+  } else if (auto *atp = dyn_cast<AddressToPointerInst>(operand)) {
+    auto *val = emitConstantValue(IGM, atp->getOperand()).claimNextConstant();
+    return val;
   } else {
     llvm_unreachable("Unsupported SILInstruction in static initializer!");
   }

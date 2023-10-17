@@ -6,6 +6,7 @@
 
 // RUN: %target-swift-frontend -scan-dependencies -module-cache-path %t/clang-module-cache %s -o %t/deps.json -I %S/../ScanDependencies/Inputs/CHeaders -I %S/../ScanDependencies/Inputs/Swift -emit-dependencies -emit-dependencies-path %t/deps.d -import-objc-header %S/../ScanDependencies/Inputs/CHeaders/Bridging.h -swift-version 4 -cache-compile-job -cas-path %t/cas
 // Check the contents of the JSON output
+// RUN: %validate-json %t/deps.json &>/dev/null
 // RUN: %FileCheck -check-prefix CHECK -check-prefix CHECK_NO_CLANG_TARGET %s < %t/deps.json
 
 // Check the contents of the JSON output
@@ -15,11 +16,13 @@
 // RUN: %FileCheck %s -check-prefix CHECK-MAKE-DEPS < %t/deps.d
 
 // RUN: %target-swift-frontend -scan-dependencies -test-dependency-scan-cache-serialization -module-cache-path %t/clang-module-cache %s -o %t/deps.json -I %S/../ScanDependencies/Inputs/CHeaders -I %S/../ScanDependencies/Inputs/Swift -import-objc-header %S/../ScanDependencies/Inputs/CHeaders/Bridging.h -swift-version 4 -cache-compile-job -cas-path %t/cas
+// RUN: %validate-json %t/deps.json &>/dev/null
 // RUN: %FileCheck -check-prefix CHECK -check-prefix CHECK_NO_CLANG_TARGET %s < %t/deps.json
 
 // Ensure that scanning with `-clang-target` makes sure that Swift modules' respective PCM-dependency-build-argument sets do not contain target triples.
 // RUN: %target-swift-frontend -scan-dependencies -module-cache-path %t/clang-module-cache %s -o %t/deps_clang_target.json -I %S/../ScanDependencies/Inputs/CHeaders -I %S/../ScanDependencies/Inputs/Swift -import-objc-header %S/../ScanDependencies/Inputs/CHeaders/Bridging.h -swift-version 4 -clang-target %target-cpu-apple-macosx10.14 -cache-compile-job -cas-path %t/cas
 // Check the contents of the JSON output
+// RUN: %validate-json %t/deps_clang_target.json &>/dev/null
 // RUN: %FileCheck -check-prefix CHECK_CLANG_TARGET %s < %t/deps_clang_target.json
 
 /// check cas-fs content
@@ -27,6 +30,10 @@
 // RUN: llvm-cas --cas %t/cas --ls-tree-recursive @%t/E_fs.casid | %FileCheck %s -check-prefix FS_ROOT_E
 // RUN: %S/Inputs/SwiftDepsExtractor.py %t/deps.json clang:F casFSRootID > %t/F_fs.casid
 // RUN: llvm-cas --cas %t/cas --ls-tree-recursive @%t/F_fs.casid | %FileCheck %s -check-prefix FS_ROOT_F
+
+/// make sure the number of CASFS is correct. 10 entries with 2 line each + 1 extra bracket
+// RUN: NUM_CMDS=$(%S/Inputs/SwiftDepsExtractor.py %t/deps.json deps commandLine | wc -l)
+// RUN: if [ ! $NUM_CMDS -eq 21 ]; then echo "wrong number of CASFS from scanning"; exit 1; fi
 
 // FS_ROOT_E-DAG: E.swiftinterface
 // FS_ROOT_E-DAG: SDKSettings.json
@@ -55,10 +62,8 @@ import SubE
 // CHECK-NEXT: module_deps.swift
 // CHECK-NEXT: ],
 // CHECK-NEXT: "directDependencies": [
-// CHECK-DAG:     "swift": "A"
 // CHECK-DAG:     "clang": "C"
 // CHECK-DAG:     "swift": "E"
-// CHECK-DAG:     "swift": "F"
 // CHECK-DAG:     "swift": "G"
 // CHECK-DAG:     "swift": "SubE"
 // CHECK-DAG:     "swift": "Swift"
@@ -85,6 +90,10 @@ import SubE
 // CHECK: "moduleDependencies": [
 // CHECK-NEXT: "F"
 // CHECK-NEXT: ]
+
+// CHECK: "swiftOverlayDependencies": [
+// CHECK-DAG:     "swift": "A"
+// CHECK-DAG:     "swift": "F"
 
 /// --------Swift module A
 // CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}A-{{.*}}.swiftmodule",
@@ -150,20 +159,6 @@ import SubE
 // CHECK: "moduleInterfacePath"
 // CHECK-SAME: E.swiftinterface
 
-/// --------Swift module Swift
-// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}Swift-{{.*}}.swiftmodule",
-
-// CHECK: directDependencies
-// CHECK-NEXT: {
-// CHECK-NEXT: "clang": "SwiftShims"
-
-/// --------Clang module SwiftShims
-// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}SwiftShims-{{.*}}.pcm",
-// CHECK: "contextHash": "[[SHIMS_CONTEXT:.*]]",
-// CHECK: "-o"
-// CHECK-NEXT: SwiftShims-{{.*}}[[SHIMS_CONTEXT]].pcm
-// CHECK-NO-SEARCH-PATHS-NOT: "-prebuilt-module-cache-path"
-
 /// --------Clang module C
 // CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}C-{{.*}}.pcm",
 
@@ -196,3 +191,17 @@ import SubE
 // CHECK-MAKE-DEPS-SAME: Bridging.h
 // CHECK-MAKE-DEPS-SAME: BridgingOther.h
 // CHECK-MAKE-DEPS-SAME: module.modulemap
+
+/// --------Swift module Swift
+// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}Swift-{{.*}}.swiftmodule",
+
+// CHECK: directDependencies
+// CHECK-NEXT: {
+// CHECK-NEXT: "clang": "SwiftShims"
+
+/// --------Clang module SwiftShims
+// CHECK-LABEL: "modulePath": "{{.*}}{{/|\\}}SwiftShims-{{.*}}.pcm",
+// CHECK: "contextHash": "[[SHIMS_CONTEXT:.*]]",
+// CHECK: "-o"
+// CHECK-NEXT: SwiftShims-{{.*}}[[SHIMS_CONTEXT]].pcm
+// CHECK-NO-SEARCH-PATHS-NOT: "-prebuilt-module-cache-path"

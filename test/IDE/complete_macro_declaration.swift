@@ -1,13 +1,12 @@
 // REQUIRES: swift_swift_parser
-// RUN: %empty-directory(%t)
-// RUN: %target-swift-ide-test -batch-code-completion -source-filename %s -filecheck %raw-FileCheck -completion-output-dir %t
+// RUN: %batch-code-completion
 
 let globalVar = 1
 macro expect(file: Int = #^DEFAULT_ARG^#) = #externalMacro(module: "MyModule", type: "MyMacro")
 // DEFAULT_ARG: Decl[GlobalVar]/CurrModule/TypeRelation[Convertible]: globalVar[#Int#]; name=globalVar
 
 @freestanding(expression)
-macro externalMacro() = ##^EXTERNAL_MACRO^#
+macro otherExternalMacro() = ##^EXTERNAL_MACRO^#
 // EXTERNAL_MACRO: Decl[Macro]/OtherModule[Swift]/IsSystem: externalMacro({#module: String#}, {#type: String#})[#T#]; name=externalMacro(module:type:)
 
 @freestanding(expression)

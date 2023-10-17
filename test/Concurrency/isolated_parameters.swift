@@ -1,5 +1,8 @@
-// RUN: %target-typecheck-verify-swift  -disable-availability-checking -warn-concurrency
+// RUN: %target-swift-frontend  -disable-availability-checking -warn-concurrency %s -emit-sil -o /dev/null -verify -verify-additional-prefix complete-
+// RUN: %target-swift-frontend  -disable-availability-checking -warn-concurrency %s -emit-sil -o /dev/null -verify -enable-experimental-feature SendNonSendable
+
 // REQUIRES: concurrency
+// REQUIRES: asserts
 
 @available(SwiftStdlib 5.1, *)
 actor A {
@@ -145,6 +148,7 @@ struct S: P {
 func checkConformer(_ s: S, _ p: any P, _ ma: MyActor) async {
   s.m(thing: ma)
   await p.m(thing: ma)
+  // expected-complete-warning@-1 {{passing argument of non-sendable type 'any P' into actor-isolated context may introduce data races}}
 }
 
 
@@ -315,3 +319,41 @@ func isolatedClosures() {
     a.f()
   }
 }
+
+// Test case for https://github.com/apple/swift/issues/62568
+func execute<ActorType: Actor>(
+  on isolatedActor: isolated ActorType,
+  task: @escaping @Sendable (isolated ActorType) -> Void)
+{
+  // Compiler correctly allows this task to execute synchronously.
+  task(isolatedActor)
+  // Start a task that inherits the current execution context (i.e. that of the isolatedActor)
+  Task {
+    // 'await' is not not necessary because 'task' is synchronous.
+    task(isolatedActor)
+  }
+}
+
+actor ProtectsDictionary {
+  var dictionary: [String: String] = ["A": "B"]
+}
+
+func getValues(
+  forKeys keys: [String],
+  from actor: isolated ProtectsDictionary
+) -> [String?] {
+  // A non-escaping, synchronous closure cannot cross isolation
+  // boundaries; it should be isolated to 'actor'.
+  keys.map { key in
+    actor.dictionary[key]
+  }
+}
+
+func isolated_generic_bad_1<T>(_ t: isolated T) {}
+// expected-error@-1 {{'isolated' parameter 'T' must conform to 'Actor' or 'DistributedActor' protocol}}
+func isolated_generic_bad_2<T: Equatable>(_ t: isolated T) {}
+// expected-error@-1 {{'isolated' parameter 'T' must conform to 'Actor' or 'DistributedActor' protocol}}
+func isolated_generic_bad_3<T: AnyActor>(_ t: isolated T) {}
+// expected-error@-1 {{'isolated' parameter 'T' must conform to 'Actor' or 'DistributedActor' protocol}}
+
+func isolated_generic_ok_1<T: Actor>(_ t: isolated T) {}

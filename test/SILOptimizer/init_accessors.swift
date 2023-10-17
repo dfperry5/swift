@@ -1,8 +1,8 @@
-// RUN: %target-swift-frontend -enable-experimental-feature InitAccessors -primary-file %s -Onone -emit-sil \
+// RUN: %target-swift-frontend -primary-file %s -Onone -emit-sil \
 // RUN:   -Xllvm -sil-print-after=raw-sil-inst-lowering \
 // RUN:   -o /dev/null -module-name init_accessors 2>&1 | %FileCheck %s
 
-// REQUIRES: asserts
+class NSObject {}
 
 struct TestInit {
   var x: Int
@@ -33,7 +33,8 @@ struct TestInit {
     // CHECK-NEXT: [[FULL_ELT_1:%.*]] = tuple_element_addr [[FULL_ACCESS]] : $*(Int, Int), 1
     // CHECK-NEXT: store [[Y_VAL]] to [trivial] [[FULL_ELT_1]] : $*Int
     // CHECK-NEXT: end_access [[FULL_ACCESS]] : $*(Int, Int)
-    init(initialValue) initializes(y, full) accesses(x) {
+    @storageRestrictions(initializes: y, full, accesses: x)
+    init(initialValue) {
       self.y = initialValue.1
       self.full = (self.x, self.y)
     }
@@ -63,7 +64,8 @@ struct TestSetter {
   var y: Int
 
   var point: (Int, Int) {
-    init(initialValue) accesses(x, y) {
+    @storageRestrictions(accesses: x, y)
+    init(initialValue) {
     }
 
     get { (x, y) }
@@ -71,9 +73,12 @@ struct TestSetter {
   }
 
   // CHECK-LABEL: sil hidden [ossa] @$s14init_accessors10TestSetterV1x1yACSi_SitcfC : $@convention(method) (Int, Int, @thin TestSetter.Type) -> TestSetter
-  // CHECK: [[SETTER_REF:%.*]] = function_ref @$s14init_accessors10TestSetterV5pointSi_Sitvs : $@convention(method) (Int, Int, @inout TestSetter) -> ()
-  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER_REF]]([[SELF_VALUE:%.*]]) : $@convention(method) (Int, Int, @inout TestSetter) -> ()
-  // CHECK: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@callee_guaranteed (Int, Int) -> ()
+  // CHECK: [[INIT_ACCESSOR:%.*]] = function_ref @$s14init_accessors10TestSetterV5pointSi_Sitvi : $@convention(thin) (Int, Int, @inout Int, @inout Int) -> ()
+  // CHECK: [[SELF:%.*]] = begin_access [modify] [dynamic] %14 : $*TestSetter
+  // CHECK-NEXT: ([[X:%.*]], [[Y:%.*]]) = destructure_tuple {{.*}} : $(Int, Int)
+  // CHECK-NEXT: [[X_REF:%.*]] = struct_element_addr [[SELF]] : $*TestSetter, #TestSetter.x
+  // CHECK-NEXT: [[Y_REF:%.*]] = struct_element_addr [[SELF]] : $*TestSetter, #TestSetter.y
+  // CHECK-NEXT: {{.*}} = apply [[INIT_ACCESSOR]]([[X]], [[Y]], [[X_REF]], [[Y_REF]]) : $@convention(thin) (Int, Int, @inout Int, @inout Int) -> ()
   init(x: Int, y: Int) {
     self.x = x
     self.y = y
@@ -86,7 +91,8 @@ struct TestInitThenSetter {
   var y: Int
 
   var point: (Int, Int) {
-    init(initialValue) initializes(x, y) {
+    @storageRestrictions(initializes: x, y)
+    init(initialValue) {
       self.x = initialValue.0
       self.y = initialValue.1
     }
@@ -102,9 +108,9 @@ struct TestInitThenSetter {
   // CHECK: {{.*}} = apply [[INIT_ACCESSOR]]([[X_REF]], [[Y_REF]], {{.*}}) : $@convention(thin) (Int, Int) -> (@out Int, @out Int)
   //
   // CHECK: [[SETTER_REF:%.*]] = function_ref @$s14init_accessors18TestInitThenSetterV5pointSi_Sitvs : $@convention(method) (Int, Int, @inout TestInitThenSetter) -> ()
-  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER_REF]]([[SELF_VALUE:%.*]]) : $@convention(method) (Int, Int, @inout TestInitThenSetter) -> ()
+  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [on_stack] [[SETTER_REF]]([[SELF_VALUE:%.*]]) : $@convention(method) (Int, Int, @inout TestInitThenSetter) -> ()
   // CHECK: ([[ZERO_X:%.*]], [[ZERO_Y:%.*]]) = destructure_tuple {{.*}} : $(Int, Int)
-  // CHECK: {{.*}} = apply [[SETTER_CLOSURE]]([[ZERO_X]], [[ZERO_Y]]) : $@callee_guaranteed (Int, Int) -> ()
+  // CHECK: {{.*}} = apply [[SETTER_CLOSURE]]([[ZERO_X]], [[ZERO_Y]]) : $@noescape @callee_guaranteed (Int, Int) -> ()
   init(x: Int, y: Int) {
     self.point = (x, y)
 
@@ -119,7 +125,8 @@ struct TestPartialInt {
   var y: Int
 
   var pointX: Int {
-    init(newValue) initializes(x) {
+    @storageRestrictions(initializes: x)
+    init(newValue) {
       self.x = newValue
     }
 
@@ -128,7 +135,8 @@ struct TestPartialInt {
   }
 
   var pointY: Int {
-    init(newValue) initializes(y) {
+    @storageRestrictions(initializes: y)
+    init(newValue) {
       self.y = newValue
     }
 
@@ -148,13 +156,13 @@ struct TestPartialInt {
   //
   // CHECK: [[BUILTIN_ONE:%.*]] = integer_literal $Builtin.IntLiteral, 1
   // CHECK: [[SETTER_REF:%.*]] = function_ref @$s14init_accessors14TestPartialIntV6pointXSivs : $@convention(method) (Int, @inout TestPartialInt) -> ()
-  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER_REF]]({{.*}}) : $@convention(method) (Int, @inout TestPartialInt) -> ()
-  // CHECK-NEXT: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@callee_guaranteed (Int) -> ()
+  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [on_stack] [[SETTER_REF]]({{.*}}) : $@convention(method) (Int, @inout TestPartialInt) -> ()
+  // CHECK-NEXT: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@noescape @callee_guaranteed (Int) -> ()
   //
   // CHECK: [[BUILTIN_TWO:%.*]] = integer_literal $Builtin.IntLiteral, 2
   // CHECK: [[SETTER_REF:%.*]] = function_ref @$s14init_accessors14TestPartialIntV6pointYSivs : $@convention(method) (Int, @inout TestPartialInt) -> ()
-  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER_REF]]({{.*}}) : $@convention(method) (Int, @inout TestPartialInt) -> ()
-  // CHECK-NEXT: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@callee_guaranteed (Int) -> ()
+  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [on_stack] [[SETTER_REF]]({{.*}}) : $@convention(method) (Int, @inout TestPartialInt) -> ()
+  // CHECK-NEXT: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@noescape @callee_guaranteed (Int) -> ()
   init(x: Int, y: Int) {
     // Init
     self.pointX = x
@@ -174,7 +182,8 @@ struct TestNoInitAndInit {
   var y: Int
 
   var pointX: Int {
-    init(initalValue) accesses(x) {
+    @storageRestrictions(accesses: x)
+    init(initalValue) {
     }
 
     get { x }
@@ -182,7 +191,8 @@ struct TestNoInitAndInit {
   }
 
   var pointY: Int {
-    init(initialValue) initializes(y) {
+    @storageRestrictions(initializes: y)
+    init(initialValue) {
       self.y = initialValue
     }
 
@@ -232,7 +242,8 @@ class TestClass {
     // CHECK-NEXT: [[Y_ELT_1:%.*]] = tuple_element_addr [[Y_ACCESS]] : $*(Int, Array<String>), 1
     // CHECK-NEXT: store [[Y_VAL_1]] to [init] [[Y_ELT_1]] : $*Array<String>
     // CHECK-NEXT: end_access [[Y_ACCESS]] : $*(Int, Array<String>)
-    init(initialValue) initializes(x, y) {
+    @storageRestrictions(initializes: x, y)
+    init(initialValue) {
       x = initialValue.0
       y = initialValue.1
     }
@@ -280,7 +291,8 @@ struct TestGeneric<T, U> {
   // CHECK-NEXT: copy_addr [[C_ACCESS]] to [init] [[C_AS_ANY]] : $*U
   // CHECK-NEXT: end_access [[C_ACCESS]] : $*U
   var data: (T, T) {
-    init(initialValue) initializes(a, b) accesses(c) {
+    @storageRestrictions(initializes: a, b, accesses: c)
+    init(initialValue) {
       a = initialValue.0
       b = initialValue.1
       print(c)
@@ -297,8 +309,8 @@ struct TestGeneric<T, U> {
   // CHECK: {{.*}} = apply [[SUBST_INIT_ACCESSOR]]({{.*}}) : $@callee_guaranteed (@in T, @in T, @inout U) -> (@out T, @out T)
   //
   // CHECK: [[SETTER:%.*]] = function_ref @$s14init_accessors11TestGenericV4datax_xtvs : $@convention(method) <τ_0_0, τ_0_1> (@in τ_0_0, @in τ_0_0, @inout TestGeneric<τ_0_0, τ_0_1>) -> ()
-  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER]]<T, U>([[SELF_VALUE:%.*]]) : $@convention(method) <τ_0_0, τ_0_1> (@in τ_0_0, @in τ_0_0, @inout TestGeneric<τ_0_0, τ_0_1>) -> ()
-  // CHECK: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@callee_guaranteed (@in T, @in T) -> ()
+  // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [on_stack] [[SETTER]]<T, U>([[SELF_VALUE:%.*]]) : $@convention(method) <τ_0_0, τ_0_1> (@in τ_0_0, @in τ_0_0, @inout TestGeneric<τ_0_0, τ_0_1>) -> ()
+  // CHECK: {{.*}} = apply [[SETTER_CLOSURE]]({{.*}}) : $@noescape @callee_guaranteed (@in T, @in T) -> ()
   // CHECK-NEXT: end_access [[SELF_VALUE]] : $*TestGeneric<T, U>
   init(a: T, b: T, c: U) {
     self.c = c
@@ -315,7 +327,8 @@ func test_local_with_memberwise() {
     var b: String
 
     var pair: (Int, String) {
-      init(initialValue) initializes(a, b) {
+      @storageRestrictions(initializes: a, b)
+      init(initialValue) {
         a = initialValue.0
         b = initialValue.1
       }
@@ -347,7 +360,8 @@ func test_local_with_memberwise() {
     var _c: C
 
     var a: T {
-      init(initialValue) initializes(_a) {
+      @storageRestrictions(initializes: _a)
+      init(initialValue) {
         _a = initialValue
       }
 
@@ -356,7 +370,8 @@ func test_local_with_memberwise() {
     }
 
     var pair: (String, C) {
-      init(initialValue) initializes(_b, _c) accesses(_a) {
+      @storageRestrictions(initializes: _b, _c, accesses: _a)
+      init(initialValue) {
         _b = initialValue.0
         _c = initialValue.1
         _c.append(_a)
@@ -383,13 +398,38 @@ func test_local_with_memberwise() {
   _ = TestMemberwiseGeneric(a: 1, pair: ("a", [0]))
 }
 
+// CHECK-LABEL: sil private [ossa] @$s14init_accessors023test_type_lowering_for_A9_accessoryyF4TestL_V2fnADyxq_Gq_xc_tcfC : $@convention(method) <T, U> (@owned @callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0) -> @out τ_0_1 for <T, U>, @thin Test<T, U>.Type) -> @owned Test<T, U>
+// CHECK: {{.*}} = function_ref @$s14init_accessors023test_type_lowering_for_A9_accessoryyF4TestL_V2fnyq_xcvi : $@convention(thin) <τ_0_0, τ_0_1> (@owned @callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0) -> @out τ_0_1 for <τ_0_0, τ_0_1>) -> @out Optional<@callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0) -> @out τ_0_1 for <τ_0_0, τ_0_1>>
+func test_type_lowering_for_init_accessor() {
+  struct Test<T, U> {
+    var _fn: ((T) -> U)? = nil
+
+    // CHECK-LABEL: sil private [ossa] @$s14init_accessors023test_type_lowering_for_A9_accessoryyF4TestL_V2fnyq_xcvi : $@convention(thin) <T, U> (@owned @callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0) -> @out τ_0_1 for <T, U>) -> @out Optional<@callee_guaranteed @substituted <τ_0_0, τ_0_1> (@in_guaranteed τ_0_0) -> @out τ_0_1 for <T, U>>
+    var fn: (T) -> U {
+      @storageRestrictions(initializes: _fn)
+      init { _fn = newValue }
+      get { _fn! }
+      set { _fn = newValue }
+    }
+
+    init(fn: @escaping (T) -> U) {
+      self.fn = fn
+    }
+  }
+
+  _ = Test<Int, () -> Void> { _ in
+    return {}
+  } // Ok
+}
+
 func test_assignments() {
   struct Test {
     var _a: Int
     var _b: Int
 
     var a: Int {
-      init(initialValue) initializes(_a) {
+      @storageRestrictions(initializes: _a)
+      init(initialValue) {
         self._a = initialValue
       }
       get { _a }
@@ -397,7 +437,8 @@ func test_assignments() {
     }
 
     var pair: (Int, Int) {
-      init(initialValue) initializes(_a, _b) {
+      @storageRestrictions(initializes: _a, _b)
+      init(initialValue) {
         _a = initialValue.0
         _b = initialValue.1
       }
@@ -417,8 +458,8 @@ func test_assignments() {
     // CHECK: [[B_REF:%.*]] = struct_element_addr {{.*}} : $*Test, #<abstract function>Test._b
     // CHECK-NEXT: store {{.*}} to [trivial] [[B_REF]] : $*Int
     // CHECK: [[SETTER_REF:%.*]] = function_ref @$s14init_accessors16test_assignmentsyyF4TestL_V1aSivs : $@convention(method) (Int, @inout Test) -> ()
-    // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [[SETTER_REF]]([[SELF_VALUE:%.*]]) : $@convention(method) (Int, @inout Test) -> ()
-    // CHECK: {{.*}} = apply [[SETTER_CLOSURE]](%0) : $@callee_guaranteed (Int) -> ()
+    // CHECK-NEXT: [[SETTER_CLOSURE:%.*]] = partial_apply [callee_guaranteed] [on_stack] [[SETTER_REF]]([[SELF_VALUE:%.*]]) : $@convention(method) (Int, @inout Test) -> ()
+    // CHECK: {{.*}} = apply [[SETTER_CLOSURE]](%0) : $@noescape @callee_guaranteed (Int) -> ()
     init(a: Int) {
       self.a = a
       self.a = a
@@ -438,6 +479,34 @@ func test_assignments() {
     init(a: Int, b: Int) {
       self.a = a
       self.pair = (0, b)
+    }
+  }
+}
+
+// rdar://112417250 (Crash with macro expansion on generic NSObject subclass)
+// self is already borrowed within the initializer.
+//
+// CHECK-LABEL: sil private [ossa] @$s14init_accessors8testObjCyyF07GenericD9CSubclassL_CyADyxGxcfc : $@convention(method) <T> (@in T, @owned GenericObjCSubclass<T>) -> @owned GenericObjCSubclass<T> {
+// CHECK: [[BORROW:%.*]] = load_borrow %{{.*}} : $*GenericObjCSubclass<T>
+// CHECK: ref_element_addr [[BORROW]] : $GenericObjCSubclass<T>, #<abstract function>GenericObjCSubclass._value
+// CHECK: apply
+// CHECK: end_borrow [[BORROW]] : $GenericObjCSubclass<T>
+// CHECK-NOT: end_borrow [[BORROW]] : $GenericObjCSubclass<T>
+func testObjC() {
+  class GenericObjCSubclass<T>: NSObject {
+    var _value: T
+
+    var value: T {
+      @storageRestrictions(initializes: _value)
+      init {
+        self._value = newValue
+      }
+      get { _value }
+      set { _value = newValue }
+    }
+
+    init(_ value: T) {
+      self.value = value
     }
   }
 }

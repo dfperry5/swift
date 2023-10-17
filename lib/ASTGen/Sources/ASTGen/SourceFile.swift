@@ -1,7 +1,12 @@
+import CBasicBridging
+import CASTBridging
+
 import SwiftDiagnostics
-import SwiftParser
 import SwiftSyntax
 import SwiftParserDiagnostics
+
+@_spi(ExperimentalLanguageFeatures)
+import SwiftParser
 
 /// Describes a source file that has been "exported" to the C++ part of the
 /// compiler, with enough information to interface with the C++ layer.
@@ -20,15 +25,34 @@ struct ExportedSourceFile {
   let syntax: SourceFileSyntax
 }
 
+extension Parser.ExperimentalFeatures {
+  init(from context: BridgedASTContext?) {
+    self = []
+    guard let context = context else { return }
+
+    func mapFeature(_ bridged: BridgedFeature, to feature: Self) {
+      if ASTContext_langOptsHasFeature(context, bridged) {
+        insert(feature)
+      }
+    }
+    mapFeature(.ThenStatements, to: .thenStatements)
+    mapFeature(.TypedThrows, to: .typedThrows)
+    mapFeature(.DoExpressions, to: .doExpressions)
+  }
+}
+
 /// Parses the given source file and produces a pointer to a new
 /// ExportedSourceFile instance.
 @_cdecl("swift_ASTGen_parseSourceFile")
 public func parseSourceFile(
   buffer: UnsafePointer<UInt8>, bufferLength: Int,
-  moduleName: UnsafePointer<UInt8>, filename: UnsafePointer<UInt8>
+  moduleName: UnsafePointer<UInt8>, filename: UnsafePointer<UInt8>,
+  ctxPtr: UnsafeMutableRawPointer?
 ) -> UnsafeRawPointer {
   let buffer = UnsafeBufferPointer(start: buffer, count: bufferLength)
-  let sourceFile = Parser.parse(source: buffer)
+
+  let ctx = ctxPtr.map { BridgedASTContext(raw: $0) }
+  let sourceFile = Parser.parse(source: buffer, experimentalFeatures: .init(from: ctx))
 
   let exportedPtr = UnsafeMutablePointer<ExportedSourceFile>.allocate(capacity: 1)
   exportedPtr.initialize(
@@ -89,6 +113,8 @@ public func emitParserDiagnostics(
     let diags = ParseDiagnosticsGenerator.diagnostics(
       for: sourceFile.pointee.syntax
     )
+
+    let diagnosticEngine = BridgedDiagnosticEngine(raw: diagEnginePtr)
     for diag in diags {
       // Skip over diagnostics within #if, because we don't know whether
       // we are in an active region or not.
@@ -109,7 +135,7 @@ public func emitParserDiagnostics(
       }
 
       emitDiagnostic(
-        diagEnginePtr: diagEnginePtr,
+        diagnosticEngine: diagnosticEngine,
         sourceFileBuffer: sourceFile.pointee.buffer,
         diagnostic: diag,
         diagnosticSeverity: diagnosticSeverity

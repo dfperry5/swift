@@ -370,7 +370,6 @@ bool SILDeclRef::hasUserWrittenCode() const {
   case Kind::PropertyWrapperInitFromProjectedValue:
   case Kind::EntryPoint:
   case Kind::AsyncEntryPoint:
-  case Kind::RuntimeAttributeGenerator:
     // Implicit decls for these don't splice in user-written code.
     return false;
   }
@@ -512,9 +511,6 @@ static LinkageLimit getLinkageLimit(SILDeclRef constant) {
     // class from which they come, and never get seen externally.
     return Limit::NeverPublic;
 
-  case Kind::RuntimeAttributeGenerator:
-    return Limit::NeverPublic;
-
   case Kind::EntryPoint:
   case Kind::AsyncEntryPoint:
     llvm_unreachable("Already handled");
@@ -542,8 +538,13 @@ SILLinkage SILDeclRef::getDefinitionLinkage() const {
   // The main entry-point is public.
   if (kind == Kind::EntryPoint)
     return SILLinkage::Public;
-  if (kind == Kind::AsyncEntryPoint)
-    return SILLinkage::Hidden;
+  if (kind == Kind::AsyncEntryPoint) {
+    // async main entrypoint is referenced only from @main and
+    // they are in the same SIL module. Hiding this entrypoint
+    // from other object file makes it possible to link multiple
+    // executable targets for SwiftPM testing with -entry-point-function-name
+    return SILLinkage::Private;
+  }
 
   // Calling convention thunks have shared linkage.
   if (isForeignToNativeThunk())
@@ -677,16 +678,6 @@ SILDeclRef SILDeclRef::getMainFileEntryPoint(FileUnit *file) {
   return result;
 }
 
-SILDeclRef SILDeclRef::getRuntimeAttributeGenerator(CustomAttr *attr,
-                                                    ValueDecl *decl) {
-  SILDeclRef result;
-  result.loc = decl;
-  result.kind = Kind::RuntimeAttributeGenerator;
-  result.isRuntimeAccessible = true;
-  result.pointer = attr;
-  return result;
-}
-
 bool SILDeclRef::hasClosureExpr() const {
   return loc.is<AbstractClosureExpr *>()
     && isa<ClosureExpr>(getAbstractClosureExpr());
@@ -734,7 +725,7 @@ bool SILDeclRef::isSetter() const {
 }
 
 AbstractFunctionDecl *SILDeclRef::getAbstractFunctionDecl() const {
-  return dyn_cast<AbstractFunctionDecl>(getDecl());
+  return dyn_cast_or_null<AbstractFunctionDecl>(getDecl());
 }
 
 bool SILDeclRef::isInitAccessor() const {
@@ -1046,11 +1037,6 @@ bool SILDeclRef::isBackDeploymentThunk() const {
          kind == Kind::Allocator;
 }
 
-bool SILDeclRef::isRuntimeAccessibleFunction() const {
-  return isRuntimeAccessible &&
-         (kind == Kind::Func || kind == Kind::RuntimeAttributeGenerator);
-}
-
 /// Use the Clang importer to mangle a Clang declaration.
 static void mangleClangDecl(raw_ostream &buffer,
                             const clang::NamedDecl *clangDecl,
@@ -1068,7 +1054,10 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
     auto *silParameterIndices = autodiff::getLoweredParameterIndices(
         derivativeFunctionIdentifier->getParameterIndices(),
         getDecl()->getInterfaceType()->castTo<AnyFunctionType>());
-    auto *resultIndices = IndexSubset::get(getDecl()->getASTContext(), 1, {0});
+    // FIXME: is this correct in the presence of curried types?
+    auto *resultIndices = autodiff::getFunctionSemanticResultIndices(
+      asAutoDiffOriginalFunction().getAbstractFunctionDecl(),
+      derivativeFunctionIdentifier->getParameterIndices());
     AutoDiffConfig silConfig(
         silParameterIndices, resultIndices,
         derivativeFunctionIdentifier->getDerivativeGenericSignature());
@@ -1227,10 +1216,6 @@ std::string SILDeclRef::mangle(ManglingKind MKind) const {
   case SILDeclRef::Kind::EntryPoint: {
     return getASTContext().getEntryPointFunctionName();
   }
-
-  case SILDeclRef::Kind::RuntimeAttributeGenerator:
-    return mangler.mangleRuntimeAttributeGeneratorEntity(
-        loc.get<ValueDecl *>(), pointer.get<CustomAttr *>(), SKind);
   }
 
   llvm_unreachable("bad entity kind!");
@@ -1600,7 +1585,7 @@ unsigned SILDeclRef::getParameterListCount() const {
 
   // Always uncurried even if the underlying function is curried.
   if (kind == Kind::DefaultArgGenerator || kind == Kind::EntryPoint ||
-      kind == Kind::AsyncEntryPoint || kind == Kind::RuntimeAttributeGenerator)
+      kind == Kind::AsyncEntryPoint)
     return 1;
 
   auto *vd = getDecl();

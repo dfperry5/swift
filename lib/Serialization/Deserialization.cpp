@@ -455,6 +455,22 @@ getActualDefaultArgKind(uint8_t raw) {
   return llvm::None;
 }
 
+static llvm::Optional<swift::ActorIsolation::Kind>
+getActualActorIsolationKind(uint8_t raw) {
+  switch (static_cast<serialization::ActorIsolation>(raw)) {
+#define CASE(X) \
+  case serialization::ActorIsolation::X: \
+    return swift::ActorIsolation::Kind::X;
+  CASE(Unspecified)
+  CASE(ActorInstance)
+  CASE(Nonisolated)
+  CASE(GlobalActor)
+  CASE(GlobalActorUnsafe)
+#undef CASE
+  }
+  return llvm::None;
+}
+
 static llvm::Optional<StableSerializationPath::ExternalPath::ComponentKind>
 getActualClangDeclPathComponentKind(uint64_t raw) {
   switch (static_cast<serialization::ClangDeclPathComponentKind>(raw)) {
@@ -844,13 +860,9 @@ ProtocolConformanceDeserializer::readBuiltinProtocolConformance(
 
   TypeID conformingTypeID;
   DeclID protoID;
-  GenericSignatureID genericSigID;
   unsigned builtinConformanceKind;
-  ArrayRef<uint64_t> data;
   BuiltinProtocolConformanceLayout::readRecord(scratch, conformingTypeID,
-                                               protoID, genericSigID,
-                                               builtinConformanceKind,
-                                               data);
+                                               protoID, builtinConformanceKind);
 
   Type conformingType = MF.getType(conformingTypeID);
 
@@ -859,22 +871,9 @@ ProtocolConformanceDeserializer::readBuiltinProtocolConformance(
     return decl.takeError();
 
   auto proto = cast<ProtocolDecl>(decl.get());
-  auto genericSig = MF.getGenericSignatureChecked(genericSigID);
-  if (!genericSig)
-    return genericSig.takeError();
-
-  // Read the conditional requirements.
-  SmallVector<Requirement, 4> conditionalRequirements;
-  unsigned nextDataIndex = 0;
-  auto error = MF.deserializeGenericRequirementsChecked(
-      data, nextDataIndex, conditionalRequirements);
-  if (error)
-    return std::move(error);
-  if (nextDataIndex != data.size())
-    return MF.diagnoseFatal();
 
   auto conformance = ctx.getBuiltinConformance(
-      conformingType, proto, *genericSig, conditionalRequirements,
+      conformingType, proto,
       static_cast<BuiltinConformanceKind>(builtinConformanceKind));
   return conformance;
 }
@@ -951,9 +950,10 @@ ProtocolConformanceDeserializer::readNormalProtocolConformance(
 
   PrettyStackTraceDecl traceTo("... to", proto);
 
-  auto conformance = ctx.getConformance(conformingType, proto, SourceLoc(), dc,
-                                        ProtocolConformanceState::Incomplete,
-                                        isUnchecked);
+  auto conformance = ctx.getNormalConformance(
+      conformingType, proto, SourceLoc(), dc,
+      ProtocolConformanceState::Incomplete,
+      isUnchecked);
   // Record this conformance.
   if (conformanceEntry.isComplete()) {
     assert(conformanceEntry.get() == conformance);
@@ -3323,9 +3323,9 @@ public:
     // serialized/deserialized there, so the actual Decl doesn't need to store
     // it.
     TrailingWhereClause *trailingWhere = nullptr;
-    auto assocType = MF.createDecl<AssociatedTypeDecl>(
-        DC, SourceLoc(), MF.getIdentifier(nameID), SourceLoc(), trailingWhere,
-        &MF, defaultDefinitionID);
+    auto *assocType = AssociatedTypeDecl::createDeserialized(
+        ctx, DC, SourceLoc(), MF.getIdentifier(nameID), SourceLoc(),
+        trailingWhere, &MF, defaultDefinitionID);
     declOrOffset = assocType;
 
     assert(!assocType->getDeclaredInterfaceType()->hasError() &&
@@ -3422,22 +3422,24 @@ public:
     DeclContextID contextID;
     bool isIUO, isFailable;
     bool isImplicit, isObjC, hasStubImplementation, throws, async;
+    TypeID thrownTypeID;
     GenericSignatureID genericSigID;
     uint8_t storedInitKind, rawAccessLevel;
     DeclID overriddenID;
-    bool overriddenAffectsABI, needsNewVTableEntry, firstTimeRequired;
+    bool overriddenAffectsABI, needsNewTableEntry, firstTimeRequired;
     unsigned numArgNames;
     ArrayRef<uint64_t> argNameAndDependencyIDs;
 
     decls_block::ConstructorLayout::readRecord(scratch, contextID,
                                                isFailable, isIUO, isImplicit,
                                                isObjC, hasStubImplementation,
-                                               async, throws, storedInitKind,
+                                               async, throws, thrownTypeID,
+                                               storedInitKind,
                                                genericSigID,
                                                overriddenID,
                                                overriddenAffectsABI,
                                                rawAccessLevel,
-                                               needsNewVTableEntry,
+                                               needsNewTableEntry,
                                                firstTimeRequired,
                                                numArgNames,
                                                argNameAndDependencyIDs);
@@ -3453,11 +3455,11 @@ public:
         getActualCtorInitializerKind(storedInitKind);
 
     DeclDeserializationError::Flags errorFlags;
-    unsigned numVTableEntries = 0;
+    unsigned numTableEntries = 0;
     if (initKind == CtorInitializerKind::Designated)
       errorFlags |= DeclDeserializationError::DesignatedInitializer;
-    if (needsNewVTableEntry) {
-      numVTableEntries = 1;
+    if (needsNewTableEntry) {
+      numTableEntries = 1;
       DeclAttributes attrs;
       attrs.setRawAttributeChain(DAttrs);
     }
@@ -3477,7 +3479,7 @@ public:
       MF.diagnoseAndConsumeError(overriddenOrError.takeError());
       if (overriddenAffectsABI || !ctx.LangOpts.EnableDeserializationRecovery) {
         return llvm::make_error<OverrideError>(name, errorFlags,
-                                               numVTableEntries);
+                                               numTableEntries);
       }
 
       overridden = nullptr;
@@ -3488,7 +3490,7 @@ public:
       if (!dependency) {
         return llvm::make_error<TypeError>(
             name, takeErrorInfo(dependency.takeError()),
-            errorFlags, numVTableEntries);
+            errorFlags, numTableEntries);
       }
     }
 
@@ -3500,12 +3502,18 @@ public:
     if (declOrOffset.isComplete())
       return declOrOffset;
 
+    auto thrownTypeOrError = MF.getTypeChecked(thrownTypeID);
+    if (!thrownTypeOrError)
+      return thrownTypeOrError.takeError();
+    const auto thrownType = thrownTypeOrError.get();
+
     auto ctor = MF.createDecl<ConstructorDecl>(name, SourceLoc(), isFailable,
                                                /*FailabilityLoc=*/SourceLoc(),
                                                /*Async=*/async,
                                                /*AsyncLoc=*/SourceLoc(),
                                                /*Throws=*/throws,
                                                /*ThrowsLoc=*/SourceLoc(),
+                                               TypeLoc::withoutLoc(thrownType),
                                                /*BodyParams=*/nullptr,
                                                genericParams, parent);
     declOrOffset = ctor;
@@ -3537,8 +3545,6 @@ public:
     if (initKind.has_value())
       ctx.evaluator.cacheOutput(InitKindRequest{ctor},
                                 std::move(initKind.value()));
-    ctx.evaluator.cacheOutput(NeedsNewVTableEntryRequest{ctor},
-                              std::move(needsNewVTableEntry));
 
     ctor->setOverriddenDecl(cast_or_null<ConstructorDecl>(overridden));
     if (auto *overridden = ctor->getOverriddenDecl()) {
@@ -3772,6 +3778,8 @@ public:
     bool isCompileTimeConst;
     uint8_t rawDefaultArg;
     TypeID defaultExprType;
+    uint8_t rawDefaultArgIsolation;
+    TypeID globalActorTypeID;
 
     decls_block::ParamLayout::readRecord(scratch, argNameID, paramNameID,
                                          contextID, rawSpecifier,
@@ -3779,7 +3787,9 @@ public:
                                          isAutoClosure, isIsolated,
                                          isCompileTimeConst,
                                          rawDefaultArg,
-                                         defaultExprType);
+                                         defaultExprType,
+                                         rawDefaultArgIsolation,
+                                         globalActorTypeID);
 
     auto argName = MF.getIdentifier(argNameID);
     auto paramName = MF.getIdentifier(paramNameID);
@@ -3824,6 +3834,29 @@ public:
       if (auto exprType = MF.getType(defaultExprType))
         param->setDefaultExprType(exprType);
 
+      auto isoKind = *getActualActorIsolationKind(rawDefaultArgIsolation);
+      auto globalActor = MF.getType(globalActorTypeID);
+      ActorIsolation isolation;
+      switch (isoKind) {
+      case ActorIsolation::Unspecified:
+      case ActorIsolation::Nonisolated:
+        isolation = ActorIsolation::forUnspecified();
+        break;
+
+      case ActorIsolation::GlobalActor:
+      case ActorIsolation::GlobalActorUnsafe:
+        isolation = ActorIsolation::forGlobalActor(
+            globalActor, isoKind == ActorIsolation::GlobalActorUnsafe);
+        break;
+
+      case ActorIsolation::ActorInstance:
+        llvm_unreachable("default arg cannot be actor instance isolated");
+      }
+
+      ctx.evaluator.cacheOutput(
+          DefaultInitializerIsolation{param},
+          std::move(isolation));
+
       if (!blobData.empty())
         param->setDefaultValueStringRepresentation(blobData);
     }
@@ -3839,6 +3872,7 @@ public:
     uint8_t rawStaticSpelling, rawAccessLevel, rawMutModifier;
     uint8_t rawAccessorKind;
     bool isObjC, hasForcedStaticDispatch, async, throws;
+    TypeID thrownTypeID;
     unsigned numNameComponentsBiased;
     GenericSignatureID genericSigID;
     TypeID resultInterfaceTypeID;
@@ -3846,7 +3880,7 @@ public:
     DeclID associatedDeclID;
     DeclID overriddenID;
     DeclID accessorStorageDeclID;
-    bool overriddenAffectsABI, needsNewVTableEntry, isTransparent;
+    bool overriddenAffectsABI, needsNewTableEntry, isTransparent;
     DeclID opaqueReturnTypeID;
     bool isUserAccessible;
     bool isDistributedThunk;
@@ -3857,7 +3891,7 @@ public:
                                           isStatic, rawStaticSpelling, isObjC,
                                           rawMutModifier,
                                           hasForcedStaticDispatch,
-                                          async, throws,
+                                          async, throws, thrownTypeID,
                                           genericSigID,
                                           resultInterfaceTypeID,
                                           isIUO,
@@ -3865,7 +3899,7 @@ public:
                                           overriddenAffectsABI,
                                           numNameComponentsBiased,
                                           rawAccessLevel,
-                                          needsNewVTableEntry,
+                                          needsNewTableEntry,
                                           opaqueReturnTypeID,
                                           isUserAccessible,
                                           isDistributedThunk,
@@ -3875,7 +3909,7 @@ public:
                                               isStatic, rawStaticSpelling, isObjC,
                                               rawMutModifier,
                                               hasForcedStaticDispatch,
-                                              async, throws,
+                                              async, throws, thrownTypeID,
                                               genericSigID,
                                               resultInterfaceTypeID,
                                               isIUO,
@@ -3884,14 +3918,14 @@ public:
                                               accessorStorageDeclID,
                                               rawAccessorKind,
                                               rawAccessLevel,
-                                              needsNewVTableEntry,
+                                              needsNewTableEntry,
                                               isTransparent,
                                               isDistributedThunk,
                                               nameAndDependencyIDs);
     }
 
     DeclDeserializationError::Flags errorFlags;
-    unsigned numVTableEntries = needsNewVTableEntry ? 1 : 0;
+    unsigned numTableEntries = needsNewTableEntry ? 1 : 0;
 
     // Parse the accessor-specific fields.
     AbstractStorageDecl *storage = nullptr;
@@ -3904,7 +3938,7 @@ public:
         // FIXME: "TypeError" isn't exactly correct for this.
         return llvm::make_error<TypeError>(
             DeclName(), takeErrorInfo(storageResult.takeError()),
-            errorFlags, numVTableEntries);
+            errorFlags, numTableEntries);
       }
 
       if (auto accessorKindResult = getActualAccessorKind(rawAccessorKind))
@@ -3950,7 +3984,7 @@ public:
       if (overriddenAffectsABI || !ctx.LangOpts.EnableDeserializationRecovery) {
         MF.diagnoseAndConsumeError(overriddenOrError.takeError());
         return llvm::make_error<OverrideError>(name, errorFlags,
-                                               numVTableEntries);
+                                               numTableEntries);
       }
       // Pass through deserialization errors.
       if (overriddenOrError.errorIsA<FatalDeserializationError>())
@@ -3965,7 +3999,7 @@ public:
       if (!dependency) {
         return llvm::make_error<TypeError>(
             name, takeErrorInfo(dependency.takeError()),
-            errorFlags, numVTableEntries);
+            errorFlags, numTableEntries);
       }
     }
 
@@ -3992,15 +4026,20 @@ public:
     if (declOrOffset.isComplete())
       return declOrOffset;
 
+    auto thrownTypeOrError = MF.getTypeChecked(thrownTypeID);
+    if (!thrownTypeOrError)
+      return thrownTypeOrError.takeError();
+    const auto thrownType = thrownTypeOrError.get();
+
     FuncDecl *fn;
     if (!isAccessor) {
       fn = FuncDecl::createDeserialized(ctx, staticSpelling.value(), name,
-                                        async, throws, genericParams,
-                                        resultType, DC);
+                                        async, throws, thrownType,
+                                        genericParams, resultType, DC);
     } else {
       auto *accessor = AccessorDecl::createDeserialized(
           ctx, accessorKind, storage, staticSpelling.value(), async, throws,
-          resultType, DC);
+          thrownType, resultType, DC);
       accessor->setIsTransparent(isTransparent);
 
       fn = accessor;
@@ -4057,8 +4096,6 @@ public:
       fn->setImplicit();
     fn->setIsObjC(isObjC);
     fn->setForcedStaticDispatch(hasForcedStaticDispatch);
-    ctx.evaluator.cacheOutput(NeedsNewVTableEntryRequest{fn},
-                              std::move(needsNewVTableEntry));
 
     if (opaqueReturnTypeID) {
       auto declOrError = MF.getDeclChecked(opaqueReturnTypeID);
@@ -4758,7 +4795,7 @@ public:
     uint8_t rawAccessLevel, rawSetterAccessLevel, rawStaticSpelling;
     uint8_t opaqueReadOwnership, readImpl, writeImpl, readWriteImpl;
     unsigned numArgNames, numAccessors;
-    unsigned numVTableEntries;
+    unsigned numTableEntries;
     ArrayRef<uint64_t> argNameAndDependencyIDs;
 
     decls_block::SubscriptLayout::readRecord(scratch, contextID,
@@ -4774,7 +4811,7 @@ public:
                                              rawSetterAccessLevel,
                                              rawStaticSpelling, numArgNames,
                                              opaqueReturnTypeID,
-                                             numVTableEntries,
+                                             numTableEntries,
                                              argNameAndDependencyIDs);
     // Resolve the name ids.
     SmallVector<Identifier, 2> argNames;
@@ -4800,7 +4837,7 @@ public:
 
       DeclDeserializationError::Flags errorFlags;
       return llvm::make_error<OverrideError>(
-          name, errorFlags, numVTableEntries);
+          name, errorFlags, numTableEntries);
     }
 
     for (TypeID dependencyID : argNameAndDependencyIDs) {
@@ -4809,7 +4846,7 @@ public:
         DeclDeserializationError::Flags errorFlags;
         return llvm::make_error<TypeError>(
             name, takeErrorInfo(dependency.takeError()),
-            errorFlags, numVTableEntries);
+            errorFlags, numTableEntries);
       }
     }
 
@@ -5600,33 +5637,27 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
         break;
       }
 
-      case decls_block::Initializes_DECL_ATTR: {
+      case decls_block::StorageRestrictions_DECL_ATTR: {
+        unsigned numInitializesProperties;
         ArrayRef<uint64_t> rawPropertyIDs;
-        serialization::decls_block::InitializesDeclAttrLayout::
-            readRecord(scratch, rawPropertyIDs);
+        serialization::decls_block::StorageRestrictionsDeclAttrLayout::
+            readRecord(scratch, numInitializesProperties, rawPropertyIDs);
 
-        SmallVector<Identifier, 4> properties;
-        for (auto rawID : rawPropertyIDs) {
-          properties.push_back(MF.getIdentifier(rawID));
+        SmallVector<Identifier> initializes;
+        SmallVector<Identifier> accesses;
+
+        for (unsigned i = 0, n = rawPropertyIDs.size(); i != n; ++i) {
+          auto propertyName = MF.getIdentifier(rawPropertyIDs[i]);
+
+          if (i < numInitializesProperties) {
+            initializes.push_back(propertyName);
+          } else {
+            accesses.push_back(propertyName);
+          }
         }
 
-        Attr = InitializesAttr::create(ctx, SourceLoc(), SourceRange(),
-                                       properties);
-        break;
-      }
-
-      case decls_block::Accesses_DECL_ATTR: {
-        ArrayRef<uint64_t> rawPropertyIDs;
-        serialization::decls_block::AccessesDeclAttrLayout::
-            readRecord(scratch, rawPropertyIDs);
-
-        SmallVector<Identifier, 4> properties;
-        for (auto rawID : rawPropertyIDs) {
-          properties.push_back(MF.getIdentifier(rawID));
-        }
-
-        Attr = AccessesAttr::create(ctx, SourceLoc(), SourceRange(),
-                                    properties);
+        Attr = StorageRestrictionsAttr::create(ctx, SourceLoc(), SourceRange(),
+                                               initializes, accesses);
         break;
       }
 
@@ -5817,10 +5848,23 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
       }
 
       case decls_block::Expose_DECL_ATTR: {
+        unsigned kind;
         bool isImplicit;
         serialization::decls_block::ExposeDeclAttrLayout::readRecord(
-            scratch, isImplicit);
-        Attr = new (ctx) ExposeAttr(blobData, isImplicit);
+            scratch, kind, isImplicit);
+        Attr = new (ctx) ExposeAttr(blobData, (ExposureKind)kind, isImplicit);
+        break;
+      }
+
+      case decls_block::Extern_DECL_ATTR: {
+        bool isImplicit;
+        unsigned moduleNameSize, declNameSize;
+        serialization::decls_block::ExternDeclAttrLayout::readRecord(
+            scratch, isImplicit, moduleNameSize, declNameSize);
+        StringRef moduleName = blobData.substr(0, moduleNameSize);
+        blobData = blobData.substr(moduleNameSize);
+        StringRef declName = blobData.substr(0, declNameSize);
+        Attr = new (ctx) ExternAttr(moduleName, declName, isImplicit);
         break;
       }
 
@@ -5907,6 +5951,38 @@ llvm::Error DeclDeserializer::deserializeDeclCommon() {
             ctx, SourceLoc(), SourceRange(),
             static_cast<MacroSyntax>(rawMacroSyntax), SourceLoc(), role, names,
             conformances, SourceLoc(), isImplicit);
+        break;
+      }
+
+      case decls_block::RawLayout_DECL_ATTR: {
+        bool isImplicit;
+        TypeID typeID;
+        uint32_t rawSize;
+        uint8_t rawAlign;
+        serialization::decls_block::RawLayoutDeclAttrLayout::
+          readRecord(scratch, isImplicit, typeID, rawSize, rawAlign);
+        
+        if (typeID) {
+          auto type = MF.getTypeChecked(typeID);
+          if (!type) {
+            return type.takeError();
+          }
+          auto typeRepr = new (ctx) FixedTypeRepr(type.get(), SourceLoc());
+          if (rawAlign == 0) {
+            Attr = new (ctx) RawLayoutAttr(typeRepr,
+                                           SourceLoc(),
+                                           SourceRange());
+            break;
+          } else {
+            Attr = new (ctx) RawLayoutAttr(typeRepr, rawSize,
+                                           SourceLoc(),
+                                           SourceRange());
+            break;
+          }
+        }
+        
+        Attr = new (ctx) RawLayoutAttr(rawSize, rawAlign,
+                                       SourceLoc(), SourceRange());
         break;
       }
 
@@ -6113,6 +6189,10 @@ getActualSILFunctionTypeRepresentation(uint8_t rep) {
   CASE(ObjCMethod)
   CASE(WitnessMethod)
   CASE(CXXMethod)
+  CASE(KeyPathAccessorGetter)
+  CASE(KeyPathAccessorSetter)
+  CASE(KeyPathAccessorEquals)
+  CASE(KeyPathAccessorHash)
 #undef CASE
   default:
     return llvm::None;
@@ -6449,6 +6529,7 @@ detail::function_deserializer::deserialize(ModuleFile &MF,
   TypeID resultID;
   uint8_t rawRepresentation, rawDiffKind;
   bool noescape = false, concurrent, async, throws;
+  TypeID thrownErrorID;
   GenericSignature genericSig;
   TypeID clangTypeID;
   TypeID globalActorTypeID;
@@ -6456,12 +6537,12 @@ detail::function_deserializer::deserialize(ModuleFile &MF,
   if (!isGeneric) {
     decls_block::FunctionTypeLayout::readRecord(
         scratch, resultID, rawRepresentation, clangTypeID, noescape, concurrent,
-        async, throws, rawDiffKind, globalActorTypeID);
+        async, throws, thrownErrorID, rawDiffKind, globalActorTypeID);
   } else {
     GenericSignatureID rawGenericSig;
     decls_block::GenericFunctionTypeLayout::readRecord(
         scratch, resultID, rawRepresentation, concurrent, async, throws,
-        rawDiffKind, globalActorTypeID, rawGenericSig);
+        thrownErrorID, rawDiffKind, globalActorTypeID, rawGenericSig);
     genericSig = MF.getGenericSignature(rawGenericSig);
     clangTypeID = 0;
   }
@@ -6469,6 +6550,15 @@ detail::function_deserializer::deserialize(ModuleFile &MF,
   auto representation = getActualFunctionTypeRepresentation(rawRepresentation);
   if (!representation.has_value())
     return MF.diagnoseFatal();
+
+  Type thrownError;
+  if (thrownErrorID) {
+    auto thrownErrorTy = MF.getTypeChecked(thrownErrorID);
+    if (!thrownErrorTy)
+      return thrownErrorTy.takeError();
+
+    thrownError = thrownErrorTy.get();
+  }
 
   auto diffKind = getActualDifferentiabilityKind(rawDiffKind);
   if (!diffKind.has_value())
@@ -6492,7 +6582,8 @@ detail::function_deserializer::deserialize(ModuleFile &MF,
   }
 
   auto info =
-      FunctionType::ExtInfoBuilder(*representation, noescape, throws, *diffKind,
+      FunctionType::ExtInfoBuilder(*representation, noescape, throws,
+                                   thrownError, *diffKind,
                                    clangFunctionType, globalActor)
           .withConcurrent(concurrent)
           .withAsync(async)
@@ -6966,6 +7057,7 @@ Expected<Type> DESERIALIZE_TYPE(SIL_FUNCTION_TYPE)(
   uint8_t rawRepresentation;
   uint8_t rawDiffKind;
   bool pseudogeneric = false;
+  bool unimplementable;
   bool concurrent;
   bool noescape;
   bool hasErrorResult;
@@ -6980,7 +7072,8 @@ Expected<Type> DESERIALIZE_TYPE(SIL_FUNCTION_TYPE)(
 
   decls_block::SILFunctionTypeLayout::readRecord(
       scratch, concurrent, async, rawCoroutineKind, rawCalleeConvention,
-      rawRepresentation, pseudogeneric, noescape, rawDiffKind, hasErrorResult,
+      rawRepresentation, pseudogeneric, noescape, unimplementable,
+      rawDiffKind, hasErrorResult,
       numParams, numYields, numResults, rawInvocationGenericSig,
       rawInvocationSubs, rawPatternSubs, clangFunctionTypeID, variableData);
 
@@ -7004,6 +7097,7 @@ Expected<Type> DESERIALIZE_TYPE(SIL_FUNCTION_TYPE)(
 
   auto extInfo = SILFunctionType::ExtInfoBuilder(*representation, pseudogeneric,
                                                  noescape, concurrent, async,
+                                                 unimplementable,
                                                  *diffKind, clangFunctionType)
                      .build();
 
@@ -7505,23 +7599,42 @@ ModuleFile::getClangType(ClangTypeID TID) {
   return clangType;
 }
 
-Decl *handleErrorAndSupplyMissingClassMember(ASTContext &context,
-                                             llvm::Error &&error,
-                                             ClassDecl *containingClass) {
+Decl *ModuleFile::handleErrorAndSupplyMissingClassMember(
+    ASTContext &context, llvm::Error &&error,
+    ClassDecl *containingClass) const {
   Decl *suppliedMissingMember = nullptr;
   auto handleMissingClassMember = [&](const DeclDeserializationError &error) {
     if (error.isDesignatedInitializer())
       context.evaluator.cacheOutput(
           HasMissingDesignatedInitializersRequest{containingClass}, true);
-    if (error.getNumberOfVTableEntries() > 0)
+    if (error.getNumberOfTableEntries() > 0)
       containingClass->setHasMissingVTableEntries();
 
     suppliedMissingMember = MissingMemberDecl::create(
         context, containingClass, error.getName(),
-        error.getNumberOfVTableEntries(),
+        error.getNumberOfTableEntries(),
         error.needsFieldOffsetVectorEntry());
   };
-  llvm::handleAllErrors(std::move(error), handleMissingClassMember);
+
+  // Emit the diagnostics/remarks out of the ModularizationError
+  // wrapped in a TypeError (eg. coming from resolveCrossReference),
+  // which is otherwise just dropped but could help better understand
+  // C/C++ interop issues.
+  assert(context.LangOpts.EnableDeserializationRecovery);
+  auto handleModularizationError = [&](ModularizationError &error)
+      -> llvm::Error {
+    if (context.LangOpts.EnableModuleRecoveryRemarks)
+      error.diagnose(this, DiagnosticBehavior::Remark);
+    return llvm::Error::success();
+  };
+  auto handleTypeError = [&](TypeError &typeError) {
+    handleMissingClassMember(typeError);
+    typeError.diagnoseUnderlyingReason(handleModularizationError);
+    if (context.LangOpts.EnableModuleRecoveryRemarks)
+      typeError.diagnose(this);
+  };
+  llvm::handleAllErrors(std::move(error), handleTypeError,
+      handleMissingClassMember);
   return suppliedMissingMember;
 }
 
@@ -7534,12 +7647,12 @@ Decl *handleErrorAndSupplyMissingProtoMember(ASTContext &context,
       [&](const DeclDeserializationError &error) {
         assert(error.needsFieldOffsetVectorEntry() == 0);
 
-        if (error.getNumberOfVTableEntries() > 0)
+        if (error.getNumberOfTableEntries() > 0)
           containingProto->setHasMissingRequirements(true);
 
         suppliedMissingMember = MissingMemberDecl::create(
             context, containingProto, error.getName(),
-            error.getNumberOfVTableEntries(), 0);
+            error.getNumberOfTableEntries(), 0);
       };
   llvm::handleAllErrors(std::move(error), handleMissingProtocolMember);
   return suppliedMissingMember;
@@ -7883,7 +7996,10 @@ void ModuleFile::finishNormalConformance(NormalProtocolConformance *conformance,
           llvm::inconvertibleErrorCode()));
     }
   }
-  conformance->setSignatureConformances(reqConformances);
+
+  for (unsigned index : indices(reqConformances)) {
+    conformance->setAssociatedConformance(index, reqConformances[index]);
+  }
 
   ArrayRef<uint64_t>::iterator rawIDIter = rawIDs.begin() + conformanceCount;
 

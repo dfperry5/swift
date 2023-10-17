@@ -17,28 +17,32 @@
 
 #include "swift/Immediate/Immediate.h"
 #include "ImmediateImpl.h"
+#include "swift/Immediate/SwiftMaterializationUnit.h"
 
-#include "swift/Subsystems.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/AST/IRGenRequests.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/SILGenRequests.h"
+#include "swift/AST/TBDGenRequests.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/IRGen/IRGenPublic.h"
 #include "swift/SILOptimizer/PassManager/Passes.h"
+#include "swift/Subsystems.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Config/config.h"
 #include "llvm/ExecutionEngine/Orc/DebugUtils.h"
+#include "llvm/ExecutionEngine/Orc/EPCIndirectionUtils.h"
 #include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/ObjectTransformLayer.h"
 #include "llvm/ExecutionEngine/Orc/TargetProcess/TargetExecutionUtils.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include "llvm/Support/Path.h"
 
 #define DEBUG_TYPE "swift-immediate"
 
@@ -76,18 +80,6 @@ static void *loadRuntimeLib(StringRef sharedLibName,
       return handle;
   }
   return nullptr;
-}
-
-static void DumpLLVMIR(const llvm::Module &M) {
-  std::string path = (M.getName() + ".ll").str();
-  for (size_t count = 0; llvm::sys::fs::exists(path); )
-    path = (M.getName() + llvm::utostr(count++) + ".ll").str();
-
-  std::error_code error;
-  llvm::raw_fd_ostream stream(path, error);
-  if (error)
-    return;
-  M.print(stream, /*AssemblyAnnotationWriter=*/nullptr);
 }
 
 void *swift::immediate::loadSwiftRuntime(ArrayRef<std::string>
@@ -254,35 +246,18 @@ bool swift::immediate::autolinkImportedModules(ModuleDecl *M,
   return false;
 }
 
-int swift::RunImmediately(CompilerInstance &CI,
-                          const ProcessCmdLine &CmdLine,
+/// Log a compilation error to standard error
+static void logError(llvm::Error Err) {
+  logAllUnhandledErrors(std::move(Err), llvm::errs(), "");
+}
+
+int swift::RunImmediately(CompilerInstance &CI, const ProcessCmdLine &CmdLine,
                           const IRGenOptions &IRGenOpts,
                           const SILOptions &SILOpts,
                           std::unique_ptr<SILModule> &&SM) {
-  // TODO: Use OptimizedIRRequest for this.
-  ASTContext &Context = CI.getASTContext();
   
-  // IRGen the main module.
-  auto *swiftModule = CI.getMainModule();
-  const auto PSPs = CI.getPrimarySpecificPathsForAtMostOnePrimary();
-  const auto &TBDOpts = CI.getInvocation().getTBDGenOptions();
-  auto GenModule = performIRGeneration(
-      swiftModule, IRGenOpts, TBDOpts, std::move(SM),
-      swiftModule->getName().str(), PSPs, ArrayRef<std::string>());
-
-  if (Context.hadError())
-    return -1;
-
-  assert(GenModule && "Emitted no diagnostics but IR generation failed?");
-
-  performLLVM(IRGenOpts, Context.Diags, /*diagMutex*/ nullptr, /*hash*/ nullptr,
-              GenModule.getModule(), GenModule.getTargetMachine(),
-              PSPs.OutputFilename, CI.getOutputBackend(),
-              Context.Stats);
-
-  if (Context.hadError())
-    return -1;
-
+  auto &Context = CI.getASTContext();
+  
   // Load libSwiftCore to setup process arguments.
   //
   // This must be done here, before any library loading has been done, to avoid
@@ -333,100 +308,121 @@ int swift::RunImmediately(CompilerInstance &CI,
 
   (*emplaceProcessArgs)(argBuf.data(), CmdLine.size());
 
+  auto *swiftModule = CI.getMainModule();
   if (autolinkImportedModules(swiftModule, IRGenOpts))
     return -1;
 
-  llvm::PassManagerBuilder PMBuilder;
-  PMBuilder.OptLevel = 2;
-  PMBuilder.Inliner = llvm::createFunctionInliningPass(200);
-
-  // Build the ExecutionEngine.
-  llvm::TargetOptions TargetOpt;
-  std::string CPU;
-  std::string Triple;
-  std::vector<std::string> Features;
-  std::tie(TargetOpt, CPU, Features, Triple)
-    = getIRTargetOptions(IRGenOpts, swiftModule->getASTContext());
-
-  std::unique_ptr<llvm::orc::LLJIT> JIT;
-
-  {
-    auto JITOrErr =
-      llvm::orc::LLJITBuilder()
-        .setJITTargetMachineBuilder(
-            llvm::orc::JITTargetMachineBuilder(llvm::Triple(Triple))
-              .setRelocationModel(llvm::Reloc::PIC_)
-              .setOptions(std::move(TargetOpt))
-              .setCPU(std::move(CPU))
-              .addFeatures(Features)
-              .setCodeGenOptLevel(llvm::CodeGenOpt::Default))
-        .create();
-
-    if (!JITOrErr) {
-      llvm::logAllUnhandledErrors(JITOrErr.takeError(), llvm::errs(), "");
-      return -1;
-    } else
-      JIT = std::move(*JITOrErr);
+  auto JIT = SwiftJIT::Create(CI);
+  if (auto Err = JIT.takeError()) {
+    logError(std::move(Err));
+    return -1;
   }
 
-  auto Module = GenModule.getModule();
-
-  switch (IRGenOpts.DumpJIT) {
-  case JITDebugArtifact::None:
-    break;
-  case JITDebugArtifact::LLVMIR:
-    DumpLLVMIR(*Module);
-    break;
-  case JITDebugArtifact::Object:
-    JIT->getObjTransformLayer().setTransform(llvm::orc::DumpObjects());
-    break;
+  auto MU = std::make_unique<EagerSwiftMaterializationUnit>(
+      **JIT, CI, IRGenOpts, std::move(SM));
+  if (auto Err = (*JIT)->addSwift((*JIT)->getMainJITDylib(), std::move(MU))) {
+    logError(std::move(Err));
+    return -1;
   }
 
-  {
-    // Get a generator for the process symbols and attach it to the main
-    // JITDylib.
-    if (auto G = llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(Module->getDataLayout().getGlobalPrefix()))
-      JIT->getMainJITDylib().addGenerator(std::move(*G));
-    else {
-      logAllUnhandledErrors(G.takeError(), llvm::errs(), "");
+  auto Result = (*JIT)->runMain(CmdLine);
+
+  if (!Result) {
+    logError(Result.takeError());
+    return -1;
+  }
+  return *Result;
+}
+
+int swift::RunImmediatelyFromAST(CompilerInstance &CI) {
+  CI.performSema();
+  auto &Context = CI.getASTContext();
+  if (Context.hadError()) {
+    return -1;
+  }
+  const auto &Invocation = CI.getInvocation();
+  const auto &FrontendOpts = Invocation.getFrontendOptions();
+
+  const ProcessCmdLine &CmdLine = ProcessCmdLine(
+      FrontendOpts.ImmediateArgv.begin(), FrontendOpts.ImmediateArgv.end());
+
+  // Load libSwiftCore to setup process arguments.
+  //
+  // This must be done here, before any library loading has been done, to avoid
+  // racing with the static initializers in user code.
+  // Setup interpreted process arguments.
+  using ArgOverride = void (*SWIFT_CC(swift))(const char **, int);
+#if defined(_WIN32)
+  auto stdlib = loadSwiftRuntime(Context.SearchPathOpts.RuntimeLibraryPaths);
+  if (!stdlib) {
+    CI.getDiags().diagnose(SourceLoc(),
+                           diag::error_immediate_mode_missing_stdlib);
+    return -1;
+  }
+  auto module = static_cast<HMODULE>(stdlib);
+  auto emplaceProcessArgs = reinterpret_cast<ArgOverride>(
+      GetProcAddress(module, "_swift_stdlib_overrideUnsafeArgvArgc"));
+  if (emplaceProcessArgs == nullptr)
+    return -1;
+#else
+  // In case the compiler is built with swift modules, it already has the stdlib
+  // linked to. First try to lookup the symbol with the standard library
+  // resolving.
+  auto emplaceProcessArgs =
+      (ArgOverride)dlsym(RTLD_DEFAULT, "_swift_stdlib_overrideUnsafeArgvArgc");
+
+  if (dlerror()) {
+    // If this does not work (= the Swift modules are not linked to the tool),
+    // we have to explicitly load the stdlib.
+    auto stdlib = loadSwiftRuntime(Context.SearchPathOpts.RuntimeLibraryPaths);
+    if (!stdlib) {
+      CI.getDiags().diagnose(SourceLoc(),
+                             diag::error_immediate_mode_missing_stdlib);
       return -1;
     }
-  }
-
-  LLVM_DEBUG(llvm::dbgs() << "Module to be executed:\n";
-             Module->dump());
-
-  {
-    if (auto Err = JIT->addIRModule(std::move(GenModule).intoThreadSafeContext())) {
-      llvm::logAllUnhandledErrors(std::move(Err), llvm::errs(), "");
+    dlerror();
+    emplaceProcessArgs =
+        (ArgOverride)dlsym(stdlib, "_swift_stdlib_overrideUnsafeArgvArgc");
+    if (dlerror())
       return -1;
-    }
   }
+#endif
 
-  using MainFnTy = int(*)(int, char*[]);
+  SmallVector<const char *, 32> argBuf;
+  for (size_t i = 0; i < CmdLine.size(); ++i) {
+    argBuf.push_back(CmdLine[i].c_str());
+  }
+  argBuf.push_back(nullptr);
 
-  LLVM_DEBUG(llvm::dbgs() << "Running static constructors\n");
-  if (auto Err = JIT->initialize(JIT->getMainJITDylib())) {
-    llvm::logAllUnhandledErrors(std::move(Err), llvm::errs(), "");
+  (*emplaceProcessArgs)(argBuf.data(), CmdLine.size());
+
+  auto *swiftModule = CI.getMainModule();
+  const auto &IRGenOpts = Invocation.getIRGenOptions();
+  if (autolinkImportedModules(swiftModule, IRGenOpts))
+    return -1;
+
+  auto &Target = swiftModule->getASTContext().LangOpts.Target;
+  assert(Target.isMacOSX());
+  auto JIT = SwiftJIT::Create(CI);
+  if (auto Err = JIT.takeError()) {
+    logError(std::move(Err));
     return -1;
   }
 
-  MainFnTy JITMain = nullptr;
-  if (auto MainFnOrErr = JIT->lookup("main"))
-    JITMain = llvm::jitTargetAddressToFunction<MainFnTy>(MainFnOrErr->getValue());
-  else {
-    logAllUnhandledErrors(MainFnOrErr.takeError(), llvm::errs(), "");
+  // We're compiling functions lazily, so need to rename
+  // symbols defining functions for lazy reexports
+  (*JIT)->addRenamer();
+  auto MU = LazySwiftMaterializationUnit::Create(**JIT, CI);
+  if (auto Err = (*JIT)->addSwift((*JIT)->getMainJITDylib(), std::move(MU))) {
+    logError(std::move(Err));
     return -1;
   }
 
-  LLVM_DEBUG(llvm::dbgs() << "Running main\n");
-  int Result = llvm::orc::runAsMain(JITMain, CmdLine);
-
-  LLVM_DEBUG(llvm::dbgs() << "Running static destructors\n");
-  if (auto Err = JIT->deinitialize(JIT->getMainJITDylib())) {
-    logAllUnhandledErrors(std::move(Err), llvm::errs(), "");
+  auto Result = (*JIT)->runMain(CmdLine);
+  if (!Result) {
+    logError(Result.takeError());
     return -1;
   }
 
-  return Result;
+  return *Result;
 }

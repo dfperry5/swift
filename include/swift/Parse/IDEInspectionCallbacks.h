@@ -36,6 +36,25 @@ enum class CustomSyntaxAttributeKind {
   Available,
   FreestandingMacro,
   AttachedMacro,
+  StorageRestrictions
+};
+
+/// A bit of a hack. When completing inside the '@storageRestrictions'
+/// attribute, we use the \c ParamIndex field to communicate where inside the
+/// attribute we are performing the completion.
+enum class StorageRestrictionsCompletionKind : int {
+  /// We are completing directly after the '(' and require a 'initializes' or
+  /// 'accesses' label.
+  Label,
+  /// We are completing in a context that only allows arguments (ie. accessed or
+  /// initialized variables) and doesn't permit an argument label.
+  Argument,
+  /// Completion in a context that allows either an argument or the
+  /// 'initializes' label.
+  ArgumentOrInitializesLabel,
+  /// Completion in a context that allows either an argument or the
+  /// 'accesses' label.
+  ArgumentOrAccessesLabel
 };
 
 /// Parser's interface to code completion.
@@ -147,8 +166,9 @@ public:
   /// Complete the \c in keyword in a for-each loop.
   virtual void completeForEachInKeyword(){};
 
-  /// Complete a given expr-postfix.
-  virtual void completePostfixExpr(Expr *E, bool hasSpace) {};
+  /// Complete a expr-postfix. The \c CodeCompletionExpr has the expression it
+  /// is completing after set as its base.
+  virtual void completePostfixExpr(CodeCompletionExpr *E, bool hasSpace){};
 
   /// Complete a given expr-postfix, given that there is a following
   /// left parenthesis.
@@ -229,10 +249,9 @@ public:
     return false;
   }
 
-  virtual void completeLabeledTrailingClosure(CodeCompletionExpr *E,
-                                              bool isAtStartOfLine) {};
+  virtual void completeReturnStmt(CodeCompletionExpr *E){};
 
-  virtual void completeReturnStmt(CodeCompletionExpr *E) {};
+  virtual void completeThenStmt(CodeCompletionExpr *E) {};
 
   /// Complete a yield statement.  A missing yield index means that the
   /// completion immediately follows the 'yield' keyword; it may be either

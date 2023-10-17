@@ -191,6 +191,27 @@ public:
     return false;
   }
 
+  /// Apply the given function object to each associated conformance requirement
+  /// within this protocol conformance.
+  ///
+  /// \returns true if the function ever returned true
+  template<typename F>
+  bool forEachAssociatedConformance(F f) const {
+    const ProtocolDecl *protocol = getProtocol();
+    unsigned index = 0;
+    for (auto req : protocol->getRequirementSignature().getRequirements()) {
+      if (req.getKind() != RequirementKind::Conformance)
+        continue;
+
+      if (f(req.getFirstType(), req.getProtocolDecl(), index))
+        return true;
+
+      ++index;
+    }
+
+    return false;
+  }
+
   /// Retrieve the value witness declaration corresponding to the given
   /// requirement.
   ValueDecl *getWitnessDecl(ValueDecl *requirement) const;
@@ -299,23 +320,23 @@ public:
   /// be satisfied.
   ArrayRef<Requirement> getConditionalRequirements() const;
 
-  /// Substitute the conforming type and produce a ProtocolConformance that
+  /// Substitute the conforming type and produce a ProtocolConformanceRef that
   /// applies to the substituted type.
-  ProtocolConformance *subst(SubstitutionMap subMap,
-                             SubstOptions options = llvm::None) const;
+  ProtocolConformanceRef subst(SubstitutionMap subMap,
+                               SubstOptions options = llvm::None) const;
 
-  /// Substitute the conforming type and produce a ProtocolConformance that
+  /// Substitute the conforming type and produce a ProtocolConformanceRef that
   /// applies to the substituted type.
-  ProtocolConformance *subst(TypeSubstitutionFn subs,
-                             LookupConformanceFn conformances,
-                             SubstOptions options = llvm::None) const;
+  ProtocolConformanceRef subst(TypeSubstitutionFn subs,
+                               LookupConformanceFn conformances,
+                               SubstOptions options = llvm::None) const;
 
-  /// Substitute the conforming type and produce a ProtocolConformance that
+  /// Substitute the conforming type and produce a ProtocolConformanceRef that
   /// applies to the substituted type.
   ///
   /// This function should generally not be used outside of the substitution
   /// subsystem.
-  ProtocolConformance *subst(InFlightSubstitution &IFS) const;
+  ProtocolConformanceRef subst(InFlightSubstitution &IFS) const;
 
   SWIFT_DEBUG_DUMP;
   void dump(llvm::raw_ostream &out, unsigned indent = 0) const;
@@ -423,13 +444,18 @@ class NormalProtocolConformance : public RootProtocolConformance,
 
     /// The conformance was labeled with @unchecked.
     UncheckedFlag = 0x02,
+
+    /// We have allocated the AssociatedConformances array (but not necessarily
+    /// populated any of its elements).
+    HasComputedAssociatedConformancesFlag = 0x04,
   };
 
   /// The declaration context containing the ExtensionDecl or
   /// NominalTypeDecl that declared the conformance.
   ///
-  /// Also stores the "invalid" and "unchecked" bits.
-  llvm::PointerIntPair<DeclContext *, 2, unsigned> ContextAndBits;
+  /// Also stores the "invalid", "unchecked" and "has computed associated
+  /// conformances" bits.
+  llvm::PointerIntPair<DeclContext *, 3, unsigned> ContextAndBits;
 
   /// The reason that this conformance exists.
   ///
@@ -441,7 +467,7 @@ class NormalProtocolConformance : public RootProtocolConformance,
   ///
   /// This should never be Inherited: that is handled by
   /// InheritedProtocolConformance.
-  llvm::PointerIntPair<NormalProtocolConformance *, 2, ConformanceEntryKind>
+  llvm::PointerIntPair<NormalProtocolConformance *, 3, ConformanceEntryKind>
       SourceKindAndImplyingConformance = {nullptr,
                                           ConformanceEntryKind::Explicit};
 
@@ -454,7 +480,7 @@ class NormalProtocolConformance : public RootProtocolConformance,
 
   /// Conformances that satisfy each of conformance requirements of the
   /// requirement signature of the protocol.
-  ArrayRef<ProtocolConformanceRef> SignatureConformances;
+  MutableArrayRef<llvm::Optional<ProtocolConformanceRef>> AssociatedConformances;
 
   /// The lazy member loader provides callbacks for populating imported and
   /// deserialized conformances.
@@ -518,7 +544,6 @@ public:
   /// Mark this conformance as invalid.
   void setInvalid() {
     ContextAndBits.setInt(ContextAndBits.getInt() | InvalidFlag);
-    SignatureConformances = {};
   }
 
   /// Whether this is an "unchecked" conformance.
@@ -531,6 +556,17 @@ public:
   void setUnchecked() {
     // OK to mutate because the flags are not part of the folding set node ID.
     ContextAndBits.setInt(ContextAndBits.getInt() | UncheckedFlag);
+  }
+
+  /// Determine whether we've lazily computed the associated conformance array
+  /// already.
+  bool hasComputedAssociatedConformances() const {
+    return ContextAndBits.getInt() & HasComputedAssociatedConformancesFlag;
+  }
+
+  /// Mark this conformance as having computed the assocaited conformance array.
+  void setHasComputedAssociatedConformances() {
+    ContextAndBits.setInt(ContextAndBits.getInt() | HasComputedAssociatedConformancesFlag);
   }
 
   /// Get the kind of source from which this conformance comes.
@@ -552,6 +588,8 @@ public:
     assert((sourceKind == ConformanceEntryKind::Implied) ==
                (bool)implyingConformance &&
            "an implied conformance needs something that implies it");
+    assert(sourceKind != ConformanceEntryKind::PreMacroExpansion &&
+           "cannot create conformance pre-macro-expansion");
     SourceKindAndImplyingConformance = {implyingConformance, sourceKind};
   }
 
@@ -597,6 +635,16 @@ public:
   ProtocolConformanceRef
   getAssociatedConformance(Type assocType, ProtocolDecl *protocol) const;
 
+  /// Allocate the backing array if needed, computing its size from the
+  ///protocol's requirement signature.
+  void createAssociatedConformanceArray();
+
+  llvm::Optional<ProtocolConformanceRef>
+  getAssociatedConformance(unsigned index) const;
+
+  void
+  setAssociatedConformance(unsigned index, ProtocolConformanceRef assocConf);
+
   /// Retrieve the value witness corresponding to the given requirement.
   Witness getWitness(ValueDecl *requirement) const;
 
@@ -615,19 +663,6 @@ public:
 
   /// Override the witness for a given requirement.
   void overrideWitness(ValueDecl *requirement, Witness newWitness);
-
-  /// Retrieve the protocol conformances that satisfy the requirements of the
-  /// protocol, which line up with the conformance constraints in the
-  /// protocol's requirement signature.
-  ArrayRef<ProtocolConformanceRef> getSignatureConformances() const {
-    if (Loader)
-      resolveLazyInfo();
-    return SignatureConformances;
-  }
-
-  /// Copy the given protocol conformances for the requirement signature into
-  /// the normal conformance.
-  void setSignatureConformances(ArrayRef<ProtocolConformanceRef> conformances);
 
   /// Populate the signature conformances without checking if they satisfy
   /// requirements. Can only be used with parsed or imported conformances.
@@ -1019,23 +1054,13 @@ enum class BuiltinConformanceKind {
 
 /// A builtin conformance appears when a non-nominal type has a
 /// conformance that is synthesized by the implementation.
-class BuiltinProtocolConformance final : public RootProtocolConformance,
-      private llvm::TrailingObjects<BuiltinProtocolConformance, Requirement> {
+class BuiltinProtocolConformance final : public RootProtocolConformance {
   friend ASTContext;
-  friend TrailingObjects;
 
   ProtocolDecl *protocol;
-  GenericSignature genericSig;
-  size_t numConditionalRequirements : 31;
-  unsigned builtinConformanceKind : 1;
-
-  size_t numTrailingObjects(OverloadToken<Requirement>) const {
-    return numConditionalRequirements;
-  }
+  unsigned builtinConformanceKind;
 
   BuiltinProtocolConformance(Type conformingType, ProtocolDecl *protocol,
-                             GenericSignature genericSig,
-                             ArrayRef<Requirement> conditionalRequirements,
                              BuiltinConformanceKind kind);
 
 public:
@@ -1044,14 +1069,12 @@ public:
     return protocol;
   }
 
-  /// Retrieve the generic signature that describes the type parameters used
-  /// within the conforming type.
-  GenericSignature getGenericSignature() const {
-    return genericSig;
-  }
-
   BuiltinConformanceKind getBuiltinConformanceKind() const {
     return static_cast<BuiltinConformanceKind>(builtinConformanceKind);
+  }
+
+  GenericSignature getGenericSignature() const {
+    return GenericSignature();
   }
 
   /// Whether this represents a "missing" conformance that should be diagnosed
@@ -1063,12 +1086,12 @@ public:
   /// Get any requirements that must be satisfied for this conformance to apply.
   llvm::Optional<ArrayRef<Requirement>>
   getConditionalRequirementsIfAvailable() const {
-    return getConditionalRequirements();
+    return ArrayRef<Requirement>();
   }
 
   /// Get any requirements that must be satisfied for this conformance to apply.
   ArrayRef<Requirement> getConditionalRequirements() const {
-    return {getTrailingObjects<Requirement>(), numConditionalRequirements};
+    return {};
   }
 
   /// Get the declaration context that contains the nominal type declaration.

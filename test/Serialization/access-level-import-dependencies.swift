@@ -26,20 +26,15 @@ private import HiddenDep
 
 /// With resilience, non-public dependencies should be hidden.
 // RUN: %target-swift-frontend -emit-module %t/PublicDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution
 // RUN: %target-swift-frontend -emit-module %t/PackageDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -package-name MyPackage \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -package-name MyPackage
 // RUN: %target-swift-frontend -emit-module %t/InternalDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution
 // RUN: %target-swift-frontend -emit-module %t/FileprivateDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution
 // RUN: %target-swift-frontend -emit-module %t/PrivateDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfPublic.swift -I %t \
 // RUN:   -package-name MyOtherPackage \
@@ -49,6 +44,7 @@ private import HiddenDep
 import PublicDep
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfNonPublic.swift -I %t \
+// RUN:   -package-name pkg \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=HIDDEN-DEP %s
 // HIDDEN-DEP-NOT: loaded module 'HiddenDep'
 //--- ClientOfNonPublic.swift
@@ -58,16 +54,12 @@ import FileprivateDep
 import PrivateDep
 
 /// Without resilience, all access-level dependencies are visible to clients.
-// RUN: %target-swift-frontend -emit-module %t/PublicDep.swift -o %t -I %t \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN: %target-swift-frontend -emit-module %t/PublicDep.swift -o %t -I %t
 // RUN: %target-swift-frontend -emit-module %t/PackageDep.swift -o %t -I %t \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
-// RUN: %target-swift-frontend -emit-module %t/InternalDep.swift -o %t -I %t \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
-// RUN: %target-swift-frontend -emit-module %t/FileprivateDep.swift -o %t -I %t \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
-// RUN: %target-swift-frontend -emit-module %t/PrivateDep.swift -o %t -I %t \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -package-name MyPackage
+// RUN: %target-swift-frontend -emit-module %t/InternalDep.swift -o %t -I %t
+// RUN: %target-swift-frontend -emit-module %t/FileprivateDep.swift -o %t -I %t
+// RUN: %target-swift-frontend -emit-module %t/PrivateDep.swift -o %t -I %t
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfPublic.swift -I %t \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-DEP %s
@@ -77,20 +69,15 @@ import PrivateDep
 /// Even with resilience and testing enabled, all non-public dependencies are
 /// hidden if there are no testable imports.
 // RUN: %target-swift-frontend -emit-module %t/PublicDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing
 // RUN: %target-swift-frontend -emit-module %t/PackageDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing -package-name MyPackage \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing -package-name MyPackage
 // RUN: %target-swift-frontend -emit-module %t/InternalDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing
 // RUN: %target-swift-frontend -emit-module %t/FileprivateDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing
 // RUN: %target-swift-frontend -emit-module %t/PrivateDep.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing
 
 // RUN: %target-swift-frontend -typecheck %t/ClientOfPublic.swift -I %t \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-DEP %s
@@ -110,6 +97,7 @@ import PrivateDep
 // RUN: %target-swift-frontend -typecheck %t/TestableClientOfPublic.swift -I %t \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-DEP %s
 // RUN: %target-swift-frontend -typecheck %t/TestableClientOfNonPublic.swift -I %t \
+// RUN:   -package-name pkg \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefix=VISIBLE-DEP %s
 
 /// In the case of a testable of a module reexporting another Swift module,
@@ -117,9 +105,9 @@ import PrivateDep
 /// Non-public imports from the reexported modules are not loaded, we could
 /// revisit this if desired.
 // RUN: %target-swift-frontend -emit-module %t/Exporter.swift -o %t -I %t \
-// RUN:   -enable-library-evolution -enable-testing \
-// RUN:   -enable-experimental-feature AccessLevelOnImport
+// RUN:   -enable-library-evolution -enable-testing
 // RUN: %target-swift-frontend -typecheck %t/ExporterClient.swift -I %t \
+// RUN:   -index-system-modules -index-ignore-stdlib -index-store-path %t/idx \
 // RUN:   -Rmodule-loading 2>&1 | %FileCheck -check-prefixes=CHECK-EXPORTER,HIDDEN-DEP %s
 // CHECK-EXPORTER: 'InternalDep' has an ignored transitive dependency on 'HiddenDep'
 
@@ -132,6 +120,7 @@ import PrivateDep
 /// Fail if the transitive dependency is missing.
 // RUN: rm %t/HiddenDep.swiftmodule
 // RUN: %target-swift-frontend -typecheck %t/TestableClientOfNonPublic.swift -I %t \
+// RUN:   -package-name pkg \
 // RUN:   -verify -show-diagnostics-after-fatal
 
 /// In a multi-file scenario, we try and fail to load the transitive dependency

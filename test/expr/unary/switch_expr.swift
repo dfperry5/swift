@@ -163,7 +163,6 @@ takesValue(switch Bool.random() { case true: 1 case false: 2 })
 do {
   takesValue(x: switch Bool.random() { case true: 1 case false: 2 })
   // expected-error@-1 {{extraneous argument label 'x:' in call}}
-  // expected-error@-2 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
 
   takesValue(_: x: switch Bool.random() { case true: 1 case false: 2 })
   // expected-error@-1 {{expected expression in list of expressions}}
@@ -187,7 +186,6 @@ takesValueAndTrailingClosure(switch Bool.random() { case true: 0 case false: 1 }
 func takesInOut<T>(_ x: inout T) {}
 takesInOut(&switch Bool.random() { case true: 1 case false: 2 })
 // expected-error@-1 {{cannot pass immutable value of type 'Int' as inout argument}}
-// expected-error@-2 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
 
 struct HasSubscript {
   static subscript(x: Int) -> Void { () }
@@ -495,21 +493,18 @@ do {
 // the user to just wrap the expression in parens.
 do {
   _ = (switch fatalError() {}, 1) // expected-error {{expected '{' after 'switch' subject expression}}
-  // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-  // expected-error@-2 {{extra trailing closure passed in call}}
+  // expected-error@-1 {{extra trailing closure passed in call}}
 
   _ = (switch fatalError() { #if FOO
     // expected-error@-1 {{extra trailing closure passed in call}}
-    // expected-error@-2 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
   #endif
   }, 0) // expected-error {{expected '{' after 'switch' subject expression}}
 
   _ = (switch Bool.random() { #if FOO
-    // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-    // expected-error@-2 {{cannot pass immutable value of type '() -> ()' as inout argument}}
-    // expected-error@-3 {{type '() -> ()' cannot conform to 'RandomNumberGenerator'}}
-    // expected-note@-4 {{required by static method 'random(using:)' where 'T' = '() -> ()'}}
-    // expected-note@-5 {{only concrete types such as structs, enums and classes can conform to protocols}}
+    // expected-error@-1 {{cannot pass immutable value of type '() -> ()' as inout argument}}
+    // expected-error@-2 {{type '() -> ()' cannot conform to 'RandomNumberGenerator'}}
+    // expected-note@-3 {{required by static method 'random(using:)' where 'T' = '() -> ()'}}
+    // expected-note@-4 {{only concrete types such as structs, enums and classes can conform to protocols}}
   case true: // expected-error {{'case' label can only appear inside a 'switch' statement}}
     1
   case false: // expected-error {{'case' label can only appear inside a 'switch' statement}}
@@ -518,11 +513,10 @@ do {
   }, 0) // expected-error {{expected '{' after 'switch' subject expression}}
 
   _ = (switch Bool.random() { #if FOO
-    // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-    // expected-error@-2 {{cannot pass immutable value of type '() -> ()' as inout argument}}
-    // expected-error@-3 {{type '() -> ()' cannot conform to 'RandomNumberGenerator'}}
-    // expected-note@-4 {{required by static method 'random(using:)' where 'T' = '() -> ()'}}
-    // expected-note@-5 {{only concrete types such as structs, enums and classes can conform to protocols}}
+    // expected-error@-1 {{cannot pass immutable value of type '() -> ()' as inout argument}}
+    // expected-error@-2 {{type '() -> ()' cannot conform to 'RandomNumberGenerator'}}
+    // expected-note@-3 {{required by static method 'random(using:)' where 'T' = '() -> ()'}}
+    // expected-note@-4 {{only concrete types such as structs, enums and classes can conform to protocols}}
   case true: // expected-error {{'case' label can only appear inside a 'switch' statement}}
     1
   case false: // expected-error {{'case' label can only appear inside a 'switch' statement}}
@@ -536,7 +530,7 @@ do {
   }, 0) // expected-error {{expected '{' after 'switch' subject expression}}
 }
 
-// These are syntatically okay because the #if starts on a newline. This seems
+// These are syntactically okay because the #if starts on a newline. This seems
 // like the common case.
 _ = (switch Bool.random() {
   // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
@@ -620,9 +614,9 @@ let m = !switch Bool.random() { case true: true case false: true }
 let n = switch Bool.random() { case true: 1 case false: 2 } + // expected-error {{ambiguous use of operator '+'}}
         switch Bool.random() { case true: 3 case false: 4 } +
         switch Bool.random() { case true: 5 case false: 6 }
-// expected-error@-3 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-// expected-error@-3 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-// expected-error@-3 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+let n1 = switch Bool.random() { case true: 1 case false: 2 } +  5
+// expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
 
 let p = .random() ? switch Bool.random() { case true: 1 case false: 2 }
                   : switch Bool.random() { case true: 3 case false: 4 }
@@ -661,8 +655,7 @@ do {
 
   // FIXME: The type error is likely due to not solving the conjunction before attempting default type var bindings.
   let _ = (switch Bool.random() { case true: Int?.none case false: 1 })?.bitWidth
-  // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
-  // expected-error@-2 {{type of expression is ambiguous without a type annotation}}
+  // expected-error@-1 {{type of expression is ambiguous without a type annotation}}
 }
 do {
   let _ = switch Bool.random() { case true: Int?.none case false: 1 }!
@@ -752,10 +745,27 @@ func returnBranches() -> Int {
 func returnBranches1() -> Int {
   return switch Bool.random() { // expected-error {{cannot convert return expression of type 'Void' to return type 'Int'}}
   case true:
+    return 0
+  case false:
+    return 1
+  }
+}
+
+func returnBranchVoid() {
+  return switch Bool.random() { case true: return case false: return () }
+  // expected-error@-1 2{{cannot 'return' in 'switch' when used as expression}}
+}
+
+func returnBranchBinding() -> Int {
+  let x = switch Bool.random() {
+    // expected-warning@-1 {{constant 'x' inferred to have type 'Void', which may be unexpected}}
+    // expected-note@-2 {{add an explicit type annotation to silence this warning}}
+  case true:
     return 0 // expected-error {{cannot 'return' in 'switch' when used as expression}}
   case false:
     return 1 // expected-error {{cannot 'return' in 'switch' when used as expression}}
   }
+  return x // expected-error {{cannot convert return expression of type 'Void' to return type 'Int'}}
 }
 
 func returnBranches2() -> Int {
@@ -1245,6 +1255,8 @@ func continueToInner() -> Int {
 
 // MARK: Effect specifiers
 
+struct Err: Error {}
+
 func trySwitch1() -> Int {
   try switch Bool.random() { case true: 0 case false: 1 }
   // expected-error@-1 {{'try' may not be used on 'switch' expression}}
@@ -1259,6 +1271,226 @@ func trySwitch2() -> Int {
 func trySwitch3() -> Int {
   return try switch Bool.random() { case true: 0 case false: 1 }
   // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+}
+
+func trySwitch4() throws -> Int {
+  return try switch Bool.random() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+}
+
+func trySwitch5() throws -> Int {
+  return try switch Bool.random() { case true: trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{call can throw but is not marked with 'try'}}
+  // expected-note@-3 {{did you mean to use 'try'?}}
+  // expected-note@-4 {{did you mean to handle error as optional value?}}
+  // expected-note@-5 {{did you mean to disable error propagation?}}
+}
+
+func trySwitch6() throws -> Int {
+  try switch Bool.random() { case true: trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{call can throw but is not marked with 'try'}}
+  // expected-note@-3 {{did you mean to use 'try'?}}
+  // expected-note@-4 {{did you mean to handle error as optional value?}}
+  // expected-note@-5 {{did you mean to disable error propagation?}}
+}
+
+func trySwitch7() throws -> Int {
+  let x = try switch Bool.random() { case true: trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{call can throw but is not marked with 'try'}}
+  // expected-note@-3 {{did you mean to use 'try'?}}
+  // expected-note@-4 {{did you mean to handle error as optional value?}}
+  // expected-note@-5 {{did you mean to disable error propagation?}}
+  return x
+}
+
+func trySwitch8() throws -> Int {
+  return try switch Bool.random() { case true: try trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+}
+
+func trySwitch9() throws -> Int {
+  try switch Bool.random() { case true: try trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+}
+
+func trySwitch10() throws -> Int {
+  let x = try switch Bool.random() { case true: try trySwitch4() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  return x
+}
+
+func trySwitch11() throws -> Int {
+  let x = try switch Bool.random() { case true: try trySwitch4() case false: trySwitch4() }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{call can throw but is not marked with 'try'}}
+  // expected-note@-3 {{did you mean to use 'try'?}}
+  // expected-note@-4 {{did you mean to handle error as optional value?}}
+  // expected-note@-5 {{did you mean to disable error propagation?}}
+  return x
+}
+
+func trySwitch12() throws -> Int {
+  let x = try switch Bool.random() { case true: trySwitch4() case false: trySwitch4() }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 2{{call can throw but is not marked with 'try'}}
+  // expected-note@-3 2{{did you mean to use 'try'?}}
+  // expected-note@-4 2{{did you mean to handle error as optional value?}}
+  // expected-note@-5 2{{did you mean to disable error propagation?}}
+  return x
+}
+
+func trySwitch13() throws -> Int {
+  let x = try switch Bool.random() { // expected-error {{'try' may not be used on 'switch' expression}}
+  case true:
+    trySwitch4() // expected-warning {{result of call to 'trySwitch4()' is unused}}
+    // expected-error@-1 {{call can throw but is not marked with 'try'}}
+    // expected-note@-2 {{did you mean to use 'try'?}}
+    // expected-note@-3 {{did you mean to handle error as optional value?}}
+    // expected-note@-4 {{did you mean to disable error propagation?}}
+
+    _ = trySwitch4()
+    // expected-error@-1 {{call can throw but is not marked with 'try'}}
+    // expected-note@-2 {{did you mean to use 'try'?}}
+    // expected-note@-3 {{did you mean to handle error as optional value?}}
+    // expected-note@-4 {{did you mean to disable error propagation?}}
+
+    _ = try trySwitch4() // Okay.
+
+    // Okay.
+    do {
+      _ = try trySwitch4()
+    } catch {}
+
+    print("hello")
+    throw Err()
+  case false:
+    0
+  }
+  return x
+}
+
+func throwsBool() throws -> Bool { true }
+
+func trySwitch14() throws -> Int {
+  try switch throwsBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{call can throw but is not marked with 'try'}}
+  // expected-note@-3 {{did you mean to use 'try'?}}
+  // expected-note@-4 {{did you mean to handle error as optional value?}}
+  // expected-note@-5 {{did you mean to disable error propagation?}}
+}
+
+func trySwitch15() throws -> Int {
+  try switch try throwsBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+}
+
+func trySwitch16() throws -> Int {
+  switch throwsBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{call can throw but is not marked with 'try'}}
+  // expected-note@-2 {{did you mean to use 'try'?}}
+  // expected-note@-3 {{did you mean to handle error as optional value?}}
+  // expected-note@-4 {{did you mean to disable error propagation?}}
+}
+
+func trySwitch17() throws -> Int {
+  switch Bool.random() { case true: trySwitch4() case false: 1 }
+  // expected-error@-1 {{call can throw but is not marked with 'try'}}
+  // expected-note@-2 {{did you mean to use 'try'?}}
+  // expected-note@-3 {{did you mean to handle error as optional value?}}
+  // expected-note@-4 {{did you mean to disable error propagation?}}
+}
+
+func trySwitch18() {
+  // Make sure we don't warn here.
+  do {
+    let _ = switch Bool.random() { case true: try trySwitch4() case false: 1 }
+  } catch {}
+}
+
+func trySwitch19() {
+  // Make sure we don't warn here.
+  do {
+    let _ = switch Bool.random() { case true: throw Err() case false: 1 }
+  } catch {}
+}
+
+func trySwitch19() throws -> Int {
+  let x = switch Bool.random() { case true: throw Err() case false: 1 }
+  return x
+}
+
+func trySwitch20() throws -> Int {
+  switch Bool.random() { case true: throw Err() case false: 1 }
+}
+
+func trySwitch21(_ fn: () throws -> Int) rethrows -> Int {
+  let x = switch Bool.random() { case true: try fn() case false: 1 }
+  return x
+}
+
+func trySwitch22(_ fn: () throws -> Int) rethrows -> Int {
+  switch Bool.random() { case true: try fn() case false: 1 }
+}
+
+func trySwitch23(_ fn: () throws -> Int) rethrows -> Int {
+  let x = switch Bool.random() { case true: try fn() case false: throw Err() }
+  // expected-error@-1 {{a function declared 'rethrows' may only throw if its parameter does}}
+  return x
+}
+
+func trySwitch24(_ fn: () throws -> Int) rethrows -> Int {
+  let x = switch Bool.random() { case true: try fn() case false: try trySwitch4() }
+  // expected-error@-1 {{a function declared 'rethrows' may only throw if its parameter does}}
+  return x
+}
+
+func trySwitch25(_ fn: () throws -> Int) rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try fn() case false: try trySwitch4() }
+    return x
+  } catch {
+    return 0
+  }
+}
+
+func trySwitch26(_ fn: () throws -> Int) rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try fn() case false: throw Err() }
+    return x
+  } catch {
+    return 0
+  }
+}
+
+func trySwitch27(_ fn: () throws -> Int) rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try fn() case false: try trySwitch4() }
+    return x
+  } catch {
+    throw error  // expected-error {{a function declared 'rethrows' may only throw if its parameter does}}
+  }
+}
+
+func trySwitch28(_ fn: () throws -> Int) rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try fn() case false: throw Err() }
+    return x
+  } catch {
+    throw error  // expected-error {{a function declared 'rethrows' may only throw if its parameter does}}
+  }
+}
+
+func trySwitch29(_ fn: () throws -> Int) rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try fn() case false: 0 }
+    return x
+  } catch {
+    throw error // Okay.
+  }
 }
 
 func awaitSwitch1() async -> Int {
@@ -1277,6 +1509,132 @@ func awaitSwitch3() async -> Int {
   // expected-error@-1 {{'await' may not be used on 'switch' expression}}
 }
 
+func awaitSwitch4() async -> Int {
+  return await switch Bool.random() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+}
+
+func awaitSwitch5() async -> Int {
+  return await switch Bool.random() { case true: awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 {{call is 'async'}}
+}
+
+func awaitSwitch6() async -> Int {
+  await switch Bool.random() { case true: awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 {{call is 'async'}}
+}
+
+func awaitSwitch7() async -> Int {
+  let x = await switch Bool.random() { case true: awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 {{call is 'async'}}
+  return x
+}
+
+func awaitSwitch8() async -> Int {
+  return await switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+}
+
+func awaitSwitch9() async -> Int {
+  await switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+}
+
+func awaitSwitch10() async -> Int {
+  let x = await switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  return x
+}
+
+func awaitSwitch11() async -> Int {
+  let x = await switch Bool.random() { case true: await awaitSwitch4() case false: awaitSwitch4() }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 {{call is 'async'}}
+  return x
+}
+
+func awaitSwitch12() async -> Int {
+  let x = await switch Bool.random() { case true: awaitSwitch4() case false: awaitSwitch4() }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 2{{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 2{{call is 'async'}}
+  return x
+}
+
+func awaitSwitch13() async throws -> Int {
+  let x = await switch Bool.random() { // expected-error {{'await' may not be used on 'switch' expression}}
+  case true:
+    awaitSwitch4() // expected-warning {{result of call to 'awaitSwitch4()' is unused}}
+    // expected-error@-1 {{expression is 'async' but is not marked with 'await'}}
+    // expected-note@-2 {{call is 'async'}}
+
+    _ = awaitSwitch4()
+    // expected-error@-1 {{expression is 'async' but is not marked with 'await'}}
+    // expected-note@-2 {{call is 'async'}}
+
+    _ = await awaitSwitch4() // Okay.
+
+    // Okay.
+    let _ = {
+      _ = await awaitSwitch4()
+    }
+
+    print("hello")
+    throw Err()
+  case false:
+    0
+  }
+  return x
+}
+
+func asyncBool() async -> Bool { true }
+
+func awaitSwitch14() async -> Int {
+  await switch asyncBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-2 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-3 {{call is 'async'}}
+}
+
+func awaitSwitch15() async -> Int {
+  await switch await asyncBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{'await' may not be used on 'switch' expression}}
+}
+
+func awaitSwitch16() async -> Int {
+  switch asyncBool() { case true: 0 case false: 1 }
+  // expected-error@-1 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-2 {{call is 'async'}}
+}
+
+func awaitSwitch17() async -> Int {
+  switch Bool.random() { case true: awaitSwitch4() case false: 1 }
+  // expected-error@-1 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-2 {{call is 'async'}}
+}
+
+func awaitSwitch18() {
+  let _ = {
+    let _ = switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+  }
+}
+
+func awaitSwitch19() async -> Int {
+  let x = switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+  return x
+}
+
+func awaitSwitch20() async -> Int {
+  switch Bool.random() { case true: await awaitSwitch4() case false: 1 }
+}
+
 func tryAwaitSwitch1() async throws -> Int {
   try await switch Bool.random() { case true: 0 case false: 1 }
   // expected-error@-1 {{'try' may not be used on 'switch' expression}}
@@ -1287,4 +1645,181 @@ func tryAwaitSwitch2() async throws -> Int {
   try await switch Bool.random() { case true: 0 case false: 1 } as Int
   // expected-error@-1 {{'try' may not be used on 'switch' expression}}
   // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+}
+
+func tryAwaitSwitch3() async throws -> Int {
+  try await switch Bool.random() { case true: tryAwaitSwitch2() case false: 1 } as Int
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{call can throw but is not marked with 'try'}}
+  // expected-note@-4 {{did you mean to use 'try'?}}
+  // expected-note@-5 {{did you mean to handle error as optional value?}}
+  // expected-note@-6 {{did you mean to disable error propagation?}}
+  // expected-error@-7 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-8 {{call is 'async'}}
+}
+
+func tryAwaitSwitch4() async throws -> Int {
+  try await switch Bool.random() { case true: try tryAwaitSwitch2() case false: 1 } as Int
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-4 {{call is 'async'}}
+}
+
+func tryAwaitSwitch5() async throws -> Int {
+  try await switch Bool.random() { case true: await tryAwaitSwitch2() case false: 1 } as Int
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{call can throw but is not marked with 'try'}}
+  // expected-note@-4 {{did you mean to use 'try'?}}
+  // expected-note@-5 {{did you mean to handle error as optional value?}}
+  // expected-note@-6 {{did you mean to disable error propagation?}}
+}
+
+func tryAwaitSwitch6() async throws -> Int {
+  try await switch Bool.random() { case true: try await tryAwaitSwitch2() case false: 1 } as Int
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+}
+
+func tryAwaitSwitch7() async throws -> Int {
+  try await switch Bool.random() { case true: tryAwaitSwitch2() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{call can throw but is not marked with 'try'}}
+  // expected-note@-4 {{did you mean to use 'try'?}}
+  // expected-note@-5 {{did you mean to handle error as optional value?}}
+  // expected-note@-6 {{did you mean to disable error propagation?}}
+  // expected-error@-7 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-8 {{call is 'async'}}
+}
+
+func tryAwaitSwitch8() async throws -> Int {
+  try await switch Bool.random() { case true: try tryAwaitSwitch2() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{expression is 'async' but is not marked with 'await'}}
+  // expected-note@-4 {{call is 'async'}}
+}
+
+func tryAwaitSwitch9() async throws -> Int {
+  try await switch Bool.random() { case true: await tryAwaitSwitch2() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+  // expected-error@-3 {{call can throw but is not marked with 'try'}}
+  // expected-note@-4 {{did you mean to use 'try'?}}
+  // expected-note@-5 {{did you mean to handle error as optional value?}}
+  // expected-note@-6 {{did you mean to disable error propagation?}}
+}
+
+func tryAwaitSwitch10() async throws -> Int {
+  try await switch Bool.random() { case true: try await tryAwaitSwitch2() case false: 1 }
+  // expected-error@-1 {{'try' may not be used on 'switch' expression}}
+  // expected-error@-2 {{'await' may not be used on 'switch' expression}}
+}
+
+func tryAwaitSwitch11(_ fn: () async throws -> Int) async rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try await fn() case false: try await tryAwaitSwitch4() }
+    return x
+  } catch {
+    return 0
+  }
+}
+
+func tryAwaitSwitch12(_ fn: () async throws -> Int) async rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try await fn() case false: throw Err() }
+    return x
+  } catch {
+    return 0
+  }
+}
+
+func tryAwaitSwitch13(_ fn: () async throws -> Int) async rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try await fn() case false: try await tryAwaitSwitch4() }
+    return x
+  } catch {
+    throw error  // expected-error {{a function declared 'rethrows' may only throw if its parameter does}}
+  }
+}
+
+func tryAwaitSwitch14(_ fn: () async throws -> Int) async rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try await fn() case false: throw Err() }
+    return x
+  } catch {
+    throw error  // expected-error {{a function declared 'rethrows' may only throw if its parameter does}}
+  }
+}
+
+func tryAwaitSwitch15(_ fn: () async throws -> Int) async rethrows -> Int {
+  do {
+    let x = switch Bool.random() { case true: try await fn() case false: 0 }
+    return x
+  } catch {
+    throw error // Okay.
+  }
+}
+
+struct AnyEraserP: EraserP {
+  init<T: EraserP>(erasing: T) {}
+}
+
+@_typeEraser(AnyEraserP)
+protocol EraserP {}
+struct SomeEraserP: EraserP {}
+
+// rdar://113435870 - Make sure we allow an implicit init(erasing:) call.
+dynamic func testDynamicOpaqueErase() -> some EraserP {
+  switch Bool.random() { default: SomeEraserP() }
+}
+
+// MARK: Out of place switch exprs
+
+func inDefaultArg(x: Int = switch Bool.random() { default: 0 }) {}
+// expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+func inDefaultArg2(x: Int = { (switch Bool.random() { default: 0 }) }()) {}
+// expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+struct InType {
+  let inPropertyInit1 = switch Bool.random() { case true: 0 case false: 1 }
+  let inPropertyInit2 = (switch Bool.random() { case true: 0 case false: 1 })
+  // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+  let inPropertyInit3 = {
+    let _ = switch Bool.random() { case true: 0 case false: 1 }
+    let _ = (switch Bool.random() { case true: 0 case false: 1 })
+    // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+    func foo() {
+      let _ = switch Bool.random() { case true: 0 case false: 1 }
+      let _ = (switch Bool.random() { case true: 0 case false: 1 })
+      // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+    }
+    if .random() {
+      return switch Bool.random() { case true: 0 case false: 1 }
+    } else {
+      return (switch Bool.random() { case true: 0 case false: 1 })
+      // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+    }
+  }
+
+  subscript(x: Int = switch Bool.random() { case true: 0 case false: 0 }) -> Int {
+    // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+
+    let _ = switch Bool.random() { case true: 0 case false: 1 }
+    let _ = (switch Bool.random() { case true: 0 case false: 1 })
+    // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
+    return 0
+  }
+}
+
+func testCaptureList() {
+  let _ = { [x = switch Bool.random() { default: 1 }] in x }
+  let _ = { [x = (switch Bool.random() { default: 1 })] in x }
+  // expected-error@-1 {{'switch' may only be used as expression in return, throw, or as the source of an assignment}}
 }

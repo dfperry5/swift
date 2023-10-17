@@ -1039,18 +1039,6 @@ class C2_47269 {
   }
 }
 
-// rdar://problem/32101765 - Keypath diagnostics are not actionable/helpful
-
-struct R32101765 { let prop32101765 = 0 }
-let _: KeyPath<R32101765, Float> = \.prop32101765
-// expected-error@-1 {{key path value type 'Int' cannot be converted to contextual type 'Float'}}
-let _: KeyPath<R32101765, Float> = \R32101765.prop32101765
-// expected-error@-1 {{key path value type 'Int' cannot be converted to contextual type 'Float'}}
-let _: KeyPath<R32101765, Float> = \.prop32101765.unknown
-// expected-error@-1 {{type 'Int' has no member 'unknown'}}
-let _: KeyPath<R32101765, Float> = \R32101765.prop32101765.unknown
-// expected-error@-1 {{type 'Int' has no member 'unknown'}}
-
 // rdar://problem/32390726 - Bad Diagnostic: Don't suggest `var` to `let` when binding inside for-statement
 for var i in 0..<10 { // expected-warning {{variable 'i' was never mutated; consider removing 'var' to make it constant}} {{5-9=}}
   _ = i + 1
@@ -1556,4 +1544,27 @@ do {
   func test(result: inout [AnyHashable], value: NonHashable) {
     result.append(value) // expected-error {{argument type 'NonHashable' does not conform to expected type 'Hashable'}}
   }
+}
+
+// https://github.com/apple/swift/issues/66206
+func testNilCoalescingOperatorRemoveFix() {
+  let _ = "" ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-19=}}
+  let _ = ""     ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-23=}}
+  let _ = "" /* This is a comment */ ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{13-43=}}
+
+  let _ = "" // This is a comment
+    ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{1555:13-1556:10=}}
+
+  let _ = "" // This is a comment
+    /*
+     * The blank line below is part of the test case, do not delete it
+     */
+
+    ?? "" // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{1558:13-1563:10=}}
+
+  if ("" ?? // This is a comment // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{9-1566:9=}}
+      "").isEmpty {}
+
+  if ("" // This is a comment
+      ?? "").isEmpty {} // expected-warning {{left side of nil coalescing operator '??' has non-optional type 'String', so the right side is never used}} {{1568:9-1569:12=}}
 }

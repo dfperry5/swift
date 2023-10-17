@@ -475,6 +475,8 @@ void DistributedAccessor::decodeArgument(unsigned argumentIdx,
 
     // Remember to deallocate a copy.
     AllocatedArguments.push_back(stackAddr);
+    // Don't forget to actually store the argument
+    arguments.add(stackAddr.getAddressPointer());
     break;
   }
 
@@ -616,6 +618,8 @@ void DistributedAccessor::emit() {
 
   auto params = IGF.collectParameters();
 
+  GenericContextScope scope(IGM, targetTy->getInvocationGenericSignature());
+
   auto directResultTy = targetConv.getSILResultType(expansionContext);
   const auto &directResultTI = IGM.getTypeInfo(directResultTy);
 
@@ -651,8 +655,6 @@ void DistributedAccessor::emit() {
 
   // Witness table for decoder conformance to DistributedTargetInvocationDecoder
   auto *decoderProtocolWitness = params.claimNext();
-
-  GenericContextScope scope(IGM, targetTy->getInvocationGenericSignature());
 
   // Preliminary: Setup async context for this accessor.
   {

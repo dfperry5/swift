@@ -10,30 +10,18 @@
 #
 #===----------------------------------------------------------------------===#
 
-if(NOT swift_concurrency_extra_sources)
-  set(swift_concurrency_extra_sources
-    Clock.swift
-    ContinuousClock.swift
-    SuspendingClock.swift
-    TaskSleepDuration.swift)
-endif()
-
-if(NOT swift_concurrency_install_component)
-  set(swift_concurrency_install_component stdlib)
-endif()
-
 set(SWIFT_RUNTIME_CONCURRENCY_C_FLAGS)
 set(SWIFT_RUNTIME_CONCURRENCY_SWIFT_FLAGS)
 
 set(swift_concurrency_private_link_libraries)
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   list(APPEND swift_concurrency_private_link_libraries Synchronization)
 endif()
 
 set(swift_concurrency_incorporate_object_libraries_so swiftThreading)
 
 if("${SWIFT_CONCURRENCY_GLOBAL_EXECUTOR}" STREQUAL "dispatch")
-  if(NOT CMAKE_SYSTEM_NAME STREQUAL Darwin)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     include_directories(AFTER
                           ${SWIFT_PATH_TO_LIBDISPATCH_SOURCE})
 
@@ -62,7 +50,7 @@ endif()
 
 # Don't emit extended frame info on platforms other than darwin, system
 # backtracer and system debugger are unlikely to support it.
-if(CMAKE_SYSTEM_NAME STREQUAL Darwin)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   list(APPEND SWIFT_RUNTIME_CONCURRENCY_C_FLAGS
     "-fswift-async-fp=${swift_concurrency_async_fp_mode}")
   list(APPEND SWIFT_RUNTIME_CONCURRENCY_SWIFT_FLAGS
@@ -75,17 +63,31 @@ endif()
 list(APPEND SWIFT_RUNTIME_CONCURRENCY_C_FLAGS
   "-D__STDC_WANT_LIB_EXT1__=1")
 
-add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
+set(SWIFT_RUNTIME_CONCURRENCY_C_SOURCES
   ../CompatibilityOverride/CompatibilityOverride.cpp
   Actor.cpp
-  Actor.swift
   AsyncLet.cpp
-  AsyncLet.swift
-  CheckedContinuation.swift
   Clock.cpp
   GlobalExecutor.cpp
-  Errors.swift
+  EmbeddedSupport.cpp
   Error.cpp
+  Setup.cpp
+  Task.cpp
+  TaskAlloc.cpp
+  TaskStatus.cpp
+  TaskGroup.cpp
+  TaskLocal.cpp
+  ThreadingError.cpp
+  TracingSignpost.cpp
+  AsyncStream.cpp
+  linker-support/magic-symbols-for-install-name.c
+)
+
+set(SWIFT_RUNTIME_CONCURRENCY_SWIFT_SOURCES
+  Actor.swift
+  AsyncLet.swift
+  CheckedContinuation.swift
+  Errors.swift
   Executor.swift
   ExecutorAssertions.swift
   AsyncCompactMapSequence.swift
@@ -107,28 +109,44 @@ add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
   GlobalActor.swift
   MainActor.swift
   PartialAsyncTask.swift
-  Setup.cpp
   SourceCompatibilityShims.swift
-  Task.cpp
   Task.swift
   TaskCancellation.swift
-  TaskAlloc.cpp
-  TaskStatus.cpp
-  TaskGroup.cpp
   TaskGroup.swift
   DiscardingTaskGroup.swift
-  TaskLocal.cpp
   TaskLocal.swift
   TaskSleep.swift
-  ThreadingError.cpp
-  TracingSignpost.cpp
   AsyncStreamBuffer.swift
   AsyncStream.swift
   AsyncThrowingStream.swift
-  AsyncStream.cpp
-  Deque.swift
-  ${swift_concurrency_extra_sources}
-  linker-support/magic-symbols-for-install-name.c
+  Deque/_DequeBuffer.swift
+  Deque/_DequeBufferHeader.swift
+  Deque/_DequeSlot.swift
+  Deque/_UnsafeWrappedBuffer.swift
+  Deque/Compatibility.swift
+  Deque/Deque+Storage.swift
+  Deque/Deque+UnsafeHandle.swift
+  Deque/Deque.swift
+  Deque/Deque+Codable.swift
+  Deque/Deque+Collection.swift
+  Deque/Deque+CustomDebugStringConvertible.swift
+  Deque/Deque+CustomReflectable.swift
+  Deque/Deque+CustomStringConvertible.swift
+  Deque/Deque+Equatable.swift
+  Deque/Deque+ExpressibleByArrayLiteral.swift
+  Deque/Deque+Extras.swift
+  Deque/Deque+Hashable.swift
+  Deque/Deque+Testing.swift
+  Deque/UnsafeMutableBufferPointer+Utilities.swift
+  Clock.swift
+  ContinuousClock.swift
+  SuspendingClock.swift
+  TaskSleepDuration.swift
+)
+
+add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
+  ${SWIFT_RUNTIME_CONCURRENCY_C_SOURCES}
+  ${SWIFT_RUNTIME_CONCURRENCY_SWIFT_SOURCES}
 
   SWIFT_MODULE_DEPENDS_LINUX Glibc
   SWIFT_MODULE_DEPENDS_FREEBSD Glibc
@@ -152,6 +170,92 @@ add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
     -diagnostic-style swift
     ${SWIFT_RUNTIME_CONCURRENCY_SWIFT_FLAGS}
   ${swift_concurrency_options}
-  INSTALL_IN_COMPONENT ${swift_concurrency_install_component}
+  INSTALL_IN_COMPONENT stdlib
   MACCATALYST_BUILD_FLAVOR zippered
 )
+
+# Embedded Swift Concurrency library
+set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY TRUE)
+is_build_type_optimized("${SWIFT_STDLIB_BUILD_TYPE}" swift_optimized)
+if(NOT swift_optimized)
+  set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY FALSE)
+elseif(BOOTSTRAPPING_MODE STREQUAL "OFF")
+  set(SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY FALSE)
+endif()
+if(SWIFT_SHOULD_BUILD_EMBEDDED_STDLIB AND SWIFT_SHOULD_BUILD_EMBEDDED_CONCURRENCY)
+  add_custom_target(embedded-concurrency ALL)
+
+  set(SWIFT_ENABLE_REFLECTION OFF)
+  set(SWIFT_STDLIB_SUPPORT_BACK_DEPLOYMENT OFF)
+  set(SWIFT_STDLIB_STABLE_ABI OFF)
+  set(SWIFT_STDLIB_ENABLE_OBJC_INTEROP OFF)
+  set(SWIFT_STDLIB_SINGLE_THREADED_CONCURRENCY TRUE)
+  set(SWIFT_STDLIB_CONCURRENCY_TRACING FALSE)
+
+  foreach(entry ${EMBEDDED_STDLIB_TARGET_TRIPLES})
+    string(REGEX REPLACE "[ \t]+" ";" list "${entry}")
+    list(GET list 0 arch)
+    list(GET list 1 mod)
+    list(GET list 2 triple)
+
+    # TODO: Only build embedded Swift Concurrency for macOS, for now.
+    if(NOT "${mod}" MATCHES "-macos$")
+      continue()
+    endif()
+    
+    set(SWIFT_SDK_embedded_ARCH_${mod}_MODULE "${mod}")
+    set(SWIFT_SDK_embedded_LIB_SUBDIR "embedded")
+    set(SWIFT_SDK_embedded_ARCH_${mod}_TRIPLE "${triple}")
+    add_swift_target_library_single(
+      embedded-concurrency-${mod}
+      swift_Concurrency
+      STATIC
+      IS_STDLIB IS_FRAGILE
+
+      ${SWIFT_RUNTIME_CONCURRENCY_C_SOURCES}
+      # TODO: Only a subset of Swift Concurrency .swift sources, for now.
+      Actor.swift
+      AsyncLet.swift
+      CheckedContinuation.swift
+      Errors.swift
+      Executor.swift
+      ExecutorAssertions.swift
+      AsyncCompactMapSequence.swift
+      AsyncDropFirstSequence.swift
+      AsyncDropWhileSequence.swift
+      AsyncFilterSequence.swift
+      AsyncFlatMapSequence.swift
+      AsyncIteratorProtocol.swift
+      AsyncMapSequence.swift
+      AsyncPrefixSequence.swift
+      AsyncPrefixWhileSequence.swift
+      AsyncSequence.swift
+      AsyncThrowingCompactMapSequence.swift
+      AsyncThrowingDropWhileSequence.swift
+      AsyncThrowingFilterSequence.swift
+      AsyncThrowingFlatMapSequence.swift
+      AsyncThrowingMapSequence.swift
+      AsyncThrowingPrefixWhileSequence.swift
+      GlobalActor.swift
+      PartialAsyncTask.swift
+      Task.swift
+      TaskCancellation.swift
+
+      SWIFT_COMPILE_FLAGS
+        -Xcc -D__MACH__ -Xcc -D__APPLE__ -Xcc -ffreestanding -enable-experimental-feature Embedded
+        -parse-stdlib -DSWIFT_CONCURRENCY_EMBEDDED
+        ${SWIFT_RUNTIME_CONCURRENCY_SWIFT_FLAGS}
+      C_COMPILE_FLAGS
+        -D__MACH__ -D__APPLE__ -ffreestanding
+        ${SWIFT_RUNTIME_CONCURRENCY_C_FLAGS} -DSWIFT_CONCURRENCY_EMBEDDED=1
+      MODULE_DIR "${CMAKE_BINARY_DIR}/lib/swift/embedded"
+      SDK "embedded"
+      ARCHITECTURE "${mod}"
+      DEPENDS embedded-stdlib-${mod}
+      INSTALL_IN_COMPONENT "never_install"
+      )
+    set_property(TARGET embedded-concurrency-${mod} PROPERTY OSX_ARCHITECTURES "${arch}")
+
+    add_dependencies(embedded-concurrency embedded-concurrency-${mod})
+  endforeach()
+endif()

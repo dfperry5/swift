@@ -220,6 +220,12 @@ void CleanupManager::setCleanupState(CleanupsDepth depth, CleanupState state) {
     popTopDeadCleanups();
 }
 
+bool CleanupManager::isFormalAccessCleanup(CleanupHandle depth) {
+  using RawTy = std::underlying_type<Cleanup::Flags>::type;
+  auto state = getFlagsAndWritebackBuffer(depth);
+  return RawTy(std::get<0>(state)) & RawTy(Cleanup::Flags::FormalAccessCleanup);
+}
+
 std::tuple<Cleanup::Flags, llvm::Optional<SILValue>>
 CleanupManager::getFlagsAndWritebackBuffer(CleanupHandle depth) {
   auto iter = stack.find(depth);
@@ -395,7 +401,9 @@ ManagedValue CleanupCloner::clone(SILValue value) const {
   }
 
   if (!hasCleanup) {
-    return ManagedValue::forUnmanaged(value);
+    if (value->getOwnershipKind().isCompatibleWith(OwnershipKind::Owned))
+      return ManagedValue::forUnmanagedOwnedValue(value);
+    return ManagedValue::forBorrowedRValue(value);
   }
 
   if (writebackBuffer.has_value()) {
@@ -430,19 +438,19 @@ CleanupCloner::cloneForTuplePackExpansionComponent(SILValue tupleAddr,
   }
 
   if (!hasCleanup) {
-    return ManagedValue::forUnmanaged(tupleAddr);
+    return ManagedValue::forBorrowedAddressRValue(tupleAddr);
   }
 
   assert(!writebackBuffer.has_value());
   auto expansionTy = tupleAddr->getType().getTupleElementType(componentIndex);
   if (expansionTy.getPackExpansionPatternType().isTrivial(SGF.F))
-    return ManagedValue::forUnmanaged(tupleAddr);
+    return ManagedValue::forTrivialAddressRValue(tupleAddr);
 
   auto cleanup =
     SGF.enterPartialDestroyRemainingTupleCleanup(tupleAddr, inducedPackType,
                                                  componentIndex,
                                                  /*start at */ SILValue());
-  return ManagedValue(tupleAddr, cleanup);
+  return ManagedValue::forOwnedAddressRValue(tupleAddr, cleanup);
 }
 
 ManagedValue
@@ -454,19 +462,19 @@ CleanupCloner::cloneForPackPackExpansionComponent(SILValue packAddr,
   }
 
   if (!hasCleanup) {
-    return ManagedValue::forUnmanaged(packAddr);
+    return ManagedValue::forBorrowedAddressRValue(packAddr);
   }
 
   assert(!writebackBuffer.has_value());
   auto expansionTy = packAddr->getType().getPackElementType(componentIndex);
   if (expansionTy.getPackExpansionPatternType().isTrivial(SGF.F))
-    return ManagedValue::forUnmanaged(packAddr);
+    return ManagedValue::forTrivialAddressRValue(packAddr);
 
   auto cleanup =
     SGF.enterPartialDestroyRemainingPackCleanup(packAddr, formalPackType,
                                                 componentIndex,
                                                 /*start at */ SILValue());
-  return ManagedValue(packAddr, cleanup);
+  return ManagedValue::forOwnedAddressRValue(packAddr, cleanup);
 }
 
 ManagedValue
@@ -478,7 +486,7 @@ CleanupCloner::cloneForRemainingPackComponents(SILValue packAddr,
   }
 
   if (!hasCleanup) {
-    return ManagedValue::forUnmanaged(packAddr);
+    return ManagedValue::forBorrowedAddressRValue(packAddr);
   }
 
   assert(!writebackBuffer.has_value());
@@ -492,12 +500,12 @@ CleanupCloner::cloneForRemainingPackComponents(SILValue packAddr,
   }
 
   if (isTrivial)
-    return ManagedValue::forUnmanaged(packAddr);
+    return ManagedValue::forTrivialAddressRValue(packAddr);
 
   auto cleanup =
     SGF.enterDestroyRemainingPackComponentsCleanup(packAddr, formalPackType,
                                                    firstComponentIndex);
-  return ManagedValue(packAddr, cleanup);
+  return ManagedValue::forOwnedAddressRValue(packAddr, cleanup);
 }
 
 ManagedValue
@@ -509,7 +517,7 @@ CleanupCloner::cloneForRemainingTupleComponents(SILValue tupleAddr,
   }
 
   if (!hasCleanup) {
-    return ManagedValue::forUnmanaged(tupleAddr);
+    return ManagedValue::forBorrowedAddressRValue(tupleAddr);
   }
 
   assert(!writebackBuffer.has_value());
@@ -523,11 +531,11 @@ CleanupCloner::cloneForRemainingTupleComponents(SILValue tupleAddr,
   }
 
   if (isTrivial)
-    return ManagedValue::forUnmanaged(tupleAddr);
+    return ManagedValue::forTrivialAddressRValue(tupleAddr);
 
   auto cleanup =
     SGF.enterDestroyRemainingTupleElementsCleanup(tupleAddr,
                                                   inducedPackType,
                                                   firstComponentIndex);
-  return ManagedValue(tupleAddr, cleanup);
+  return ManagedValue::forOwnedAddressRValue(tupleAddr, cleanup);
 }

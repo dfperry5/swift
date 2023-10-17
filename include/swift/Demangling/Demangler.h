@@ -206,7 +206,8 @@ public:
     if (Growth < Capacity * 2)
       Growth = Capacity * 2;
     T *NewObjects = Allocate<T>(Capacity + Growth);
-    memcpy(NewObjects, Objects, OldAllocSize);
+    if (OldAllocSize)
+      memcpy(NewObjects, Objects, OldAllocSize);
     Objects = NewObjects;
     Capacity += Growth;
   }
@@ -382,6 +383,8 @@ enum class SymbolicReferenceKind : uint8_t {
   UniqueExtendedExistentialTypeShape,
   /// A symbolic reference to a non-unique extended existential type shape.
   NonUniqueExtendedExistentialTypeShape,
+  /// A symbolic reference to a objective C protocol ref.
+  ObjectiveCProtocol,
 };
 
 using SymbolicReferenceResolver_t = NodePointer (SymbolicReferenceKind,

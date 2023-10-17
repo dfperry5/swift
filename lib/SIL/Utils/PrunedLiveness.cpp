@@ -19,6 +19,7 @@
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILValue.h"
 #include "swift/SIL/ScopedAddressUtils.h"
+#include "swift/SIL/Test.h"
 
 using namespace swift;
 
@@ -84,10 +85,17 @@ void PrunedLiveBlocks::dump() const {
 void PrunedLiveness::print(llvm::raw_ostream &OS) const {
   liveBlocks.print(OS);
   for (auto &userAndIsLifetimeEnding : users) {
-    if (userAndIsLifetimeEnding.second)
+    switch (userAndIsLifetimeEnding.second) {
+    case LifetimeEnding::Value::NonUse:
+      OS << "non-user: ";
+      break;
+    case LifetimeEnding::Value::Ending:
       OS << "lifetime-ending user: ";
-    else
+      break;
+    case LifetimeEnding::Value::NonEnding:
       OS << "regular user: ";
+      break;
+    }
     userAndIsLifetimeEnding.first->print(OS);
   }
 }
@@ -161,13 +169,33 @@ void PrunedLivenessBoundary::visitInsertionPoints(
   }
 }
 
+namespace swift::test {
+// Arguments:
+// - variadic list of - instruction: a last user
+// Dumps:
+// - the insertion points
+static FunctionTest
+    PrunedLivenessBoundaryWithListOfLastUsersInsertionPointsTest(
+        "pruned_liveness_boundary_with_list_of_last_users_insertion_points",
+        [](auto &function, auto &arguments, auto &test) {
+          PrunedLivenessBoundary boundary;
+          while (arguments.hasUntaken()) {
+            boundary.lastUsers.push_back(arguments.takeInstruction());
+          }
+          boundary.visitInsertionPoints([](SILBasicBlock::iterator point) {
+            point->print(llvm::outs());
+          });
+        });
+} // end namespace swift::test
+
 //===----------------------------------------------------------------------===//
 //                              PrunedLiveRange
 //===----------------------------------------------------------------------===//
 
 template <typename LivenessWithDefs>
-void PrunedLiveRange<LivenessWithDefs>::updateForUse(SILInstruction *user,
-                                                     bool lifetimeEnding) {
+void PrunedLiveRange<LivenessWithDefs>::updateForUse(
+    SILInstruction *user,
+    PrunedLiveRange<LivenessWithDefs>::LifetimeEnding lifetimeEnding) {
   liveBlocks.updateForUse(user, asImpl().isUserBeforeDef(user));
 
   // Note that a user may use the current value from multiple operands. If any
@@ -183,7 +211,17 @@ void PrunedLiveRange<LivenessWithDefs>::updateForUse(SILInstruction *user,
   // argument must be copied.
   auto iterAndSuccess = users.insert({user, lifetimeEnding});
   if (!iterAndSuccess.second)
-    iterAndSuccess.first->second &= lifetimeEnding;
+    iterAndSuccess.first->second.meetInPlace(lifetimeEnding);
+}
+template <typename LivenessWithDefs>
+void PrunedLiveRange<LivenessWithDefs>::updateForUse(SILInstruction *user,
+                                                     bool lifetimeEnding) {
+  updateForUse(user, LifetimeEnding(lifetimeEnding));
+}
+
+template <typename LivenessWithDefs>
+void PrunedLiveRange<LivenessWithDefs>::extendToNonUse(SILInstruction *inst) {
+  updateForUse(inst, LifetimeEnding::NonUse());
 }
 
 template <typename LivenessWithDefs>
@@ -238,7 +276,7 @@ template <typename LivenessWithDefs>
 void PrunedLiveRange<LivenessWithDefs>::extendAcrossLiveness(
     PrunedLiveness &otherLiveness) {
   // update this liveness for all the interesting users in otherLiveness.
-  for (std::pair<SILInstruction *, bool> userAndEnd :
+  for (std::pair<SILInstruction *, LifetimeEnding> userAndEnd :
        otherLiveness.getAllUsers()) {
     updateForUse(userAndEnd.first, userAndEnd.second);
   }
@@ -321,6 +359,96 @@ LiveRangeSummary PrunedLiveRange<LivenessWithDefs>::recursivelyUpdateForDef(
   }
   return summary;
 }
+
+namespace swift::test {
+// Arguments:
+// - SILValue: value to a analyze
+// Dumps:
+// - the liveness result and boundary
+static FunctionTest SSALivenessTest("ssa_liveness", [](auto &function,
+                                                       auto &arguments,
+                                                       auto &test) {
+  auto value = arguments.takeValue();
+  assert(!arguments.hasUntaken());
+  llvm::outs() << "SSA lifetime analysis: " << value;
+
+  SmallVector<SILBasicBlock *, 8> discoveredBlocks;
+  SSAPrunedLiveness liveness(value->getFunction(), &discoveredBlocks);
+  liveness.initializeDef(value);
+  LiveRangeSummary summary = liveness.computeSimple();
+  if (summary.innerBorrowKind == InnerBorrowKind::Reborrowed)
+    llvm::outs() << "Incomplete liveness: Reborrowed inner scope\n";
+
+  if (summary.addressUseKind == AddressUseKind::PointerEscape)
+    llvm::outs() << "Incomplete liveness: Escaping address\n";
+  else if (summary.addressUseKind == AddressUseKind::Unknown)
+    llvm::outs() << "Incomplete liveness: Unknown address use\n";
+
+  liveness.print(llvm::outs());
+
+  PrunedLivenessBoundary boundary;
+  liveness.computeBoundary(boundary);
+  boundary.print(llvm::outs());
+});
+
+// Arguments:
+// - SILValue: def whose pruned liveness will be calculated
+// - the string "uses:"
+// - variadic list of live-range user instructions
+// Dumps:
+// -
+static FunctionTest SSAUseLivenessTest("ssa_use_liveness", [](auto &function,
+                                                              auto &arguments,
+                                                              auto &test) {
+  auto value = arguments.takeValue();
+  SmallVector<SILBasicBlock *, 8> discoveredBlocks;
+  SSAPrunedLiveness liveness(&function, &discoveredBlocks);
+  liveness.initializeDef(value);
+
+  auto argument = arguments.takeArgument();
+  if (cast<StringArgument>(argument).getValue() != "uses:") {
+    llvm::report_fatal_error("test specification expects the 'uses:' label\n");
+  }
+
+  while (arguments.hasUntaken()) {
+    auto *inst = arguments.takeInstruction();
+    auto kindString = arguments.takeString();
+    enum Kind {
+      NonUse,
+      Ending,
+      NonEnding,
+    };
+    auto kind = llvm::StringSwitch<llvm::Optional<Kind>>(kindString)
+                    .Case("non-use", Kind::NonUse)
+                    .Case("ending", Kind::Ending)
+                    .Case("non-ending", Kind::NonEnding)
+                    .Default(llvm::None);
+    if (!kind.has_value()) {
+      llvm::errs() << "Unknown kind: " << kindString << "\n";
+      llvm::report_fatal_error("Bad user kind.  Value must be one of "
+                               "'non-use', 'ending', 'non-ending'");
+    }
+    switch (kind.value()) {
+    case Kind::NonUse:
+      liveness.extendToNonUse(inst);
+      break;
+    case Kind::Ending:
+      liveness.updateForUse(inst, /*lifetimeEnding*/ true);
+      break;
+    case Kind::NonEnding:
+      liveness.updateForUse(inst, /*lifetimeEnding*/ false);
+      break;
+    }
+  }
+
+  liveness.print(llvm::outs());
+
+  PrunedLivenessBoundary boundary;
+  liveness.computeBoundary(boundary);
+  boundary.print(llvm::outs());
+});
+
+} // end namespace swift::test
 
 template <typename LivenessWithDefs>
 bool PrunedLiveRange<LivenessWithDefs>::isWithinBoundary(
@@ -550,6 +678,65 @@ bool MultiDefPrunedLiveness::isUserBeforeDef(SILInstruction *user) const {
   }
 }
 
+namespace swift::test {
+// Arguments:
+// - the string "defs:"
+// - list of live-range defining values or instructions
+// - the string "uses:"
+// - variadic list of live-range user instructions
+// Dumps:
+// - the liveness result and boundary
+//
+// Computes liveness for the specified def nodes by considering only the
+// specified uses. The actual uses of the def nodes are ignored.
+//
+// This is useful for testing non-ssa liveness, for example, of memory
+// locations. In that case, the def nodes may be stores and the uses may be
+// destroy_addrs.
+static FunctionTest MultiDefUseLivenessTest(
+    "multidefuse_liveness", [](auto &function, auto &arguments, auto &test) {
+      SmallVector<SILBasicBlock *, 8> discoveredBlocks;
+      MultiDefPrunedLiveness liveness(&function, &discoveredBlocks);
+
+      llvm::outs() << "MultiDef lifetime analysis:\n";
+      if (arguments.takeString() != "defs:") {
+        llvm::report_fatal_error(
+            "test specification expects the 'defs:' label\n");
+      }
+      while (true) {
+        auto argument = arguments.takeArgument();
+        if (isa<InstructionArgument>(argument)) {
+          auto *instruction = cast<InstructionArgument>(argument).getValue();
+          llvm::outs() << "  def instruction: " << *instruction;
+          liveness.initializeDef(instruction);
+          continue;
+        }
+        if (isa<ValueArgument>(argument)) {
+          SILValue value = cast<ValueArgument>(argument).getValue();
+          llvm::outs() << "  def value: " << value;
+          liveness.initializeDef(value);
+          continue;
+        }
+        if (cast<StringArgument>(argument).getValue() != "uses:") {
+          llvm::report_fatal_error(
+              "test specification expects the 'uses:' label\n");
+        }
+        break;
+      }
+      while (arguments.hasUntaken()) {
+        auto *inst = arguments.takeInstruction();
+        // lifetimeEnding has no effects on liveness, it's only a cache for the
+        // caller.
+        liveness.updateForUse(inst, /*lifetimeEnding*/ false);
+      }
+      liveness.print(llvm::outs());
+
+      PrunedLivenessBoundary boundary;
+      liveness.computeBoundary(boundary);
+      boundary.print(llvm::outs());
+    });
+} // end namespace swift::test
+
 void MultiDefPrunedLiveness::findBoundariesInBlock(
     SILBasicBlock *block, bool isLiveOut,
     PrunedLivenessBoundary &boundary) const {
@@ -627,6 +814,41 @@ LiveRangeSummary MultiDefPrunedLiveness::computeSimple() {
   }
   return summary;
 }
+
+namespace swift::test {
+// Arguments:
+// - variadic list of live-range defining values or instructions
+// Dumps:
+// - the liveness result and boundary
+//
+// Computes liveness for the specified def nodes by finding all their direct SSA
+// uses. If the def is an instruction, then all results are considered.
+static FunctionTest MultiDefLivenessTest(
+    "multidef_liveness", [](auto &function, auto &arguments, auto &test) {
+      SmallVector<SILBasicBlock *, 8> discoveredBlocks;
+      MultiDefPrunedLiveness liveness(&function, &discoveredBlocks);
+
+      llvm::outs() << "MultiDef lifetime analysis:\n";
+      while (arguments.hasUntaken()) {
+        auto argument = arguments.takeArgument();
+        if (isa<InstructionArgument>(argument)) {
+          auto *instruction = cast<InstructionArgument>(argument).getValue();
+          llvm::outs() << "  def instruction: " << instruction;
+          liveness.initializeDef(instruction);
+        } else {
+          SILValue value = cast<ValueArgument>(argument).getValue();
+          llvm::outs() << "  def value: " << value;
+          liveness.initializeDef(value);
+        }
+      }
+      liveness.computeSimple();
+      liveness.print(llvm::outs());
+
+      PrunedLivenessBoundary boundary;
+      liveness.computeBoundary(boundary);
+      boundary.print(llvm::outs());
+    });
+} // end namespace swift::test
 
 //===----------------------------------------------------------------------===//
 //                       DiagnosticPrunedLiveness

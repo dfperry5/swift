@@ -1296,13 +1296,6 @@ AllowInvalidRefInKeyPath::create(ConstraintSystem &cs, RefKind kind,
       AllowInvalidRefInKeyPath(cs, kind, member, locator);
 }
 
-KeyPathContextualMismatch *
-KeyPathContextualMismatch::create(ConstraintSystem &cs, Type lhs, Type rhs,
-                                  ConstraintLocator *locator) {
-  return new (cs.getAllocator())
-      KeyPathContextualMismatch(cs, lhs, rhs, locator);
-}
-
 bool RemoveAddressOf::diagnose(const Solution &solution, bool asNote) const {
   InvalidUseOfAddressOf failure(solution, getFromType(), getToType(),
                                 getLocator());
@@ -1625,6 +1618,21 @@ DropThrowsAttribute *DropThrowsAttribute::create(ConstraintSystem &cs,
                                                  ConstraintLocator *locator) {
   return new (cs.getAllocator())
       DropThrowsAttribute(cs, fromType, toType, locator);
+}
+
+bool IgnoreThrownErrorMismatch::diagnose(const Solution &solution,
+                                   bool asNote) const {
+  ThrownErrorTypeConversionFailure failure(solution, getFromType(),
+                                           getToType(), getLocator());
+  return failure.diagnose(asNote);
+}
+
+IgnoreThrownErrorMismatch *IgnoreThrownErrorMismatch::create(ConstraintSystem &cs,
+                                                 Type fromErrorType,
+                                                 Type toErrorType,
+                                                 ConstraintLocator *locator) {
+  return new (cs.getAllocator())
+      IgnoreThrownErrorMismatch(cs, fromErrorType, toErrorType, locator);
 }
 
 bool DropAsyncAttribute::diagnose(const Solution &solution,
@@ -2841,6 +2849,18 @@ AllowConcreteTypeSpecialization::create(ConstraintSystem &cs, Type concreteTy,
                                         ConstraintLocator *locator) {
   return new (cs.getAllocator())
       AllowConcreteTypeSpecialization(cs, concreteTy, locator);
+}
+
+bool IgnoreOutOfPlaceThenStmt::diagnose(const Solution &solution,
+                                        bool asNote) const {
+  OutOfPlaceThenStmtFailure failure(solution, getLocator());
+  return failure.diagnose(asNote);
+}
+
+IgnoreOutOfPlaceThenStmt *
+IgnoreOutOfPlaceThenStmt::create(ConstraintSystem &cs,
+                                 ConstraintLocator *locator) {
+  return new (cs.getAllocator()) IgnoreOutOfPlaceThenStmt(cs, locator);
 }
 
 bool IgnoreGenericSpecializationArityMismatch::diagnose(

@@ -51,6 +51,13 @@ namespace swift {
 /// or false to indicate that matching should exit early.
 template<typename ImplClass>
 class TypeMatcher {
+public:
+  enum class Position : uint8_t {
+    Type,
+    Shape
+  };
+
+private:
   class MatchVisitor : public CanTypeVisitor<MatchVisitor, bool, Type, Type> {
     TypeMatcher &Matcher;
 
@@ -192,11 +199,24 @@ class TypeMatcher {
 
     bool visitPackExpansionType(CanPackExpansionType firstPE, Type secondType,
                                 Type sugaredFirstType) {
-      if (auto secondInOut = secondType->getAs<PackExpansionType>()) {
-        return this->visit(firstPE.getPatternType(),
-                           secondInOut->getPatternType(),
-                           sugaredFirstType->castTo<PackExpansionType>()
-                             ->getPatternType());
+      if (auto secondExpansion = secondType->getAs<PackExpansionType>()) {
+        if (!this->visit(firstPE.getPatternType(),
+                         secondExpansion->getPatternType(),
+                         sugaredFirstType->castTo<PackExpansionType>()
+                           ->getPatternType())) {
+          return false;
+        }
+
+        Matcher.asDerived().pushPosition(Position::Shape);
+        if (!this->visit(firstPE.getCountType(),
+                         secondExpansion->getCountType(),
+                         sugaredFirstType->castTo<PackExpansionType>()
+                           ->getCountType())) {
+          return false;
+        }
+        Matcher.asDerived().popPosition(Position::Shape);
+
+        return true;
       }
 
       return mismatch(firstPE.getPointer(), secondType, sugaredFirstType);
@@ -377,6 +397,15 @@ class TypeMatcher {
             return false;
         }
 
+        // If requested, compare the thrown error types.
+        Type thrownError1 = firstFunc->getEffectiveThrownErrorTypeOrNever();
+        Type thrownError2 = secondFunc->getEffectiveThrownErrorTypeOrNever();
+        if (Matcher.asDerived().considerThrownErrorTypes(thrownError1,
+                                                         thrownError2) &&
+            !this->visit(thrownError1->getCanonicalType(),
+                         thrownError2, thrownError1))
+          return false;
+
         return this->visit(firstFunc.getResult(), secondFunc->getResult(),
                            sugaredFirstFunc->getResult());
       }
@@ -524,6 +553,9 @@ class TypeMatcher {
 
   bool alwaysMismatchTypeParameters() const { return false; }
 
+  void pushPosition(Position pos) {}
+  void popPosition(Position pos) {}
+
   ImplClass &asDerived() { return static_cast<ImplClass &>(*this); }
 
   const ImplClass &asDerived() const {
@@ -534,6 +566,10 @@ public:
   bool match(Type first, Type second) {
     return MatchVisitor(*this).visit(first->getCanonicalType(), second,
                                      first);
+  }
+
+  bool considerThrownErrorTypes(Type errorType1, Type errorType2) const {
+    return false;
   }
 };
 

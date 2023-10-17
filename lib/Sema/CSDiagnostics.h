@@ -211,8 +211,8 @@ protected:
 class RequirementFailure : public FailureDiagnostic {
 protected:
   using PathEltKind = ConstraintLocator::PathElementKind;
-  using DiagOnDecl = Diag<DescriptiveDeclKind, DeclName, Type, Type>;
-  using DiagInReference = Diag<DescriptiveDeclKind, DeclName, Type, Type, Type>;
+  using DiagOnDecl = Diag<const ValueDecl *, Type, Type>;
+  using DiagInReference = Diag<const ValueDecl *, Type, Type, Type>;
   using DiagAsNote = Diag<Type, Type, Type, Type>;
 
   /// If this failure associated with one of the conditional requirements,
@@ -933,6 +933,24 @@ public:
   bool diagnoseAsError() override;
 };
 
+/// Diagnose failures related to conversion between the thrown error type
+/// of two function types, e.g.,
+///
+/// ```swift
+/// func foo<T>(_ t: T) throws(MyError) -> Void {}
+/// let _: (Int) throws (OtherError)-> Void = foo
+///   // `MyError` can't be implicitly converted to `OtherError`
+/// ```
+class ThrownErrorTypeConversionFailure final : public ContextualFailure {
+public:
+  ThrownErrorTypeConversionFailure(const Solution &solution, Type fromType,
+                                    Type toType, ConstraintLocator *locator)
+      : ContextualFailure(solution, fromType, toType, locator) {
+  }
+
+  bool diagnoseAsError() override;
+};
+
 /// Diagnose failures related to conversion between 'async' function type
 /// and a synchronous one e.g.
 ///
@@ -1276,6 +1294,9 @@ private:
   static DeclName findCorrectEnumCaseName(Type Ty,
                                           TypoCorrectionResults &corrections,
                                           DeclNameRef memberName);
+
+  static ValueDecl *findImportedCaseWithMatchingSuffix(Type instanceTy,
+                                                       DeclNameRef name);
 };
 
 class UnintendedExtraGenericParamMemberFailure final
@@ -1700,6 +1721,8 @@ public:
     assert(locator->isInKeyPathComponent() ||
            locator->isForKeyPathDynamicMemberLookup());
   }
+
+  ValueDecl *getMember() const { return Member; }
 
   DescriptiveDeclKind getKind() const { return Member->getDescriptiveKind(); }
 
@@ -3067,6 +3090,16 @@ public:
                              ConstraintLocator *locator)
       : FailureDiagnostic(solution, locator),
         ConcreteType(resolveType(concreteTy)) {}
+
+  bool diagnoseAsError() override;
+};
+
+/// Diagnose an out-of-place ThenStmt.
+class OutOfPlaceThenStmtFailure final : public FailureDiagnostic {
+public:
+  OutOfPlaceThenStmtFailure(const Solution &solution,
+                            ConstraintLocator *locator)
+      : FailureDiagnostic(solution, locator) {}
 
   bool diagnoseAsError() override;
 };

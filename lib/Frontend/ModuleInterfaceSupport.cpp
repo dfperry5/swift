@@ -233,6 +233,7 @@ static void printImports(raw_ostream &out,
                          ModuleDecl *M,
                          const llvm::SmallSet<StringRef, 4>
                            &AliasModuleNamesTargets) {
+  auto &ctx = M->getASTContext();
   // FIXME: This is very similar to what's in Serializer::writeInputBlock, but
   // it's not obvious what higher-level optimization would be factored out here.
   ModuleDecl::ImportFilter allImportFilter = {
@@ -290,7 +291,7 @@ static void printImports(raw_ostream &out,
     M->getMissingImportedModules(allImports);
 
   ImportedModule::removeDuplicates(allImports);
-  diagnoseScopedImports(M->getASTContext().Diags, allImports);
+  diagnoseScopedImports(ctx.Diags, allImports);
 
   // Collect the public imports as a subset so that we can mark them with
   // '@_exported'.
@@ -310,7 +311,7 @@ static void printImports(raw_ostream &out,
     // 'import Builtin' in the interface. '-parse-stdlib' still implicitly
     // imports it however...
     if (importedModule->isBuiltinModule() &&
-        !M->getASTContext().LangOpts.hasFeature(Feature::BuiltinModule)) {
+        !ctx.LangOpts.hasFeature(Feature::BuiltinModule)) {
       continue;
     }
 
@@ -346,6 +347,10 @@ static void printImports(raw_ostream &out,
       // List of imported SPI groups for local use.
       for (auto spiName : spis)
         out << "@_spi(" << spiName << ") ";
+    }
+
+    if (ctx.LangOpts.hasFeature(Feature::InternalImportsByDefault)) {
+      out << "public ";
     }
 
     out << "import ";
@@ -479,12 +484,12 @@ class InheritedProtocolCollector {
   /// If \p skipExtra is true then avoid recording any extra protocols to
   /// print, such as synthesized conformances or conformances to non-public
   /// protocols.
-  void recordProtocols(ArrayRef<InheritedEntry> directlyInherited,
-                       const Decl *D, bool skipExtra = false) {
+  void recordProtocols(InheritedTypes directlyInherited, const Decl *D,
+                       bool skipExtra = false) {
     llvm::Optional<AvailableAttrList> availableAttrs;
 
-    for (InheritedEntry inherited : directlyInherited) {
-      Type inheritedTy = inherited.getType();
+    for (int i : directlyInherited.getIndices()) {
+      Type inheritedTy = directlyInherited.getResolvedType(i);
       if (!inheritedTy || !inheritedTy->isExistentialType())
         continue;
 
@@ -492,6 +497,7 @@ class InheritedProtocolCollector {
       if (!canPrintNormally && skipExtra)
         continue;
 
+      auto inherited = directlyInherited.getEntry(i);
       ExistentialLayout layout = inheritedTy->getExistentialLayout();
       for (ProtocolDecl *protoDecl : layout.getProtocols()) {
         if (canPrintNormally)
@@ -526,8 +532,9 @@ class InheritedProtocolCollector {
   /// For each type directly inherited by \p extension, record any protocols
   /// that we would have printed in ConditionalConformanceProtocols.
   void recordConditionalConformances(const ExtensionDecl *extension) {
-    for (TypeLoc inherited : extension->getInherited()) {
-      Type inheritedTy = inherited.getType();
+    auto inheritedTypes = extension->getInherited();
+    for (unsigned i : inheritedTypes.getIndices()) {
+      Type inheritedTy = inheritedTypes.getResolvedType(i);
       if (!inheritedTy || !inheritedTy->isExistentialType())
         continue;
 
@@ -551,7 +558,7 @@ public:
   ///
   /// \sa recordProtocols
   static void collectProtocols(PerTypeMap &map, const Decl *D) {
-    ArrayRef<InheritedEntry> directlyInherited;
+    InheritedTypes directlyInherited = InheritedTypes(D);
     const NominalTypeDecl *nominal;
     const IterableDeclContext *memberContext;
 
@@ -565,7 +572,6 @@ public:
       return true;
     };
     if ((nominal = dyn_cast<NominalTypeDecl>(D))) {
-      directlyInherited = nominal->getInherited();
       memberContext = nominal;
 
     } else if (auto *extension = dyn_cast<ExtensionDecl>(D)) {
@@ -573,7 +579,6 @@ public:
         return;
       }
       nominal = extension->getExtendedNominal();
-      directlyInherited = extension->getInherited();
       memberContext = extension;
     } else {
       return;

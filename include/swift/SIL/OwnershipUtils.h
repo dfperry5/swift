@@ -90,8 +90,6 @@ inline bool isForwardingConsume(SILValue value) {
 //                        Ownership Def-Use Utilities
 //===----------------------------------------------------------------------===//
 
-bool findPointerEscape(BorrowedValue value);
-
 /// Whether the specified OSSA-lifetime introducer has a pointer escape.
 ///
 /// precondition: \p value introduces an OSSA-lifetime, either a BorrowedValue
@@ -256,6 +254,7 @@ public:
   enum Kind : uint8_t {
     Invalid = 0,
     BeginBorrow,
+    StoreBorrow,
     BeginApply,
     Branch,
     Apply,
@@ -279,6 +278,8 @@ public:
       return Kind::Invalid;
     case SILInstructionKind::BeginBorrowInst:
       return Kind::BeginBorrow;
+    case SILInstructionKind::StoreBorrowInst:
+      return Kind::StoreBorrow;
     case SILInstructionKind::BeginApplyInst:
       return Kind::BeginApply;
     case SILInstructionKind::BranchInst:
@@ -388,6 +389,7 @@ struct BorrowingOperand {
     case BorrowingOperandKind::Invalid:
       llvm_unreachable("Using invalid case?!");
     case BorrowingOperandKind::BeginBorrow:
+    case BorrowingOperandKind::StoreBorrow:
     case BorrowingOperandKind::BeginApply:
     case BorrowingOperandKind::Apply:
     case BorrowingOperandKind::TryApply:
@@ -420,6 +422,7 @@ struct BorrowingOperand {
     case BorrowingOperandKind::BeginBorrow:
     case BorrowingOperandKind::Branch:
       return true;
+    case BorrowingOperandKind::StoreBorrow:
     case BorrowingOperandKind::BeginApply:
     case BorrowingOperandKind::Apply:
     case BorrowingOperandKind::TryApply:
@@ -582,7 +585,7 @@ struct BorrowedValue {
   /// instructions and pass them individually to visitor. Asserts if this is
   /// called with a scope that is not local.
   ///
-  /// Returns false and early exist if \p visitor returns false.
+  /// Returns false and exits early if \p visitor returns false.
   ///
   /// The intention is that this method can be used instead of
   /// BorrowScopeIntroducingValue::getLocalScopeEndingUses() to avoid
@@ -738,7 +741,8 @@ inline AddressUseKind findTransitiveUsesForAddress(
   // guaranteed uses to determine if a load_borrow is an escape in OSSA. This
   // is OSSA specific behavior and we should probably create a different API
   // for that. But for now, this lets this APIs users stay the same.
-  struct BasicTransitiveAddressVisitor final : TransitiveAddressWalker {
+  struct BasicTransitiveAddressVisitor
+      : TransitiveAddressWalker<BasicTransitiveAddressVisitor> {
     SmallVectorImpl<Operand *> *foundUses;
     std::function<void(Operand *)> *onErrorFunc;
 
@@ -746,7 +750,7 @@ inline AddressUseKind findTransitiveUsesForAddress(
                                   std::function<void(Operand *)> *onErrorFunc)
         : foundUses(foundUses), onErrorFunc(onErrorFunc) {}
 
-    bool visitUse(Operand *use) override {
+    bool visitUse(Operand *use) {
       if (!foundUses)
         return true;
 
@@ -773,7 +777,7 @@ inline AddressUseKind findTransitiveUsesForAddress(
       return true;
     }
 
-    void onError(Operand *use) override {
+    void onError(Operand *use) {
       if (onErrorFunc)
         (*onErrorFunc)(use);
     }
@@ -791,7 +795,6 @@ public:
     RefTailAddr,
     OpenExistentialBox,
     ProjectBox,
-    StoreBorrow,
   };
 
 private:
@@ -820,8 +823,6 @@ public:
       return Kind::OpenExistentialBox;
     case SILInstructionKind::ProjectBoxInst:
       return Kind::ProjectBox;
-    case SILInstructionKind::StoreBorrowInst:
-      return Kind::StoreBorrow;
     }
   }
 
@@ -840,8 +841,6 @@ public:
       return Kind::OpenExistentialBox;
     case ValueKind::ProjectBoxInst:
       return Kind::ProjectBox;
-    case ValueKind::StoreBorrowInst:
-      return Kind::StoreBorrow;
     }
   }
 
@@ -898,8 +897,7 @@ struct InteriorPointerOperand {
     case InteriorPointerOperandKind::RefElementAddr:
     case InteriorPointerOperandKind::RefTailAddr:
     case InteriorPointerOperandKind::OpenExistentialBox:
-    case InteriorPointerOperandKind::ProjectBox:
-    case InteriorPointerOperandKind::StoreBorrow: {
+    case InteriorPointerOperandKind::ProjectBox: {
       // Ok, we have a valid instruction. Return the relevant operand.
       auto *op =
           &cast<SingleValueInstruction>(resultValue)->getAllOperands()[0];
@@ -942,8 +940,6 @@ struct InteriorPointerOperand {
       return cast<OpenExistentialBoxInst>(operand->getUser());
     case InteriorPointerOperandKind::ProjectBox:
       return cast<ProjectBoxInst>(operand->getUser());
-    case InteriorPointerOperandKind::StoreBorrow:
-      return cast<StoreBorrowInst>(operand->getUser());
     }
     llvm_unreachable("Covered switch isn't covered?!");
   }

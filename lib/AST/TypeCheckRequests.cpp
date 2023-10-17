@@ -103,11 +103,14 @@ void swift::simple_display(llvm::raw_ostream &out, const TypeLoc source) {
 // Inherited type computation.
 //----------------------------------------------------------------------------//
 
-SourceLoc InheritedTypeRequest::getNearestLoc() const {
+const TypeLoc &InheritedTypeRequest::getTypeLoc() const {
   const auto &storage = getStorage();
-  auto &typeLoc = getInheritedTypeLocAtIndex(std::get<0>(storage),
-                                             std::get<1>(storage));
-  return typeLoc.getLoc();
+  auto inheritedTypes = InheritedTypes(std::get<0>(storage));
+  return inheritedTypes.getEntry(std::get<1>(storage));
+}
+
+SourceLoc InheritedTypeRequest::getNearestLoc() const {
+  return getTypeLoc().getLoc();
 }
 
 bool InheritedTypeRequest::isCached() const {
@@ -115,9 +118,7 @@ bool InheritedTypeRequest::isCached() const {
 }
 
 llvm::Optional<Type> InheritedTypeRequest::getCachedResult() const {
-  const auto &storage = getStorage();
-  auto &typeLoc = getInheritedTypeLocAtIndex(std::get<0>(storage),
-                                             std::get<1>(storage));
+  auto &typeLoc = getTypeLoc();
   if (typeLoc.wasValidated())
     return typeLoc.getType();
 
@@ -125,10 +126,7 @@ llvm::Optional<Type> InheritedTypeRequest::getCachedResult() const {
 }
 
 void InheritedTypeRequest::cacheResult(Type value) const {
-  const auto &storage = getStorage();
-  auto &typeLoc = getInheritedTypeLocAtIndex(std::get<0>(storage),
-                                             std::get<1>(storage));
-  const_cast<TypeLoc &>(typeLoc).setType(value);
+  const_cast<TypeLoc &>(getTypeLoc()).setType(value);
 }
 
 //----------------------------------------------------------------------------//
@@ -378,6 +376,20 @@ void RequirementSignatureRequest::cacheResult(RequirementSignature value) const 
 }
 
 //----------------------------------------------------------------------------//
+// DefaultDefinitionTypeRequest computation.
+//----------------------------------------------------------------------------//
+
+llvm::Optional<Type> DefaultDefinitionTypeRequest::getCachedResult() const {
+  auto *decl = std::get<0>(getStorage());
+  return decl->getCachedDefaultDefinitionType();
+}
+
+void DefaultDefinitionTypeRequest::cacheResult(Type value) const {
+  auto *decl = std::get<0>(getStorage());
+  decl->setDefaultDefinitionType(value);
+}
+
+//----------------------------------------------------------------------------//
 // Requirement computation.
 //----------------------------------------------------------------------------//
 
@@ -588,29 +600,28 @@ void swift::simple_display(llvm::raw_ostream &out,
   switch (value.kind) {
   case FragileFunctionKind::Transparent:
     out << "transparent";
-    break;
+    return;
   case FragileFunctionKind::Inlinable:
     out << "inlinable";
-    break;
+    return;
   case FragileFunctionKind::AlwaysEmitIntoClient:
     out << "alwaysEmitIntoClient";
-    break;
+    return;
   case FragileFunctionKind::DefaultArgument:
     out << "defaultArgument";
-    break;
+    return;
   case FragileFunctionKind::PropertyInitializer:
     out << "propertyInitializer";
-    break;
+    return;
   case FragileFunctionKind::BackDeploy:
     out << "backDeploy";
-    break;
+    return;
   case FragileFunctionKind::None:
     out << "none";
-    break;
+    return;
   }
 
-  out << ", allowUsableFromInline: "
-      << (value.allowUsableFromInline ? "true" : "false");
+  llvm_unreachable("Bad FragileFunctionKind");
 }
 
 //----------------------------------------------------------------------------//
@@ -812,14 +823,12 @@ void GenericSignatureRequest::diagnoseCycle(DiagnosticEngine &diags) const {
   auto *D = GC->getAsDecl();
 
   if (auto *VD = dyn_cast<ValueDecl>(D)) {
-    VD->diagnose(diag::recursive_generic_signature,
-                 VD->getDescriptiveKind(), VD->getBaseName());
+    VD->diagnose(diag::recursive_generic_signature, VD);
   } else {
     auto *ED = cast<ExtensionDecl>(D);
     auto *NTD = ED->getExtendedNominal();
 
-    ED->diagnose(diag::recursive_generic_signature_extension,
-                 NTD->getDescriptiveKind(), NTD->getName());
+    ED->diagnose(diag::recursive_generic_signature_extension, NTD);
   }
 }
 
@@ -853,9 +862,7 @@ void UnderlyingTypeRequest::cacheResult(Type value) const {
 
 void UnderlyingTypeRequest::diagnoseCycle(DiagnosticEngine &diags) const {
   auto aliasDecl = std::get<0>(getStorage());
-  diags.diagnose(aliasDecl, diag::recursive_decl_reference,
-                 aliasDecl->getDescriptiveKind(),
-                 aliasDecl->getName());
+  diags.diagnose(aliasDecl, diag::recursive_decl_reference, aliasDecl);
 }
 
 //----------------------------------------------------------------------------//
@@ -864,9 +871,7 @@ void UnderlyingTypeRequest::diagnoseCycle(DiagnosticEngine &diags) const {
 
 void StructuralTypeRequest::diagnoseCycle(DiagnosticEngine &diags) const {
   auto aliasDecl = std::get<0>(getStorage());
-  diags.diagnose(aliasDecl, diag::recursive_decl_reference,
-                 aliasDecl->getDescriptiveKind(),
-                 aliasDecl->getName());
+  diags.diagnose(aliasDecl, diag::recursive_decl_reference, aliasDecl);
 }
 
 //----------------------------------------------------------------------------//
@@ -944,6 +949,24 @@ llvm::Optional<ParamSpecifier> ParamSpecifierRequest::getCachedResult() const {
 void ParamSpecifierRequest::cacheResult(ParamSpecifier specifier) const {
   auto *decl = std::get<0>(getStorage());
   decl->setSpecifier(specifier);
+}
+
+//----------------------------------------------------------------------------//
+// ThrownTypeRequest computation.
+//----------------------------------------------------------------------------//
+
+llvm::Optional<Type> ThrownTypeRequest::getCachedResult() const {
+  auto *const func = std::get<0>(getStorage());
+  Type thrownType = func->ThrownType.getType();
+  if (thrownType.isNull())
+    return llvm::None;
+
+  return thrownType;
+}
+
+void ThrownTypeRequest::cacheResult(Type type) const {
+  auto *const func = std::get<0>(getStorage());
+  func->ThrownType.setType(type);
 }
 
 //----------------------------------------------------------------------------//
@@ -1174,6 +1197,26 @@ void ValueWitnessRequest::cacheResult(Witness type) const {
 }
 
 //----------------------------------------------------------------------------//
+// AssociatedConformanceRequest computation.
+//----------------------------------------------------------------------------//
+
+llvm::Optional<ProtocolConformanceRef>
+AssociatedConformanceRequest::getCachedResult() const {
+  auto *conformance = std::get<0>(getStorage());
+  unsigned index = std::get<3>(getStorage());
+
+  return conformance->getAssociatedConformance(index);
+}
+
+void AssociatedConformanceRequest::cacheResult(
+    ProtocolConformanceRef assocConf) const {
+  auto *conformance = std::get<0>(getStorage());
+  unsigned index = std::get<3>(getStorage());
+
+  conformance->setAssociatedConformance(index, assocConf);
+}
+
+//----------------------------------------------------------------------------//
 // PreCheckResultBuilderRequest computation.
 //----------------------------------------------------------------------------//
 
@@ -1277,6 +1320,24 @@ llvm::Optional<Type> DefaultArgumentTypeRequest::getCachedResult() const {
 void DefaultArgumentTypeRequest::cacheResult(Type type) const {
   auto *param = std::get<0>(getStorage());
   param->setDefaultExprType(type);
+}
+
+//----------------------------------------------------------------------------//
+// DefaultInitializerIsolation computation.
+//----------------------------------------------------------------------------//
+
+void swift::simple_display(llvm::raw_ostream &out, Initializer *init) {
+  switch (init->getInitializerKind()) {
+  case InitializerKind::PatternBinding:
+    out << "pattern binding initializer";
+    break;
+  case InitializerKind::DefaultArgument:
+    out << "default argument initializer";
+    break;
+  case InitializerKind::PropertyWrapper:
+    out << "property wrapper initializer";
+    break;
+  }
 }
 
 //----------------------------------------------------------------------------//
@@ -1395,6 +1456,24 @@ void ResolveTypeEraserTypeRequest::cacheResult(Type value) const {
 }
 
 //----------------------------------------------------------------------------//
+// ResolveRawLayoutLikeTypeRequest computation.
+//----------------------------------------------------------------------------//
+
+llvm::Optional<Type> ResolveRawLayoutLikeTypeRequest::getCachedResult() const {
+  auto Ty = std::get<1>(getStorage())->CachedResolvedLikeType;
+  if (!Ty) {
+    return llvm::None;
+  }
+  return Ty;
+}
+
+void ResolveRawLayoutLikeTypeRequest::cacheResult(Type value) const {
+  assert(value && "Resolved type erasure type to null type!");
+  auto *attr = std::get<1>(getStorage());
+  attr->CachedResolvedLikeType = value;
+}
+
+//----------------------------------------------------------------------------//
 // TypeCheckSourceFileRequest computation.
 //----------------------------------------------------------------------------//
 
@@ -1434,11 +1513,13 @@ llvm::Optional<BraceStmt *>
 TypeCheckFunctionBodyRequest::getCachedResult() const {
   using BodyKind = AbstractFunctionDecl::BodyKind;
   auto *afd = std::get<0>(getStorage());
+  if (afd->isBodySkipped())
+    return nullptr;
+
   switch (afd->getBodyKind()) {
   case BodyKind::Deserialized:
   case BodyKind::SILSynthesize:
   case BodyKind::None:
-  case BodyKind::Skipped:
     // These cases don't have any body available.
     return nullptr;
 
@@ -1570,10 +1651,6 @@ void swift::simple_display(llvm::raw_ostream &out, CustomAttrTypeKind value) {
   case CustomAttrTypeKind::GlobalActor:
     out << "global-actor";
     return;
-
-  case CustomAttrTypeKind::RuntimeMetadata:
-    out << "runtime-metadata";
-    return;
   }
 
   llvm_unreachable("bad kind");
@@ -1600,7 +1677,7 @@ SourceLoc MacroDefinitionRequest::getNearestLoc() const {
 bool ActorIsolation::requiresSubstitution() const {
   switch (kind) {
   case ActorInstance:
-  case Independent:
+  case Nonisolated:
   case Unspecified:
     return false;
 
@@ -1614,7 +1691,7 @@ bool ActorIsolation::requiresSubstitution() const {
 ActorIsolation ActorIsolation::subst(SubstitutionMap subs) const {
   switch (kind) {
   case ActorInstance:
-  case Independent:
+  case Nonisolated:
   case Unspecified:
     return *this;
 
@@ -1638,8 +1715,8 @@ void swift::simple_display(
       out << "actor " << state.getActor()->getName();
       break;
 
-    case ActorIsolation::Independent:
-      out << "actor-independent";
+    case ActorIsolation::Nonisolated:
+      out << "nonisolated";
       break;
 
     case ActorIsolation::Unspecified:
@@ -1854,22 +1931,6 @@ void ExpandAccessorMacros::noteCycleStep(DiagnosticEngine &diags) const {
   diags.diagnose(decl->getLoc(),
                  diag::macro_expand_circular_reference_entity_through,
                  "accessor",
-                 decl->getName());
-}
-
-void ExpandConformanceMacros::diagnoseCycle(DiagnosticEngine &diags) const {
-  auto decl = std::get<0>(getStorage());
-  diags.diagnose(decl->getLoc(),
-                 diag::macro_expand_circular_reference_entity,
-                 "conformance",
-                 decl->getName());
-}
-
-void ExpandConformanceMacros::noteCycleStep(DiagnosticEngine &diags) const {
-  auto decl = std::get<0>(getStorage());
-  diags.diagnose(decl->getLoc(),
-                 diag::macro_expand_circular_reference_entity_through,
-                 "conformance",
                  decl->getName());
 }
 

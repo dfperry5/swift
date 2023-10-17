@@ -327,6 +327,14 @@ private:
   /// The queue of lazy witness tables to emit.
   llvm::SmallVector<SILWitnessTable *, 4> LazyWitnessTables;
 
+  llvm::SmallVector<CanType, 4> LazyClassMetadata;
+
+  llvm::SmallPtrSet<TypeBase *, 4> LazilyEmittedClassMetadata;
+
+  llvm::SmallVector<CanType, 4> LazySpecializedClassMetadata;
+
+  llvm::SmallPtrSet<TypeBase *, 4> LazilyEmittedSpecializedClassMetadata;
+
   llvm::SmallVector<ClassDecl *, 4> ClassesForEagerInitialization;
 
   llvm::SmallVector<ClassDecl *, 4> ObjCActorsNeedingSuperclassSwizzle;
@@ -456,7 +464,7 @@ public:
   }
 
   void noteLazyReemissionOfNominalTypeDescriptor(NominalTypeDecl *decl) {
-    assert(!Lowering::shouldSkipLowering(decl));
+    assert(decl->isAvailableDuringLowering());
     LazilyReemittedTypeContextDescriptors.insert(decl);
   }
 
@@ -466,11 +474,14 @@ public:
   }
 
   void noteUseOfMetadataAccessor(NominalTypeDecl *decl) {
-    assert(!Lowering::shouldSkipLowering(decl));
+    assert(decl->isAvailableDuringLowering());
     if (LazyMetadataAccessors.count(decl) == 0) {
       LazyMetadataAccessors.insert(decl);
     }
   }
+
+  void noteUseOfClassMetadata(CanType classType);
+  void noteUseOfSpecializedClassMetadata(CanType classType);
 
   void noteUseOfTypeMetadata(NominalTypeDecl *type) {
     noteUseOfTypeGlobals(type, true, RequireMetadata);
@@ -769,6 +780,7 @@ public:
   llvm::PointerType *SwiftTaskGroupPtrTy;
   llvm::StructType  *SwiftTaskOptionRecordTy;
   llvm::StructType  *SwiftTaskGroupTaskOptionRecordTy;
+  llvm::StructType  *SwiftResultTypeInfoTaskOptionRecordTy;
   llvm::PointerType *SwiftJobPtrTy;
   llvm::IntegerType *ExecutorFirstTy;
   llvm::IntegerType *ExecutorSecondTy;
@@ -779,8 +791,6 @@ public:
   llvm::PointerType *ContinuationAsyncContextPtrTy;
   llvm::StructType *ClassMetadataBaseOffsetTy;
   llvm::StructType *DifferentiabilityWitnessTy; // { i8*, i8* }
-
-  llvm::StructType *RuntimeDiscoverableAttributeTy; // { i32, i32*, i32 }
 
   llvm::GlobalVariable *TheTrivialPropertyDescriptor = nullptr;
 
@@ -913,7 +923,9 @@ public:
   bool shouldPrespecializeGenericMetadata();
   
   bool canMakeStaticObjectsReadOnly();
-  
+
+  bool canUseObjCSymbolicReferences();
+
   Size getAtomicBoolSize() const { return AtomicBoolSize; }
   Alignment getAtomicBoolAlignment() const { return AtomicBoolAlign; }
 
@@ -1274,6 +1286,7 @@ private:
   };
 
   llvm::DenseMap<ProtocolDecl*, ObjCProtocolPair> ObjCProtocols;
+  llvm::DenseMap<ProtocolDecl *, llvm::Constant *> ObjCProtocolSymRefs;
   llvm::SmallVector<ProtocolDecl*, 4> LazyObjCProtocolDefinitions;
   llvm::DenseMap<KeyPathPattern*, llvm::GlobalVariable*> KeyPathPatterns;
 
@@ -1297,6 +1310,7 @@ private:
   SuccessorMap<unsigned, llvm::Function*> EmittedFunctionsByOrder;
 
   ObjCProtocolPair getObjCProtocolGlobalVars(ProtocolDecl *proto);
+  llvm::Constant *getObjCProtocolRefSymRefDescriptor(ProtocolDecl *protocol);
   void emitLazyObjCProtocolDefinitions();
   void emitLazyObjCProtocolDefinition(ProtocolDecl *proto);
 
@@ -1511,10 +1525,6 @@ public:
   void emitProtocolConformance(const ConformanceDescription &record);
   void emitNestedTypeDecls(DeclRange members);
   void emitClangDecl(const clang::Decl *decl);
-  /// Emit runtime discoverable attribute metadata section for the given set
-  /// of source files.
-  void
-  emitRuntimeDiscoverableAttributes(TinyPtrVector<FileUnit *> &filesToEmit);
 
   void finalizeClangCodeGen();
   void finishEmitAfterTopLevel();
@@ -1565,6 +1575,11 @@ public:
   Address getAddrOfEnumCase(EnumElementDecl *Case,
                             ForDefinition_t forDefinition);
   Address getAddrOfFieldOffset(VarDecl *D, ForDefinition_t forDefinition);
+  llvm::Function *getOrCreateValueWitnessFunction(ValueWitness index,
+                                                  FixedPacking packing,
+                                                  CanType abstractType,
+                                                  SILType concreteType,
+                                                  const TypeInfo &type);
   llvm::Function *getAddrOfValueWitness(CanType concreteType,
                                         ValueWitness index,
                                         ForDefinition_t forDefinition);

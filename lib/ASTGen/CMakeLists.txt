@@ -7,13 +7,15 @@ add_pure_swift_host_library(swiftLLVMJSON STATIC EMIT_MODULE
 
 add_pure_swift_host_library(swiftASTGen STATIC
   Sources/ASTGen/ASTGen.swift
+  Sources/ASTGen/Bridge.swift
   Sources/ASTGen/Decls.swift
   Sources/ASTGen/Diagnostics.swift
+  Sources/ASTGen/DiagnosticsBridge.swift
   Sources/ASTGen/Exprs.swift
   Sources/ASTGen/Generics.swift
   Sources/ASTGen/Literals.swift
   Sources/ASTGen/Macros.swift
-  Sources/ASTGen/Misc.swift
+  Sources/ASTGen/ParameterClause.swift
   Sources/ASTGen/PluginHost.swift
   Sources/ASTGen/SourceFile.swift
   Sources/ASTGen/SourceManager.swift
@@ -24,15 +26,15 @@ add_pure_swift_host_library(swiftASTGen STATIC
   DEPENDENCIES
     swiftAST
   SWIFT_DEPENDENCIES
-    SwiftSyntax::SwiftBasicFormat
-    SwiftSyntax::SwiftCompilerPluginMessageHandling
-    SwiftSyntax::SwiftDiagnostics
-    SwiftSyntax::SwiftOperators
-    SwiftSyntax::SwiftParser
-    SwiftSyntax::SwiftParserDiagnostics
-    SwiftSyntax::SwiftSyntax
-    SwiftSyntax::SwiftSyntaxBuilder
-    SwiftSyntax::SwiftSyntaxMacros
-    SwiftSyntax::SwiftSyntaxMacroExpansion
+    SwiftBasicFormat
+    SwiftCompilerPluginMessageHandling
+    SwiftDiagnostics
+    SwiftOperators
+    SwiftParser
+    SwiftParserDiagnostics
+    SwiftSyntax
+    SwiftSyntaxBuilder
+    SwiftSyntaxMacros
+    SwiftSyntaxMacroExpansion
     swiftLLVMJSON
 )

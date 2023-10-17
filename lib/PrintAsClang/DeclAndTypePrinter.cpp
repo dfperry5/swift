@@ -2504,7 +2504,7 @@ private:
   void visitClassType(ClassType *CT,
                       llvm::Optional<OptionalTypeKind> optionalKind) {
     const ClassDecl *CD = CT->getClassOrBoundGenericClass();
-    assert(CD->isObjC());
+    assert(CD->isObjC() || CD->isForeignReferenceType());
     auto clangDecl = dyn_cast_or_null<clang::NamedDecl>(CD->getClangDecl());
     if (clangDecl) {
       // Hack for <os/object.h> types, which use classes in Swift but
@@ -2512,7 +2512,8 @@ private:
       StringRef osObjectName = maybeGetOSObjectBaseName(clangDecl);
       if (!osObjectName.empty()) {
         os << osObjectName << "_t";
-      } else if (isa<clang::ObjCInterfaceDecl>(clangDecl)) {
+      } else if (isa<clang::ObjCInterfaceDecl>(clangDecl) ||
+                 CD->isForeignReferenceType()) {
         os << clangDecl->getName() << " *";
       } else {
         maybePrintTagKeyword(CD);
@@ -2824,8 +2825,10 @@ static bool hasExposeAttr(const ValueDecl *VD, bool isExtension = false) {
   // Clang decls don't need to be explicitly exposed.
   if (VD->hasClangNode())
     return true;
-  if (VD->getAttrs().hasAttribute<ExposeAttr>())
-    return true;
+  for (auto *EA : VD->getAttrs().getAttributes<ExposeAttr>()) {
+    if (EA->getExposureKind() == ExposureKind::Cxx)
+      return true;
+  }
   if (const auto *NMT = dyn_cast<NominalTypeDecl>(VD->getDeclContext()))
     return hasExposeAttr(NMT);
   if (const auto *ED = dyn_cast<ExtensionDecl>(VD->getDeclContext())) {

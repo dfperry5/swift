@@ -310,14 +310,34 @@ struct ModuleRebuildInfo {
       return "compiled with an older version of the compiler";
     case Status::FormatTooNew:
       return "compiled with a newer version of the compiler";
+    case Status::RevisionIncompatible:
+      return "compiled with a different version of the compiler";
+    case Status::NotInOSSA:
+      return "module was not built with OSSA";
+    case Status::MissingDependency:
+      return "missing dependency";
+    case Status::MissingUnderlyingModule:
+      return "missing underlying module";
+    case Status::CircularDependency:
+      return "circular dependency";
+    case Status::FailedToLoadBridgingHeader:
+      return "failed to load bridging header";
     case Status::Malformed:
       return "malformed";
+    case Status::MalformedDocumentation:
+      return "malformed documentation";
+    case Status::NameMismatch:
+      return "name mismatch";
     case Status::TargetIncompatible:
       return "compiled for a different target platform";
     case Status::TargetTooNew:
       return "target platform newer than current platform";
-    default: return nullptr;
+    case Status::SDKMismatch:
+      return "SDK does not match";
+    case Status::Valid:
+      return nullptr;
     }
+    llvm_unreachable("bad status");
   }
 
   /// Emits a diagnostic for all out-of-date compiled or forwarding modules
@@ -820,15 +840,21 @@ class ModuleInterfaceLoaderImpl {
           return std::make_error_code(std::errc::not_supported);
         } else if (isInResourceDir(adjacentMod) &&
                    loadMode == ModuleLoadingMode::PreferSerialized &&
+                   !version::isCurrentCompilerTagged() &&
                    rebuildInfo.getOrInsertCandidateModule(adjacentMod).serializationStatus !=
                      serialization::Status::SDKMismatch) {
           // Special-case here: If we're loading a .swiftmodule from the resource
           // dir adjacent to the compiler, defer to the serialized loader instead
-          // of falling back. This is mainly to support development of Swift,
+          // of falling back. This is to support local development of Swift,
           // where one might change the module format version but forget to
           // recompile the standard library. If that happens, don't fall back
-          // and silently recompile the standard library -- instead, error like
-          // we used to.
+          // and silently recompile the standard library, raise an error
+          // instead.
+          //
+          // This logic is disabled for tagged compilers, so distributed
+          // compilers should ignore this restriction and rebuild all modules
+          // from a swiftinterface when required.
+          //
           // Still accept modules built with a different SDK, allowing the use
           // of one toolchain against a different SDK.
           LLVM_DEBUG(llvm::dbgs() << "Found out-of-date module in the "
@@ -1669,6 +1695,8 @@ InterfaceSubContextDelegateImpl::InterfaceSubContextDelegateImpl(
   // Configure front-end input.
   auto &SubFEOpts = genericSubInvocation.getFrontendOptions();
   SubFEOpts.RequestedAction = LoaderOpts.requestedAction;
+  SubFEOpts.StrictImplicitModuleContext =
+      LoaderOpts.strictImplicitModuleContext;
   if (!moduleCachePath.empty()) {
     genericSubInvocation.setClangModuleCachePath(moduleCachePath);
   }
@@ -1866,6 +1894,10 @@ InterfaceSubContextDelegateImpl::runInSubCompilerInstance(StringRef moduleName,
   // invocation.
   CompilerInvocation subInvocation = genericSubInvocation;
 
+  // save `StrictImplicitModuleContext`
+  bool StrictImplicitModuleContext =
+      subInvocation.getFrontendOptions().StrictImplicitModuleContext;
+
   // Save the target triple from the original context.
   llvm::Triple originalTargetTriple(subInvocation.getLangOptions().Target);
 
@@ -1949,6 +1981,10 @@ InterfaceSubContextDelegateImpl::runInSubCompilerInstance(StringRef moduleName,
     BuildArgs.push_back("-target");
     BuildArgs.push_back(parsedTargetTriple.str());
   }
+
+  // restore `StrictImplicitModuleContext`
+  subInvocation.getFrontendOptions().StrictImplicitModuleContext =
+      StrictImplicitModuleContext;
 
   CompilerInstance subInstance;
   SubCompilerInstanceInfo info;
@@ -2348,7 +2384,8 @@ struct ExplicitCASModuleLoader::Implementation {
         if (!Deps.second.moduleCacheKey)
           return nullptr;
         return loadCachedCompileResultFromCacheKey(
-            CAS, Cache, Diags, *Deps.second.moduleCacheKey, Path);
+            CAS, Cache, Diags, *Deps.second.moduleCacheKey,
+            file_types::ID::TY_SwiftModuleFile, Path);
       }
     }
     return nullptr;
@@ -2403,8 +2440,9 @@ bool ExplicitCASModuleLoader::findModule(
   // FIXME: the loaded module buffer doesn't set an identifier so it
   // is not tracked in dependency tracker, which doesn't handle modules
   // that are not located on disk.
-  auto moduleBuf = loadCachedCompileResultFromCacheKey(Impl.CAS, Impl.Cache,
-                                                       Ctx.Diags, moduleCASID);
+  auto moduleBuf = loadCachedCompileResultFromCacheKey(
+      Impl.CAS, Impl.Cache, Ctx.Diags, moduleCASID,
+      file_types::ID::TY_SwiftModuleFile);
   if (!moduleBuf) {
     // We cannot read the module content, diagnose.
     Ctx.Diags.diagnose(SourceLoc(), diag::error_opening_explicit_module_file,

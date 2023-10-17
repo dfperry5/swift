@@ -74,9 +74,8 @@ class SyntacticElementTarget;
 // so they could be made friends of ConstraintSystem.
 namespace TypeChecker {
 
-llvm::Optional<BraceStmt *> applyResultBuilderBodyTransform(
-    FuncDecl *func, Type builderType,
-    bool ClosuresInResultBuilderDontParticipateInInference);
+llvm::Optional<BraceStmt *> applyResultBuilderBodyTransform(FuncDecl *func,
+                                                            Type builderType);
 
 llvm::Optional<constraints::SyntacticElementTarget>
 typeCheckExpression(constraints::SyntacticElementTarget &target,
@@ -472,6 +471,9 @@ public:
   /// Determine whether this type variable represents a closure type.
   bool isClosureType() const;
 
+  /// Determine whether this type variable represents a type of tap expression.
+  bool isTapType() const;
+
   /// Determine whether this type variable represents one of the
   /// parameter types associated with a closure.
   bool isClosureParameterType() const;
@@ -482,6 +484,10 @@ public:
   /// Determine whether this type variable represents
   /// a type of a key path expression.
   bool isKeyPathType() const;
+
+  /// Determine whether this type variable represents a value type of a key path
+  /// expression.
+  bool isKeyPathValue() const;
 
   /// Determine whether this type variable represents a subscript result type.
   bool isSubscriptResultType() const;
@@ -935,6 +941,9 @@ enum ScoreKind: unsigned int {
   /// A reference to an @unavailable declaration.
   SK_Unavailable,
   /// A reference to an async function in a synchronous context.
+  ///
+  /// \note Any score kind after this is considered a conversion that doesn't
+  /// require fixing the source and will be ignored during code completion.
   SK_AsyncInSyncMismatch,
   /// Synchronous function in an asynchronous context or a conversion of
   /// a synchronous function to an asynchronous one.
@@ -1449,11 +1458,11 @@ public:
 
   /// The list of fixes that need to be applied to the initial expression
   /// to make the solution work.
-  llvm::SmallVector<ConstraintFix *, 4> Fixes;
+  std::vector<ConstraintFix *> Fixes;
 
   /// For locators associated with call expressions, the trailing closure
   /// matching rule and parameter bindings that were applied.
-  llvm::SmallMapVector<ConstraintLocator *, MatchCallArgumentResult, 4>
+  llvm::MapVector<ConstraintLocator *, MatchCallArgumentResult>
       argumentMatchingChoices;
 
   /// The set of disjunction choices used to arrive at this solution,
@@ -1475,11 +1484,15 @@ public:
   llvm::DenseMap<ConstraintLocator *, std::pair<UUID, Type>>
       PackExpansionEnvironments;
 
+  /// The pack expansion environment that can open a given pack element.
+  llvm::MapVector<PackElementExpr *, PackExpansionExpr *>
+      PackEnvironments;
+
   /// The locators of \c Defaultable constraints whose defaults were used.
-  llvm::SmallPtrSet<ConstraintLocator *, 2> DefaultedConstraints;
+  llvm::DenseSet<ConstraintLocator *> DefaultedConstraints;
 
   /// Implicit value conversions applied for a given locator.
-  SmallVector<std::pair<ConstraintLocator *, ConversionRestrictionKind>, 2>
+  std::vector<std::pair<ConstraintLocator *, ConversionRestrictionKind>>
       ImplicitValueConversions;
 
   /// The node -> type mappings introduced by this solution.
@@ -1489,6 +1502,13 @@ public:
   llvm::DenseMap<std::pair<const KeyPathExpr *, unsigned>, Type>
       keyPathComponentTypes;
 
+  /// The key path expression and its root type, value type, and decl context
+  /// introduced by this solution.
+  llvm::MapVector<const KeyPathExpr *,
+                  std::tuple</*root=*/TypeVariableType *,
+                             /*value=*/TypeVariableType *, DeclContext *>>
+      KeyPaths;
+
   /// Contextual types introduced by this solution.
   std::vector<std::pair<ASTNode, ContextualTypeInfo>> contextualTypes;
 
@@ -1497,19 +1517,19 @@ public:
 
   /// Maps case label items to information tracked about them as they are
   /// being solved.
-  llvm::SmallMapVector<const CaseLabelItem *, CaseLabelItemInfo, 4>
+  llvm::MapVector<const CaseLabelItem *, CaseLabelItemInfo>
       caseLabelItems;
 
   /// A map of expressions to the ExprPatterns that they are being solved as
   /// a part of.
-  llvm::SmallMapVector<Expr *, ExprPattern *, 2> exprPatterns;
+  llvm::MapVector<Expr *, ExprPattern *> exprPatterns;
 
   /// The set of parameters that have been inferred to be 'isolated'.
-  llvm::SmallVector<ParamDecl *, 2> isolatedParams;
+  std::vector<ParamDecl *> isolatedParams;
 
   /// The set of closures that have been inferred to be "isolated by
   /// preconcurrency".
-  llvm::SmallVector<const ClosureExpr *, 2> preconcurrencyClosures;
+  std::vector<const ClosureExpr *> preconcurrencyClosures;
 
   /// The set of functions that have been transformed by a result builder.
   llvm::MapVector<AnyFunctionRef, AppliedBuilderTransform>
@@ -1794,12 +1814,6 @@ enum class ConstraintSystemFlags {
 
   /// Disable macro expansions.
   DisableMacroExpansions = 0x100,
-
-  /// Non solver-based code completion expects that closures inside result
-  /// builders don't participate in inference.
-  /// Once all code completion kinds are migrated to solver-based we should be
-  /// able to remove this flag.
-  ClosuresInResultBuildersDontParticipateInInference = 0x200,
 };
 
 /// Options that affect the constraint system as a whole.
@@ -2154,6 +2168,12 @@ private:
       std::tuple<const KeyPathExpr *, /*component index=*/unsigned, Type>>
       addedKeyPathComponentTypes;
 
+  /// Maps a key path root, value, and decl context to the key path expression.
+  llvm::MapVector<const KeyPathExpr *,
+                  std::tuple</*root=*/TypeVariableType *,
+                             /*value=*/TypeVariableType *, DeclContext *>>
+      KeyPaths;
+
   /// Maps AST entries to their targets.
   llvm::MapVector<SyntacticElementTargetKey, SyntacticElementTarget> targets;
 
@@ -2230,6 +2250,10 @@ private:
   llvm::SmallMapVector<ConstraintLocator *, ArrayRef<OpenedType>, 4>
       OpenedTypes;
 
+  /// A dictionary of all conformances that have been looked up by the solver.
+  llvm::DenseMap<std::pair<TypeBase *, ProtocolDecl *>, ProtocolConformanceRef>
+      Conformances;
+
   /// The list of all generic requirements fixed along the current
   /// solver path.
   using FixedRequirement =
@@ -2250,6 +2274,9 @@ private:
 
   llvm::SmallMapVector<ConstraintLocator *, std::pair<UUID, Type>, 4>
       PackExpansionEnvironments;
+
+  llvm::SmallMapVector<PackElementExpr *, PackExpansionExpr *, 2>
+      PackEnvironments;
 
   /// The set of functions that have been transformed by a result builder.
   llvm::MapVector<AnyFunctionRef, AppliedBuilderTransform>
@@ -2737,6 +2764,9 @@ public:
     /// The length of \c PackExpansionEnvironments.
     unsigned numPackExpansionEnvironments;
 
+    /// The length of \c PackEnvironments.
+    unsigned numPackEnvironments;
+
     /// The length of \c DefaultedConstraints.
     unsigned numDefaultedConstraints;
 
@@ -2779,6 +2809,9 @@ public:
 
     /// The length of \c ImplicitValueConversions.
     unsigned numImplicitValueConversions;
+
+    /// The length of \c KeyPaths.
+    unsigned numKeyPaths;
 
     /// The length of \c ArgumentLists.
     unsigned numArgumentLists;
@@ -2841,9 +2874,8 @@ private:
 
   // FIXME: Perhaps these belong on ConstraintSystem itself.
   friend llvm::Optional<BraceStmt *>
-  swift::TypeChecker::applyResultBuilderBodyTransform(
-      FuncDecl *func, Type builderType,
-      bool ClosuresInResultBuilderDontParticipateInInference);
+  swift::TypeChecker::applyResultBuilderBodyTransform(FuncDecl *func,
+                                                      Type builderType);
 
   friend llvm::Optional<SyntacticElementTarget>
   swift::TypeChecker::typeCheckExpression(
@@ -2982,6 +3014,34 @@ public:
     return nullptr;
   }
 
+  TypeVariableType *getKeyPathValueType(const KeyPathExpr *keyPath) const {
+    auto result = getKeyPathValueTypeIfAvailable(keyPath);
+    assert(result);
+    return result;
+  }
+
+  TypeVariableType *
+  getKeyPathValueTypeIfAvailable(const KeyPathExpr *keyPath) const {
+    auto result = KeyPaths.find(keyPath);
+    if (result != KeyPaths.end())
+      return std::get<1>(result->second);
+    return nullptr;
+  }
+  
+  TypeVariableType *getKeyPathRootType(const KeyPathExpr *keyPath) const {
+    auto result = getKeyPathRootTypeIfAvailable(keyPath);
+    assert(result);
+    return result;
+  }
+
+  TypeVariableType *
+  getKeyPathRootTypeIfAvailable(const KeyPathExpr *keyPath) const {
+    auto result = KeyPaths.find(keyPath);
+    if (result != KeyPaths.end())
+      return std::get<0>(result->second);
+    return nullptr;
+  }
+
   TypeBase* getFavoredType(Expr *E) {
     assert(E != nullptr);
     return this->FavoredTypes[E];
@@ -3082,12 +3142,11 @@ public:
     return E;
   }
 
-  void setContextualType(ASTNode node, TypeLoc T,
-                         ContextualTypePurpose purpose) {
+  void setContextualInfo(ASTNode node, ContextualTypeInfo info) {
     assert(bool(node) && "Expected non-null expression!");
     assert(contextualTypes.count(node) == 0 &&
            "Already set this contextual type");
-    contextualTypes[node] = {{T, purpose}, Type()};
+    contextualTypes[node] = {info, Type()};
   }
 
   llvm::Optional<ContextualTypeInfo> getContextualTypeInfo(ASTNode node) const {
@@ -3231,6 +3290,13 @@ public:
   /// Get the opened element generic environment for the given locator.
   GenericEnvironment *getPackElementEnvironment(ConstraintLocator *locator,
                                                 CanType shapeClass);
+
+  /// Get the opened element generic environment for the given pack element.
+  PackExpansionExpr *getPackEnvironment(PackElementExpr *packElement) const;
+
+  /// Associate an opened element generic environment to a pack element.
+  void addPackEnvironment(PackElementExpr *packElement,
+                          PackExpansionExpr *packExpansion);
 
   /// Retrieve the constraint locator for the given anchor and
   /// path, uniqued and automatically infer the summary flags
@@ -3403,6 +3469,11 @@ public:
   /// given expression, located at \c locator.
   void recordCallAsFunction(UnresolvedDotExpr *root, ArgumentList *arguments,
                             ConstraintLocator *locator);
+
+  /// Record root, value, and declContext of keypath expression for use across
+  /// constraint system.
+  void recordKeyPath(KeyPathExpr *keypath, TypeVariableType *root,
+                     TypeVariableType *value, DeclContext *dc);
 
   /// Walk a closure AST to determine its effects.
   ///
@@ -3879,7 +3950,7 @@ public:
   ///
   /// \param wantRValue Whether this routine should look through
   /// lvalues at each step.
-  Type getFixedTypeRecursive(Type type, bool wantRValue) const {
+  Type getFixedTypeRecursive(Type type, bool wantRValue) {
     TypeMatchOptions flags = llvm::None;
     return getFixedTypeRecursive(type, flags, wantRValue);
   }
@@ -3897,7 +3968,7 @@ public:
   /// \param wantRValue Whether this routine should look through
   /// lvalues at each step.
   Type getFixedTypeRecursive(Type type, TypeMatchOptions &flags,
-                             bool wantRValue) const;
+                             bool wantRValue);
 
   /// Determine whether the given type variable occurs within the given type.
   ///
@@ -3924,6 +3995,20 @@ public:
   bool resolveClosure(TypeVariableType *typeVar, Type contextualType,
                       ConstraintLocatorBuilder locator);
 
+  /// Given the fact a contextual type is now available for the type
+  /// variable representing one of the key path expressions, let's set a
+  /// pre-determined key path expression type.
+  ///
+  /// \param typeVar The type variable representing a key path expression.
+  /// \param contextualType The contextual type this key path would be
+  /// converted to.
+  /// \param locator The locator associated with contextual type.
+  ///
+  /// \returns `true` if it was possible to generate constraints for
+  /// the keyPath expression, `false` otherwise.
+  bool resolveKeyPath(TypeVariableType *typeVar, Type contextualType,
+                      ConstraintLocatorBuilder locator);
+
   /// Given the fact that contextual type is now available for the type
   /// variable representing a pack expansion type, let's resolve the expansion.
   ///
@@ -3933,6 +4018,20 @@ public:
   ///
   /// \returns `true` if pack expansion has been resolved, `false` otherwise.
   bool resolvePackExpansion(TypeVariableType *typeVar, Type contextualType);
+
+  /// Bind tap expression to the given contextual type and generate
+  /// constraints for its body.
+  ///
+  /// \param typeVar The type variable representing the tap expression.
+  /// \param contextualType The contextual type this tap expression
+  /// would be bound to.
+  /// \param locator The locator associated with contextual type.
+  ///
+  /// \returns `true` if it was possible to generate constraints for
+  /// the body and assign fixed type to the tap expression, `false`
+  /// otherwise.
+  bool resolveTapBody(TypeVariableType *typeVar, Type contextualType,
+                      ConstraintLocatorBuilder locator);
 
   /// Assign a fixed type to the given type variable.
   ///
@@ -4102,6 +4201,10 @@ public:
   void recordOpenedTypes(
          ConstraintLocatorBuilder locator,
          const OpenedTypeMap &replacements);
+
+  /// Check whether the given type conforms to the given protocol and if
+  /// so return a valid conformance reference.
+  ProtocolConformanceRef lookupConformance(Type type, ProtocolDecl *P);
 
   /// Wrapper over swift::adjustFunctionTypeForConcurrency that passes along
   /// the appropriate closure-type and opening extraction functions.
@@ -4336,6 +4439,14 @@ public:
   generateConstraints(SyntacticElementTarget &target,
                       FreeTypeVariableBinding allowFreeTypeVariables =
                           FreeTypeVariableBinding::Disallow);
+
+  /// Generate constraints for the body of the given tap expression.
+  ///
+  /// \param tap the tap expression
+  ///
+  /// \returns \c true if constraint generation failed, \c false otherwise
+  [[nodiscard]]
+  bool generateConstraints(TapExpr *tap);
 
   /// Generate constraints for the body of the given function or closure.
   ///
@@ -4608,7 +4719,7 @@ public:
   ///
   /// The resulting types can be compared canonically, so long as additional
   /// type equivalence requirements aren't introduced between comparisons.
-  Type simplifyType(Type type) const;
+  Type simplifyType(Type type);
 
   /// Simplify a type, by replacing type variables with either their
   /// fixed types (if available) or their representatives.
@@ -4688,8 +4799,9 @@ private:
 
   /// Simplifies a type by replacing type variables with the result of
   /// \c getFixedTypeFn and performing lookup on dependent member types.
-  Type simplifyTypeImpl(Type type,
-      llvm::function_ref<Type(TypeVariableType *)> getFixedTypeFn) const;
+  Type
+  simplifyTypeImpl(Type type,
+                   llvm::function_ref<Type(TypeVariableType *)> getFixedTypeFn);
 
   /// Attempt to simplify the given construction constraint.
   ///
@@ -4920,6 +5032,13 @@ private:
   SolutionKind simplifySameShapeConstraint(Type type1, Type type2,
                                            TypeMatchOptions flags,
                                            ConstraintLocatorBuilder locator);
+
+  /// Remove the tuple wrapping of left-hand type if it contains only a single
+  /// unlabeled element that is a pack expansion.
+  SolutionKind
+  simplifyMaterializePackExpansionConstraint(Type type1, Type type2,
+                                             TypeMatchOptions flags,
+                                             ConstraintLocatorBuilder locator);
 
 public: // FIXME: Public for use by static functions.
   /// Simplify a conversion constraint with a fix applied to it.
@@ -5186,7 +5305,8 @@ private:
 public:
   /// Increase the score of the given kind for the current (partial) solution
   /// along the.
-  void increaseScore(ScoreKind kind, unsigned value = 1);
+  void increaseScore(ScoreKind kind, ConstraintLocatorBuilder Locator,
+                     unsigned value = 1);
 
   /// Determine whether this solution is guaranteed to be worse than the best
   /// solution found so far.
@@ -5267,6 +5387,22 @@ public:
       std::function<
           llvm::Optional<SyntacticElementTarget>(SyntacticElementTarget)>
           rewriteTarget);
+
+  /// Apply the given solution to the given tap expression.
+  ///
+  /// \param solution The solution to apply.
+  /// \param tapExpr The tap expression to which the solution is being applied.
+  /// \param currentDC The declaration context in which transformations
+  /// will be applied.
+  /// \param rewriteTarget Function that performs a rewrite of any
+  /// solution application target within the context.
+  ///
+  /// \returns true if solution cannot be applied.
+  bool applySolutionToBody(Solution &solution, TapExpr *tapExpr,
+                           DeclContext *&currentDC,
+                           std::function<llvm::Optional<SyntacticElementTarget>(
+                               SyntacticElementTarget)>
+                               rewriteTarget);
 
   /// Reorder the disjunctive clauses for a given expression to
   /// increase the likelihood that a favored constraint will be successfully
@@ -5370,10 +5506,6 @@ public:
   /// part of the constraint system.
   void forEachExpr(Expr *expr, llvm::function_ref<Expr *(Expr *)> callback);
 
-  /// Determine whether one of the parent closures the given one is nested
-  /// in (if any) has a result builder applied to its body.
-  bool isInResultBuilderContext(ClosureExpr *closure) const;
-
   /// Determine whether referencing the given member on the
   /// given existential base type is supported. This is the case only if the
   /// type of the member, spelled in the context of \p baseTy, does not contain
@@ -5463,7 +5595,8 @@ public:
     }
 
     cs.addConstraint(ConstraintKind::PackElementOf, elementType,
-                     packType, cs.getConstraintLocator(elementEnv));
+                     packType->getRValueType(),
+                     cs.getConstraintLocator(elementEnv));
     return elementType;
   }
 };
@@ -6102,6 +6235,52 @@ public:
   }
 };
 
+/// Find any references to external type variables used in the body of a
+/// conjunction element (e.g closures, taps, if/switch expressions).
+///
+/// This includes:
+/// - Not yet resolved outer VarDecls (including closure parameters)
+/// - Return statements with a contextual type that has not yet been resolved
+///
+/// This is required because isolated conjunctions, just like single-expression
+/// closures, have to be connected to type variables they are going to use,
+/// otherwise they'll get placed in a separate solver component and would never
+/// produce a solution.
+class TypeVarRefCollector : public ASTWalker {
+  ConstraintSystem &CS;
+  DeclContext *DC;
+  ConstraintLocator *Locator;
+
+  llvm::SmallSetVector<TypeVariableType *, 4> TypeVars;
+  unsigned DCDepth = 0;
+
+public:
+  TypeVarRefCollector(ConstraintSystem &cs, DeclContext *dc,
+                      ConstraintLocator *locator)
+      : CS(cs), DC(dc), Locator(locator) {}
+
+  /// Infer the referenced type variables from a given decl.
+  void inferTypeVars(Decl *D);
+
+  MacroWalking getMacroWalkingBehavior() const override {
+    return MacroWalking::Arguments;
+  }
+
+  PreWalkResult<Expr *> walkToExprPre(Expr *expr) override;
+  PostWalkResult<Expr *> walkToExprPost(Expr *expr) override;
+  PreWalkResult<Stmt *> walkToStmtPre(Stmt *stmt) override;
+
+  PreWalkAction walkToDeclPre(Decl *D) override {
+    // We only need to walk into PatternBindingDecls, other kinds of decls
+    // cannot reference outer vars.
+    return Action::VisitChildrenIf(isa<PatternBindingDecl>(D));
+  }
+
+  ArrayRef<TypeVariableType *> getTypeVars() const {
+    return TypeVars.getArrayRef();
+  }
+};
+
 /// Determine whether given type is a known one
 /// for a key path `{Writable, ReferenceWritable}KeyPath`.
 bool isKnownKeyPathType(Type type);
@@ -6144,7 +6323,18 @@ Type isPlaceholderVar(PatternBindingDecl *PB);
 /// Dump an anchor node for a constraint locator or contextual type.
 void dumpAnchor(ASTNode anchor, SourceManager *SM, raw_ostream &out);
 
+bool isPackExpansionType(Type type);
+
+/// Check whether the type is a tuple consisting of a single unlabeled element
+/// of \c PackExpansionType or a type variable that represents a pack expansion
+/// type.
 bool isSingleUnlabeledPackExpansionTuple(Type type);
+
+bool containsPackExpansionType(ArrayRef<AnyFunctionType::Param> params);
+bool containsPackExpansionType(TupleType *tuple);
+
+/// \returns null if \c type is not a single unlabeled pack expansion tuple.
+Type getPatternTypeOfSingleUnlabeledPackExpansionTuple(Type type);
 
 } // end namespace constraints
 

@@ -877,7 +877,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   case SILInstructionKind::RebindMemoryInst:
   case SILInstructionKind::MoveValueInst:
   case SILInstructionKind::DropDeinitInst:
-  case SILInstructionKind::MarkMustCheckInst:
+  case SILInstructionKind::MarkUnresolvedNonCopyableValueInst:
   case SILInstructionKind::MarkUnresolvedReferenceBindingInst:
   case SILInstructionKind::CopyableToMoveOnlyWrapperValueInst:
   case SILInstructionKind::MoveOnlyWrapperToCopyableValueInst:
@@ -896,6 +896,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   // tuple_pack_element_addr is just a GEP, but getting the offset
   // can require accessing metadata, so conservatively treat it as
   // expensive.
+  case SILInstructionKind::TuplePackExtractInst:
   case SILInstructionKind::TuplePackElementAddrInst:
     return InlineCost::Expensive;
 
@@ -942,6 +943,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   case SILInstructionKind::RefToRawPointerInst:
 
   case SILInstructionKind::UpcastInst:
+  case SILInstructionKind::EndInitLetRefInst:
 
   case SILInstructionKind::ThinToThickFunctionInst:
   case SILInstructionKind::ConvertFunctionInst:
@@ -1093,7 +1095,7 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   case SILInstructionKind::StoreInst:
   case SILInstructionKind::StoreBorrowInst:
   case SILInstructionKind::StrongReleaseInst:
-  case SILInstructionKind::SetDeallocatingInst:
+  case SILInstructionKind::BeginDeallocRefInst:
   case SILInstructionKind::StrongRetainInst:
   case SILInstructionKind::SuperMethodInst:
   case SILInstructionKind::ObjCSuperMethodInst:
@@ -1122,21 +1124,25 @@ InlineCost swift::instructionInlineCost(SILInstruction &I) {
   case SILInstructionKind::HopToExecutorInst:
   case SILInstructionKind::ExtractExecutorInst:
   case SILInstructionKind::HasSymbolInst:
+  case SILInstructionKind::UnownedCopyValueInst:
+  case SILInstructionKind::WeakCopyValueInst:
 #define COMMON_ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name)          \
   case SILInstructionKind::Name##ToRefInst:                                    \
   case SILInstructionKind::RefTo##Name##Inst:                                  \
   case SILInstructionKind::StrongCopy##Name##ValueInst:
-#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
-  case SILInstructionKind::Load##Name##Inst: \
-  case SILInstructionKind::Store##Name##Inst:
+#define NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                          \
+  case SILInstructionKind::Load##Name##Inst:                                   \
+  case SILInstructionKind::Store##Name##Inst:                                  \
+  case SILInstructionKind::StrongCopy##Name##ValueInst:
 #define ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                         \
   COMMON_ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name)                \
   case SILInstructionKind::Name##RetainInst:                                   \
   case SILInstructionKind::Name##ReleaseInst:                                  \
   case SILInstructionKind::StrongRetain##Name##Inst:
-#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...) \
-  NEVER_LOADABLE_CHECKED_REF_STORAGE(Name, "...") \
-  ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, "...")
+#define SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)                      \
+  case SILInstructionKind::Load##Name##Inst:                                   \
+  case SILInstructionKind::Store##Name##Inst:                                  \
+    ALWAYS_LOADABLE_CHECKED_REF_STORAGE(Name, "...")
 #define UNCHECKED_REF_STORAGE(Name, ...) \
   COMMON_ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name)
 #include "swift/AST/ReferenceStorage.def"

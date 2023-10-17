@@ -68,10 +68,13 @@
 #include "swift/SILOptimizer/Utils/CanonicalizeOSSALifetime.h"
 #include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/NodeDatastructures.h"
+#include "swift/SIL/OSSALifetimeCompletion.h"
 #include "swift/SIL/OwnershipUtils.h"
 #include "swift/SIL/PrunedLiveness.h"
+#include "swift/SIL/Test.h"
 #include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/Reachability.h"
+#include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFGOptUtils.h"
 #include "swift/SILOptimizer/Utils/DebugOptUtils.h"
 #include "swift/SILOptimizer/Utils/InstructionDeleter.h"
@@ -126,6 +129,8 @@ static bool isDestroyOfCopyOf(SILInstruction *instruction, SILValue def) {
 //===----------------------------------------------------------------------===//
 
 bool CanonicalizeOSSALifetime::computeCanonicalLiveness() {
+  LLVM_DEBUG(llvm::dbgs() << "Computing canonical liveness from:\n";
+             getCurrentDef()->print(llvm::dbgs()));
   defUseWorklist.initialize(getCurrentDef());
   // Only the first level of reborrows need to be consider. All nested inner
   // adjacent reborrows and phis are encapsulated within their lifetimes.
@@ -137,7 +142,13 @@ bool CanonicalizeOSSALifetime::computeCanonicalLiveness() {
     });
   }
   while (SILValue value = defUseWorklist.pop()) {
+    LLVM_DEBUG(llvm::dbgs() << "  Uses of value:\n";
+               value->print(llvm::dbgs()));
+
     for (Operand *use : value->getUses()) {
+      LLVM_DEBUG(llvm::dbgs() << "    Use:\n";
+                 use->getUser()->print(llvm::dbgs()));
+      
       auto *user = use->getUser();
       // Recurse through copies.
       if (auto *copy = dyn_cast<CopyValueInst>(user)) {
@@ -166,6 +177,7 @@ bool CanonicalizeOSSALifetime::computeCanonicalLiveness() {
       // escape. Is it legal to canonicalize ForwardingUnowned?
       case OperandOwnership::ForwardingUnowned:
       case OperandOwnership::PointerEscape:
+        LLVM_DEBUG(llvm::dbgs() << "      Value escaped! Giving up\n");
         return false;
       case OperandOwnership::InstantaneousUse:
       case OperandOwnership::UnownedInstantaneousUse:
@@ -194,7 +206,8 @@ bool CanonicalizeOSSALifetime::computeCanonicalLiveness() {
         break;
       case OperandOwnership::Borrow:
         if (liveness->updateForBorrowingOperand(use)
-            != InnerBorrowKind::Contained) {
+              != InnerBorrowKind::Contained) {
+          LLVM_DEBUG(llvm::dbgs() << "      Inner borrow can't be contained! Giving up\n");
           return false;
         }
         break;
@@ -247,6 +260,24 @@ void CanonicalizeOSSALifetime::extendLivenessToDeinitBarriers() {
   SmallVector<SILInstruction *, 4> outsideDestroys;
   findDestroysOutsideBoundary(outsideDestroys);
 
+  // OSSALifetimeCompletion: With complete lifetimes, creating completeLiveness
+  // and using it to visiti unreachable lifetime ends should be deleted.
+  SmallVector<SILBasicBlock *, 32> discoveredBlocks(this->discoveredBlocks);
+  SSAPrunedLiveness completeLiveness(*liveness, &discoveredBlocks);
+
+  for (auto *end : outsideDestroys) {
+    completeLiveness.updateForUse(end, /*lifetimeEnding*/ true);
+  }
+
+  OSSALifetimeCompletion::visitUnreachableLifetimeEnds(
+      getCurrentDef(), completeLiveness, [&](auto *unreachable) {
+        recordUnreachableLifetimeEnd(unreachable);
+        unreachable->visitPriorInstructions([&](auto *inst) {
+          liveness->extendToNonUse(inst);
+          return true;
+        });
+      });
+
   auto *def = getCurrentDef()->getDefiningInstruction();
   using InitialBlocks = ArrayRef<SILBasicBlock *>;
   auto *defBlock = getCurrentDef()->getParentBlock();
@@ -276,17 +307,22 @@ void CanonicalizeOSSALifetime::extendLivenessToDeinitBarriers() {
                                     LifetimeEndingUse;
                        });
   for (auto *barrier : barriers.instructions) {
-    liveness->updateForUse(barrier, /*lifetimeEnding*/ false);
+    liveness->extendToNonUse(barrier);
   }
   for (auto *barrier : barriers.phis) {
     for (auto *predecessor : barrier->getPredecessorBlocks()) {
-      liveness->updateForUse(predecessor->getTerminator(),
-                             /*lifetimeEnding*/ false);
+      liveness->extendToNonUse(predecessor->getTerminator());
     }
   }
-  // Ignore barriers.edges.  The beginning of the targets of such edges should
-  // not be added to liveness.  These edges will be rediscovered when computing
-  // the liveness boundary.
+  for (auto *edge : barriers.edges) {
+    auto *predecessor = edge->getSinglePredecessorBlock();
+    assert(predecessor);
+    liveness->extendToNonUse(&predecessor->back());
+  }
+  // Ignore barriers.initialBlocks.  If the collection is non-empty, it
+  // contains the def-block.  Its presence means that no barriers were found
+  // between lifetime ends and def.  In that case, no new instructions need to
+  // be added to liveness.
 }
 
 // Return true if \p inst is an end_access whose access scope overlaps the end
@@ -476,7 +512,7 @@ void CanonicalizeOSSALifetime::extendLivenessThroughOverlappingAccess() {
           break;
         }
         if (endsAccessOverlappingPrunedBoundary(&inst)) {
-          liveness->updateForUse(&inst, /*lifetimeEnding*/ false);
+          liveness->extendToNonUse(&inst);
           changed = true;
           break;
         }
@@ -609,14 +645,10 @@ void CanonicalizeOSSALifetime::extendUnconsumedLiveness(
         continue;
       // Add "the instruction(s) before the terminator" of the predecessor to
       // liveness.
-      if (auto *inst = predecessor->getTerminator()->getPreviousInstruction()) {
-        liveness->updateForUse(inst, /*lifetimeEnding*/ false);
-      } else {
-        for (auto *grandPredecessor : predecessor->getPredecessorBlocks()) {
-          liveness->updateForUse(grandPredecessor->getTerminator(),
-                                 /*lifetimeEnding*/ false);
-        }
-      }
+      predecessor->getTerminator()->visitPriorInstructions([&](auto *inst) {
+        liveness->extendToNonUse(inst);
+        return true;
+      });
     }
   }
 
@@ -881,6 +913,30 @@ static void insertDestroyBeforeInstruction(SILInstruction *nextInstruction,
                                            SILValue currentDef,
                                            CanonicalOSSAConsumeInfo &consumes,
                                            InstModCallbacks &callbacks) {
+  // OSSALifetimeCompletion: This conditional clause can be deleted with
+  // complete lifetimes.
+  if (consumes.isUnreachableLifetimeEnd(nextInstruction)) {
+    // Don't create a destroy_value if the next instruction is an unreachable
+    // (or a terminator on the availability boundary of the dead-end region
+    // starting from the non-lifetime-ending boundary of `currentDef`).
+    //
+    // If there was a destroy here already, it would be reused.  Avoids
+    // creating an explicit destroy of a value which might have an unclosed
+    // borrow scope.  Doing so would result in
+    //
+    //     somewhere:
+    //       %def
+    //       %borrow = begin_borrow ...
+    //
+    //     die:
+    //       destroy_value %def
+    //       unreachable
+    //
+    // which is invalid (although the verifier doesn't catch
+    // it--rdar://115850528) because there must be an `end_borrow %borrow`
+    // before the destroy_value.
+    return;
+  }
   SILBuilderWithScope builder(nextInstruction);
   auto loc =
       RegularLocation::getAutoGeneratedLocation(nextInstruction->getLoc());
@@ -1090,10 +1146,12 @@ void CanonicalizeOSSALifetime::rewriteCopies() {
 //===----------------------------------------------------------------------===//
 
 bool CanonicalizeOSSALifetime::computeLiveness() {
-  if (currentDef->getOwnershipKind() != OwnershipKind::Owned)
-    return false;
-
   LLVM_DEBUG(llvm::dbgs() << "  Canonicalizing: " << currentDef);
+
+  if (currentDef->getOwnershipKind() != OwnershipKind::Owned) {
+    LLVM_DEBUG(llvm::dbgs() << "  not owned, never mind\n");
+    return false;
+  }
 
   // Note: There is no need to register callbacks with this utility. 'onDelete'
   // is the only one in use to handle dangling pointers, which could be done
@@ -1111,11 +1169,11 @@ bool CanonicalizeOSSALifetime::computeLiveness() {
 
   // Step 1: compute liveness
   if (!computeCanonicalLiveness()) {
-    LLVM_DEBUG(llvm::errs() << "Failed to compute canonical liveness?!\n");
+    LLVM_DEBUG(llvm::dbgs() << "Failed to compute canonical liveness?!\n");
     clear();
     return false;
   }
-  if (currentDef->isLexical()) {
+  if (respectsDeinitBarriers()) {
     extendLivenessToDeinitBarriers();
   }
   if (accessBlockAnalysis) {
@@ -1174,6 +1232,38 @@ bool CanonicalizeOSSALifetime::canonicalizeValueLifetime(SILValue def) {
 
   return true;
 }
+
+namespace swift::test {
+// Arguments:
+// - bool: pruneDebug
+// - bool: maximizeLifetimes
+// - bool: "respectAccessScopes", whether to contract lifetimes to end within
+//         access scopes which they previously enclosed but can't be hoisted
+//         before
+// - SILValue: value to canonicalize
+// Dumps:
+// - function after value canonicalization
+static FunctionTest CanonicalizeOSSALifetimeTest(
+    "canonicalize-ossa-lifetime",
+    [](auto &function, auto &arguments, auto &test) {
+      auto *accessBlockAnalysis =
+          test.template getAnalysis<NonLocalAccessBlockAnalysis>();
+      auto *dominanceAnalysis = test.template getAnalysis<DominanceAnalysis>();
+      DominanceInfo *domTree = dominanceAnalysis->get(&function);
+      auto *calleeAnalysis = test.template getAnalysis<BasicCalleeAnalysis>();
+      auto pruneDebug = arguments.takeBool();
+      auto maximizeLifetimes = arguments.takeBool();
+      auto respectAccessScopes = arguments.takeBool();
+      InstructionDeleter deleter;
+      CanonicalizeOSSALifetime canonicalizer(
+          pruneDebug, maximizeLifetimes, &function,
+          respectAccessScopes ? accessBlockAnalysis : nullptr, domTree,
+          calleeAnalysis, deleter);
+      auto value = arguments.takeValue();
+      canonicalizer.canonicalizeValueLifetime(value);
+      function.print(llvm::outs());
+    });
+} // end namespace swift::test
 
 //===----------------------------------------------------------------------===//
 //                              MARK: Debugging

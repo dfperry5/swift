@@ -20,6 +20,7 @@
 #include "swift/SIL/BasicBlockDatastructures.h"
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/MemAccessUtils.h"
+#include "swift/SIL/NodeDatastructures.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILCloner.h"
@@ -542,29 +543,31 @@ static void replaceAllNonDebugUsesWith(SILValue value,
   }
 }
 
-static void hoistMarkMustCheckInsts(SILValue stackBox,
-                                    MarkMustCheckInst::CheckKind checkKind) {
+static void hoistMarkUnresolvedNonCopyableValueInsts(
+    SILValue stackBox,
+    MarkUnresolvedNonCopyableValueInst::CheckKind checkKind) {
   StackList<Operand *> worklist(stackBox->getFunction());
 
   for (auto *use : stackBox->getUses()) {
     worklist.push_back(use);
   }
 
-  StackList<MarkMustCheckInst *> targets(stackBox->getFunction());
+  StackList<MarkUnresolvedNonCopyableValueInst *> targets(
+      stackBox->getFunction());
   while (!worklist.empty()) {
     auto *nextUse = worklist.pop_back_val();
     auto *nextUser = nextUse->getUser();
 
     if (isa<BeginBorrowInst>(nextUser) || isa<BeginAccessInst>(nextUser) ||
         isa<CopyValueInst>(nextUser) || isa<MarkUninitializedInst>(nextUser) ||
-        isa<MarkMustCheckInst>(nextUser)) {
+        isa<MarkUnresolvedNonCopyableValueInst>(nextUser)) {
       for (auto result : nextUser->getResults()) {
         for (auto *use : result->getUses())
           worklist.push_back(use);
       }
     }
 
-    if (auto *mmci = dyn_cast<MarkMustCheckInst>(nextUser)) {
+    if (auto *mmci = dyn_cast<MarkUnresolvedNonCopyableValueInst>(nextUser)) {
       targets.push_back(mmci);
     }
   }
@@ -586,9 +589,10 @@ static void hoistMarkMustCheckInsts(SILValue stackBox,
 
   auto *undef = SILUndef::get(stackBox->getType(), *stackBox->getModule());
 
-  auto *mmci = builder.createMarkMustCheckInst(loc, undef, checkKind);
+  auto *mmci =
+      builder.createMarkUnresolvedNonCopyableValueInst(loc, undef, checkKind);
   // Leave debug uses on the to-be-promoted box, but hoist all other uses to the
-  // new mark_must_check.
+  // new mark_unresolved_non_copyable_value.
   replaceAllNonDebugUsesWith(stackBox, mmci);
   mmci->setOperand(stackBox);
 }
@@ -664,12 +668,13 @@ static bool rewriteAllocBoxAsAllocStack(AllocBoxInst *ABI) {
   // the address of the stack location.
   replaceProjectBoxUsers(HeapBox, StackBox);
 
-  // Then hoist any mark_must_check [assignable_but_not_consumable] to the
-  // alloc_stack and convert them to [consumable_but_not_assignable]. This is
-  // because we are semantically converting from escaping semantics to
-  // non-escaping semantics.
-  hoistMarkMustCheckInsts(
-      StackBox, MarkMustCheckInst::CheckKind::ConsumableAndAssignable);
+  // Then hoist any mark_unresolved_non_copyable_value
+  // [assignable_but_not_consumable] to the alloc_stack and convert them to
+  // [consumable_but_not_assignable]. This is because we are semantically
+  // converting from escaping semantics to non-escaping semantics.
+  hoistMarkUnresolvedNonCopyableValueInsts(
+      StackBox,
+      MarkUnresolvedNonCopyableValueInst::CheckKind::ConsumableAndAssignable);
 
   assert(ABI->getBoxType()->getLayout()->getFields().size() == 1
          && "promoting multi-field box not implemented");
@@ -681,10 +686,12 @@ static bool rewriteAllocBoxAsAllocStack(AllocBoxInst *ABI) {
   for (auto LastRelease : FinalReleases) {
     SILBuilderWithScope Builder(LastRelease);
     if (!isa<DeallocBoxInst>(LastRelease)&& !Lowering.isTrivial()) {
-      // If we have a mark_must_check use of our stack box, we want to destroy
-      // that.
+      // If we have a mark_unresolved_non_copyable_value use of our stack box,
+      // we want to destroy that.
       SILValue valueToDestroy = StackBox;
-      if (auto *mmci = StackBox->getSingleUserOfType<MarkMustCheckInst>()) {
+      if (auto *mmci =
+              StackBox
+                  ->getSingleUserOfType<MarkUnresolvedNonCopyableValueInst>()) {
         valueToDestroy = mmci;
       }
 
@@ -1047,9 +1054,9 @@ specializeApplySite(SILOptFunctionBuilder &FuncBuilder, ApplySite Apply,
     ClonedFn = Cloner.getCloned();
     pass.T->addFunctionToPassManagerWorklist(ClonedFn, F);
 
-    // Set the moveonly ignore flag so we do not emit an error on the original
-    // function even though it is still around.
-    F->addSemanticsAttr(semantics::NO_MOVEONLY_DIAGNOSTICS);
+    // Set the moveonly delete-if-unused flag so we do not emit an error on the
+    // original once we promote all its current uses.
+    F->addSemanticsAttr(semantics::MOVEONLY_DELETE_IF_UNUSED);
 
     // If any of our promoted callee arg indices were originally noncopyable let
     // boxes, convert them from having escaping to having non-escaping
@@ -1058,10 +1065,12 @@ specializeApplySite(SILOptFunctionBuilder &FuncBuilder, ApplySite Apply,
       if (F->getArgument(index)->getType().isBoxedNonCopyableType(*F)) {
         auto boxType = F->getArgument(index)->getType().castTo<SILBoxType>();
         bool isMutable = boxType->getLayout()->getFields()[0].isMutable();
-        auto checkKind =
-            isMutable ? MarkMustCheckInst::CheckKind::ConsumableAndAssignable
-                      : MarkMustCheckInst::CheckKind::NoConsumeOrAssign;
-        hoistMarkMustCheckInsts(ClonedFn->getArgument(index), checkKind);
+        auto checkKind = isMutable ? MarkUnresolvedNonCopyableValueInst::
+                                         CheckKind::ConsumableAndAssignable
+                                   : MarkUnresolvedNonCopyableValueInst::
+                                         CheckKind::NoConsumeOrAssign;
+        hoistMarkUnresolvedNonCopyableValueInsts(ClonedFn->getArgument(index),
+                                                 checkKind);
       }
     }
   }
@@ -1101,7 +1110,31 @@ specializeApplySite(SILOptFunctionBuilder &FuncBuilder, ApplySite Apply,
       // borrows its captures, and we don't need to adjust capture lifetimes.
       if (!PAI->isOnStack()) {
         if (PAFrontier.empty()) {
-          ValueLifetimeAnalysis VLA(PAI, PAI->getUses());
+          SmallVector<SILInstruction *, 8> users;
+          InstructionWorklist worklist(PAI->getFunction());
+          worklist.push(PAI);
+          while (auto *inst = worklist.pop()) {
+            auto *svi = cast<SingleValueInstruction>(inst);
+            for (auto *use : svi->getUses()) {
+              auto *user = use->getUser();
+              SingleValueInstruction *svi;
+              // A copy_value produces a value with a new lifetime on which the
+              // captured alloc_box's lifetime depends.  If the transformation
+              // were only to create a destroy_value of the alloc_box (and to
+              // rewrite the closure not to consume it), the alloc_box would be
+              // kept alive by the copy_value.  The transformation does more,
+              // however: it rewrites the alloc_box as an alloc_stack, creating
+              // the alloc_stack/dealloc_stack instructions where the alloc_box/
+              // destroy_value instructions are respectively.  The copy_value
+              // can't keep the alloc_stack alive.
+              if ((svi = dyn_cast<CopyValueInst>(user)) ||
+                  (svi = dyn_cast<MoveValueInst>(user))) {
+                worklist.push(svi);
+              }
+              users.push_back(user);
+            }
+          }
+          ValueLifetimeAnalysis VLA(PAI, users);
           pass.CFGChanged |= !VLA.computeFrontier(
               PAFrontier, ValueLifetimeAnalysis::AllowToModifyCFG);
           assert(!PAFrontier.empty() &&
@@ -1213,51 +1246,9 @@ static void rewriteApplySites(AllocBoxToStackState &pass) {
     auto *FRI = cast<FunctionRefInst>(Apply.getCallee());
     Apply.getInstruction()->eraseFromParent();
 
-    if (FRI->use_empty()) {
-      auto referencedFn = FRI->getReferencedFunction();
+    // TODO: Erase from module if there are no more uses.
+    if (FRI->use_empty())
       FRI->eraseFromParent();
-
-      // TODO: Erase from module if there are no more uses.
-      // If the function has no remaining references, it should eventually
-      // be deleted. We can't do that from a function pass, since the function
-      // is still queued up for other passes to run after this one, but we
-      // can at least gut the implementation, since subsequent passes that
-      // rely on stack promotion to occur (particularly closure lifetime
-      // fixup and move-only checking) may not be able to proceed in a
-      // sensible way on the now non-canonical original implementation.
-      if (referencedFn->getRefCount() == 0
-          && !isPossiblyUsedExternally(referencedFn->getLinkage(),
-                                   referencedFn->getModule().isWholeModule())) {
-        LLVM_DEBUG(llvm::dbgs() << "*** Deleting original function " << referencedFn->getName() << "'s body since it is unused");
-        // Remove all non-entry blocks.
-        auto entryBB = referencedFn->begin();
-        auto nextBB = std::next(entryBB);
-        
-        while (nextBB != referencedFn->end()) {
-          auto thisBB = nextBB;
-          ++nextBB;
-          thisBB->eraseFromParent();
-        }
-        
-        // Rewrite the entry block to only contain an unreachable.
-        auto loc = entryBB->begin()->getLoc();
-        entryBB->eraseAllInstructions(referencedFn->getModule());
-        {
-          SILBuilder b(&*entryBB);
-          b.createUnreachable(loc);
-        }
-        
-        // Refresh the CFG in case we removed any function calls.
-        pass.CFGChanged = true;
-        
-        // If the function has shared linkage, reduce this version to private
-        // linkage, because we don't want the deleted-body form to win in any
-        // ODR shootouts.
-        if (referencedFn->getLinkage() == SILLinkage::Shared) {
-          referencedFn->setLinkage(SILLinkage::Private);
-        }
-      }
-    }
   }
 }
 

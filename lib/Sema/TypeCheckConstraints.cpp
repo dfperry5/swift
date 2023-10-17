@@ -120,6 +120,10 @@ bool TypeVariableType::Implementation::isClosureType() const {
   return isExpr<ClosureExpr>(locator->getAnchor()) && locator->getPath().empty();
 }
 
+bool TypeVariableType::Implementation::isTapType() const {
+  return locator && locator->directlyAt<TapExpr>();
+}
+
 bool TypeVariableType::Implementation::isClosureParameterType() const {
   if (!(locator && locator->getAnchor()))
     return false;
@@ -138,6 +142,10 @@ bool TypeVariableType::Implementation::isClosureResultType() const {
 
 bool TypeVariableType::Implementation::isKeyPathType() const {
   return locator && locator->isKeyPathType();
+}
+
+bool TypeVariableType::Implementation::isKeyPathValue() const {
+  return locator && locator->isKeyPathValue();
 }
 
 bool TypeVariableType::Implementation::isSubscriptResultType() const {
@@ -299,7 +307,11 @@ public:
   }
 
   PreWalkResult<Expr *> walkToExprPre(Expr *expr) override {
-    performSyntacticExprDiagnostics(expr, dcStack.back(), /*isExprStmt=*/false);
+    // We skip out-of-place expr checking here since we've already performed it.
+    performSyntacticExprDiagnostics(expr, dcStack.back(), /*ctp*/ llvm::None,
+                                    /*isExprStmt=*/false,
+                                    /*disableAvailabilityChecking*/ false,
+                                    /*disableOutOfPlaceExprChecking*/ true);
 
     if (auto closure = dyn_cast<ClosureExpr>(expr)) {
       if (closure->isSeparatelyTypeChecked()) {
@@ -346,8 +358,9 @@ void constraints::performSyntacticDiagnosticsForTarget(
   switch (target.kind) {
   case SyntacticElementTarget::Kind::expression: {
     // First emit diagnostics for the main expression.
-    performSyntacticExprDiagnostics(target.getAsExpr(), dc,
-                                    isExprStmt, disableExprAvailabilityChecking);
+    performSyntacticExprDiagnostics(
+        target.getAsExpr(), dc, target.getExprContextualTypePurpose(),
+        isExprStmt, disableExprAvailabilityChecking);
     return;
   }
 
@@ -356,17 +369,25 @@ void constraints::performSyntacticDiagnosticsForTarget(
 
     // First emit diagnostics for the main expression.
     performSyntacticExprDiagnostics(stmt->getTypeCheckedSequence(), dc,
-                                    isExprStmt,
+                                    CTP_ForEachSequence, isExprStmt,
                                     disableExprAvailabilityChecking);
 
     if (auto *whereExpr = stmt->getWhere())
-      performSyntacticExprDiagnostics(whereExpr, dc, /*isExprStmt*/ false);
+      performSyntacticExprDiagnostics(whereExpr, dc, CTP_Condition,
+                                      /*isExprStmt*/ false);
     return;
   }
 
   case SyntacticElementTarget::Kind::function: {
+    // Check for out of place expressions. This needs to be done on the entire
+    // function body rather than on individual expressions since we need the
+    // context of the parent nodes.
+    auto *body = target.getFunctionBody();
+    diagnoseOutOfPlaceExprs(dc->getASTContext(), body,
+                            /*contextualPurpose*/ llvm::None);
+
     FunctionSyntacticDiagnosticWalker walker(dc);
-    target.getFunctionBody()->walk(walker);
+    body->walk(walker);
     return;
   }
   case SyntacticElementTarget::Kind::closure:
@@ -454,8 +475,7 @@ TypeChecker::typeCheckTarget(SyntacticElementTarget &target,
   if (auto *expr = target.getAsExpr()) {
     // Tell the constraint system what the contextual type is.  This informs
     // diagnostics and is a hint for various performance optimizations.
-    cs.setContextualType(expr, target.getExprContextualTypeLoc(),
-                         target.getExprContextualTypePurpose());
+    cs.setContextualInfo(expr, target.getExprContextualTypeInfo());
 
     // Try to shrink the system by reducing disjunction domains. This
     // goes through every sub-expression and generate its own sub-system, to
@@ -747,9 +767,8 @@ Type TypeChecker::typeCheckParameterDefault(Expr *&defaultValue,
   }
 
   defaultExprTarget.setExprConversionType(contextualTy);
-  cs.setContextualType(defaultValue,
-                       defaultExprTarget.getExprContextualTypeLoc(),
-                       defaultExprTarget.getExprContextualTypePurpose());
+  cs.setContextualInfo(defaultValue,
+                       defaultExprTarget.getExprContextualTypeInfo());
 
   auto viable = cs.solve(defaultExprTarget, FreeTypeVariableBinding::Disallow);
   if (!viable)
@@ -809,7 +828,7 @@ bool TypeChecker::typeCheckBinding(Pattern *&pattern, Expr *&initializer,
     // Don't change the type of a variable that we've been able to
     // compute a type for.
     if (var->hasInterfaceType() &&
-        !var->getType()->hasUnboundGenericType() &&
+        !var->getTypeInContext()->hasUnboundGenericType() &&
         !var->isInvalid())
       return;
 
@@ -863,6 +882,7 @@ bool TypeChecker::typeCheckPatternBinding(PatternBindingDecl *PBD,
   if (hadError)
     PBD->setInvalid();
   PBD->setInitializerChecked(patternNumber);
+  
   return hadError;
 }
 
@@ -882,8 +902,7 @@ bool TypeChecker::typeCheckForEachBinding(DeclContext *dc, ForEachStmt *stmt) {
     return true;
   };
 
-  auto target = SyntacticElementTarget::forForEachStmt(
-      stmt, dc, /*bindPatternVarsOneWay=*/false);
+  auto target = SyntacticElementTarget::forForEachStmt(stmt, dc);
   if (!typeCheckTarget(target))
     return failed();
 
@@ -1660,8 +1679,8 @@ TypeChecker::typeCheckCheckedCast(Type fromType, Type toType,
   //
   // Thus, right now, a move-only type is only a subtype of itself.
   // We also want to prevent conversions of a move-only type's metatype.
-  if (fromType->getMetatypeInstanceType()->isPureMoveOnly()
-      || toType->getMetatypeInstanceType()->isPureMoveOnly())
+  if (fromType->getMetatypeInstanceType()->isNoncopyable()
+      || toType->getMetatypeInstanceType()->isNoncopyable())
     return CheckedCastKind::Unresolved;
   
   // Check for a bridging conversion.

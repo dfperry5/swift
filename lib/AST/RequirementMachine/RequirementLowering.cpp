@@ -180,6 +180,7 @@ static void desugarSameTypeRequirement(Requirement req, SourceLoc loc,
     SourceLoc loc;
     SmallVectorImpl<Requirement> &result;
     SmallVectorImpl<RequirementError> &errors;
+    SmallVector<Position, 2> stack;
 
   public:
     bool recordedErrors = false;
@@ -191,32 +192,53 @@ static void desugarSameTypeRequirement(Requirement req, SourceLoc loc,
 
     bool alwaysMismatchTypeParameters() const { return true; }
 
+    void pushPosition(Position pos) {
+      stack.push_back(pos);
+    }
+
+    void popPosition(Position pos) {
+      assert(stack.back() == pos);
+      stack.pop_back();
+    }
+
+    Position getPosition() const {
+      if (stack.empty()) return Position::Type;
+      return stack.back();
+    }
+
     bool mismatch(TypeBase *firstType, TypeBase *secondType,
                   Type sugaredFirstType) {
+      RequirementKind kind;
+      switch (getPosition()) {
+      case Position::Type:
+        kind = RequirementKind::SameType;
+        break;
+      case Position::Shape:
+        kind = RequirementKind::SameShape;
+        break;
+      }
+
       // If one side is a parameter pack, this is a same-element requirement, which
       // is not yet supported.
       if (firstType->isParameterPack() != secondType->isParameterPack()) {
         errors.push_back(RequirementError::forSameElement(
-            {RequirementKind::SameType, sugaredFirstType, secondType}, loc));
+            {kind, sugaredFirstType, secondType}, loc));
         recordedErrors = true;
         return true;
       }
 
       if (firstType->isTypeParameter() && secondType->isTypeParameter()) {
-        result.emplace_back(RequirementKind::SameType,
-                            sugaredFirstType, secondType);
+        result.emplace_back(kind, sugaredFirstType, secondType);
         return true;
       }
 
       if (firstType->isTypeParameter()) {
-        result.emplace_back(RequirementKind::SameType,
-                            sugaredFirstType, secondType);
+        result.emplace_back(kind, sugaredFirstType, secondType);
         return true;
       }
 
       if (secondType->isTypeParameter()) {
-        result.emplace_back(RequirementKind::SameType,
-                            secondType, sugaredFirstType);
+        result.emplace_back(kind, secondType, sugaredFirstType);
         return true;
       }
 
@@ -362,9 +384,7 @@ static void desugarConformanceRequirement(Requirement req,
     desugarRequirement(subReq, loc, result, errors);
 }
 
-/// Desugar same-shape requirements by equating the shapes of the
-/// root pack types, and diagnose shape requirements on non-pack
-/// types.
+/// Diagnose shape requirements on non-pack types.
 static void desugarSameShapeRequirement(Requirement req, SourceLoc loc,
                                         SmallVectorImpl<Requirement> &result,
                                         SmallVectorImpl<RequirementError> &errors) {
@@ -376,8 +396,7 @@ static void desugarSameShapeRequirement(Requirement req, SourceLoc loc,
   }
 
   result.emplace_back(RequirementKind::SameShape,
-                      req.getFirstType()->getRootGenericParam(),
-                      req.getSecondType()->getRootGenericParam());
+                      req.getFirstType(), req.getSecondType());
 }
 
 /// Convert a requirement where the subject type might not be a type parameter,
@@ -543,15 +562,17 @@ struct InferRequirementsWalker : public TypeWalker {
     // - `@differentiable(_linear)`: add
     //   `T: Differentiable`, `T == T.TangentVector` requirements.
     if (auto *fnTy = ty->getAs<AnyFunctionType>()) {
+      // Add a new conformance constraint for a fixed protocol.
+      auto addConformanceConstraint = [&](Type type, ProtocolDecl *protocol) {
+        Requirement req(RequirementKind::Conformance, type,
+                        protocol->getDeclaredInterfaceType());
+        desugarRequirement(req, SourceLoc(), reqs, errors);
+      };
+
       auto &ctx = module->getASTContext();
       auto *differentiableProtocol =
           ctx.getProtocol(KnownProtocolKind::Differentiable);
       if (differentiableProtocol && fnTy->isDifferentiable()) {
-        auto addConformanceConstraint = [&](Type type, ProtocolDecl *protocol) {
-          Requirement req(RequirementKind::Conformance, type,
-                          protocol->getDeclaredInterfaceType());
-          desugarRequirement(req, SourceLoc(), reqs, errors);
-        };
         auto addSameTypeConstraint = [&](Type firstType,
                                          AssociatedTypeDecl *assocType) {
           auto secondType = assocType->getDeclaredInterfaceType()
@@ -576,6 +597,13 @@ struct InferRequirementsWalker : public TypeWalker {
         // Add requirements.
         constrainParametersAndResult(fnTy->getDifferentiabilityKind() ==
                                      DifferentiabilityKind::Linear);
+      }
+
+      // Infer that the thrown error type of a function type conforms to Error.
+      if (auto thrownError = fnTy->getThrownError()) {
+        if (auto errorProtocol = ctx.getErrorDecl()) {
+          addConformanceConstraint(thrownError, errorProtocol);
+        }
       }
     }
 
@@ -710,17 +738,15 @@ void swift::rewriting::realizeInheritedRequirements(
     TypeDecl *decl, Type type, bool shouldInferRequirements,
     SmallVectorImpl<StructuralRequirement> &result,
     SmallVectorImpl<RequirementError> &errors) {
-  auto &ctx = decl->getASTContext();
   auto inheritedTypes = decl->getInherited();
   auto *dc = decl->getInnermostDeclContext();
   auto *moduleForInference = dc->getParentModule();
+  auto defaults = getInvertibleProtocols();
 
-  for (unsigned index : indices(inheritedTypes)) {
-    Type inheritedType
-      = evaluateOrDefault(ctx.evaluator,
-                          InheritedTypeRequest{decl, index,
-                          TypeResolutionStage::Structural},
-                          Type());
+  for (auto index : inheritedTypes.getIndices()) {
+    Type inheritedType =
+        inheritedTypes.getResolvedType(index, TypeResolutionStage::Structural);
+
     if (!inheritedType) continue;
 
     // Ignore trivially circular protocol refinement (protocol P : P)
@@ -731,14 +757,42 @@ void swift::rewriting::realizeInheritedRequirements(
         continue;
     }
 
-    auto *typeRepr = inheritedTypes[index].getTypeRepr();
+    auto *typeRepr = inheritedTypes.getTypeRepr(index);
     SourceLoc loc = (typeRepr ? typeRepr->getStartLoc() : SourceLoc());
+
+    // For any inverses, we only need to cancel out a default requirement.
+    if (dyn_cast_or_null<InverseTypeRepr>(typeRepr)) {
+      if (auto protoTy = inheritedType->getAs<ProtocolType>())
+        if (auto protoDecl = protoTy->getDecl())
+          if (auto kp = protoDecl->getKnownProtocolKind())
+            defaults.remove(*kp);
+
+      continue;
+    }
+
     if (shouldInferRequirements) {
       inferRequirements(inheritedType, loc, moduleForInference,
                         decl->getInnermostDeclContext(), result);
     }
 
     realizeTypeRequirement(dc, type, inheritedType, loc, result, errors);
+  }
+
+  auto &ctx = dc->getASTContext();
+  if (ctx.LangOpts.hasFeature(Feature::NoncopyableGenerics)) {
+    // Add the remaining default conformance requirements to this
+    // associated type or generic type param.
+    for (auto kp : defaults) {
+      ProtocolDecl *decl = ctx.getProtocol(kp);
+      assert(decl && "couldn't load protocol??");
+
+      SourceLoc loc = decl->getLoc();
+      Type protocolType = decl->getDeclaredInterfaceType();
+
+      // Add the protocol as an "inferred" requirement.
+      Requirement req(RequirementKind::Conformance, type, protocolType);
+      result.push_back({req, loc, /*wasInferred=*/true});
+    }
   }
 }
 
@@ -940,7 +994,7 @@ TypeAliasRequirementsRequest::evaluate(Evaluator &evaluator,
       return { ", ", trailing->getRequirements().back().getSourceRange().End };
 
     // Inheritance clause.
-    return { " where ", proto->getInherited().back().getSourceRange().End };
+    return { " where ", proto->getInherited().getEndLoc() };
   };
 
   // Retrieve the set of requirements that a given associated type declaration
@@ -951,15 +1005,16 @@ TypeAliasRequirementsRequest::evaluate(Evaluator &evaluator,
     {
       llvm::raw_string_ostream out(result);
       out << start;
-      interleave(assocType->getInherited(), [&](TypeLoc inheritedType) {
-        out << assocType->getName() << ": ";
-        if (auto inheritedTypeRepr = inheritedType.getTypeRepr())
-          inheritedTypeRepr->print(out);
-        else
-          inheritedType.getType().print(out);
-      }, [&] {
-        out << ", ";
-      });
+      llvm::interleave(
+          assocType->getInherited().getEntries(),
+          [&](TypeLoc inheritedType) {
+            out << assocType->getName() << ": ";
+            if (auto inheritedTypeRepr = inheritedType.getTypeRepr())
+              inheritedTypeRepr->print(out);
+            else
+              inheritedType.getType().print(out);
+          },
+          [&] { out << ", "; });
 
       if (const auto whereClause = assocType->getTrailingWhereClause()) {
         if (!assocType->getInherited().empty())
@@ -1023,7 +1078,7 @@ TypeAliasRequirementsRequest::evaluate(Evaluator &evaluator,
             .fixItRemove(assocTypeDecl->getSourceRange());
 
           ctx.Diags.diagnose(inheritedAssocTypeDecl, diag::decl_declared_here,
-                             inheritedAssocTypeDecl->getName());
+                             inheritedAssocTypeDecl);
 
           shouldWarnAboutRedeclaration = false;
         }
@@ -1099,7 +1154,7 @@ TypeAliasRequirementsRequest::evaluate(Evaluator &evaluator,
                                   getConcreteTypeReq(type, fixItWhere.Item))
                 .fixItRemove(type->getSourceRange());
               ctx.Diags.diagnose(inheritedAssocTypeDecl, diag::decl_declared_here,
-                                 inheritedAssocTypeDecl->getName());
+                                 inheritedAssocTypeDecl);
 
               shouldWarnAboutRedeclaration = false;
             }

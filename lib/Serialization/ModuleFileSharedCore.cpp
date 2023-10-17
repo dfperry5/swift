@@ -16,6 +16,7 @@
 #include "ModuleFileCoreTableInfo.h"
 #include "swift/Basic/LangOptions.h"
 #include "swift/Parse/ParseVersion.h"
+#include "swift/Serialization/SerializedModuleLoader.h"
 #include "swift/Strings.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/OnDiskHashTable.h"
@@ -157,6 +158,9 @@ static bool readOptionsBlock(llvm::BitstreamCursor &cursor,
       break;
     case options_block::HAS_HERMETIC_SEAL_AT_LINK:
       extendedInfo.setHasHermeticSealAtLink(true);
+      break;
+    case options_block::IS_EMBEDDED_SWIFT_MODULE:
+      extendedInfo.setIsEmbeddedSwiftModule(true);
       break;
     case options_block::IS_TESTABLE:
       extendedInfo.setIsTestable(true);
@@ -512,6 +516,27 @@ static bool validateInputBlock(
     }
   }
   return false;
+}
+
+std::string serialization::StatusToString(Status S) {
+  switch (S) {
+  case Status::Valid: return "Valid";
+  case Status::FormatTooOld: return "FormatTooOld";
+  case Status::FormatTooNew: return "FormatTooNew";
+  case Status::RevisionIncompatible: return "RevisionIncompatible";
+  case Status::NotInOSSA: return "NotInOSSA";
+  case Status::MissingDependency: return "MissingDependency";
+  case Status::MissingUnderlyingModule: return "MissingUnderlyingModule";
+  case Status::CircularDependency: return "CircularDependency";
+  case Status::FailedToLoadBridgingHeader: return "FailedToLoadBridgingHeader";
+  case Status::Malformed: return "Malformed";
+  case Status::MalformedDocumentation: return "MalformedDocumentation";
+  case Status::NameMismatch: return "NameMismatch";
+  case Status::TargetIncompatible: return "TargetIncompatible";
+  case Status::TargetTooNew: return "TargetTooNew";
+  case Status::SDKMismatch: return "SDKMismatch";
+  }
+  llvm_unreachable("The switch should cover all cases");
 }
 
 bool serialization::isSerializedAST(StringRef data) {
@@ -1384,6 +1409,7 @@ ModuleFileSharedCore::ModuleFileSharedCore(
       Bits.IsSIB = extInfo.isSIB();
       Bits.IsStaticLibrary = extInfo.isStaticLibrary();
       Bits.HasHermeticSealAtLink = extInfo.hasHermeticSealAtLink();
+      Bits.IsEmbeddedSwiftModule = extInfo.isEmbeddedSwiftModule();
       Bits.IsTestable = extInfo.isTestable();
       Bits.ResilienceStrategy = unsigned(extInfo.getResilienceStrategy());
       Bits.IsImplicitDynamicEnabled = extInfo.isImplicitDynamicEnabled();

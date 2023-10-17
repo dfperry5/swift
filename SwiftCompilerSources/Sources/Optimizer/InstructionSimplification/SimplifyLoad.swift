@@ -45,7 +45,7 @@ extension LoadInst : OnoneSimplifyable, SILCombineSimplifyable {
 
       operand.set(to: uac.fromAddress, context)
       let builder = Builder(before: self, context)
-      let newLoad = builder.createLoad(fromAddress: uac.fromAddress, ownership: ownership)
+      let newLoad = builder.createLoad(fromAddress: uac.fromAddress, ownership: loadOwnership)
       let cast = builder.createUpcast(from: newLoad, to: type)
       uses.replaceAll(with: cast, context)
       context.erase(instruction: self)
@@ -184,7 +184,7 @@ extension LoadInst : OnoneSimplifyable, SILCombineSimplifyable {
 
   /// Removes the `load [copy]` if the loaded value is just destroyed.
   private func removeIfDead(_ context: SimplifyContext) {
-    if ownership == .copy,
+    if loadOwnership == .copy,
        loadedValueIsDead(context) {
       for use in uses {
         context.erase(instruction: use.instruction)
@@ -284,10 +284,11 @@ private extension Value {
   func getBaseAddressAndOffset() -> (baseAddress: Value, offset: Int)? {
     if let indexAddr = self as? IndexAddrInst {
       guard let indexLiteral = indexAddr.index as? IntegerLiteralInst,
-            indexLiteral.value.getActiveBits() <= 32 else {
+            let indexValue = indexLiteral.value else
+      {
         return nil
       }
-      return (baseAddress: indexAddr.base, offset: Int(indexLiteral.value.getZExtValue()))
+      return (baseAddress: indexAddr.base, offset: indexValue)
     }
     return (baseAddress: self, offset: 0)
   }
@@ -297,9 +298,11 @@ private extension Instruction {
   var isShiftRightByAtLeastOne: Bool {
     guard let bi = self as? BuiltinInst,
           bi.id == .LShr,
-          let shiftLiteral = bi.operands[1].value as? IntegerLiteralInst else {
+          let shiftLiteral = bi.operands[1].value as? IntegerLiteralInst,
+          let shiftValue = shiftLiteral.value else
+    {
       return false
     }
-    return shiftLiteral.value.isStrictlyPositive()
+    return shiftValue > 0
   }
 }

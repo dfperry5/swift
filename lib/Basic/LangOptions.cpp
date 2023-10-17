@@ -107,6 +107,14 @@ static const SupportedConditionalValue SupportedConditionalCompilationPtrAuthSch
   "_arm64e",
 };
 
+static const SupportedConditionalValue SupportedConditionalCompilationHasAtomicBitWidths[] = {
+  "_8",
+  "_16",
+  "_32",
+  "_64",
+  "_128"
+};
+
 static const PlatformConditionKind AllPublicPlatformConditionKinds[] = {
 #define PLATFORM_CONDITION(LABEL, IDENTIFIER) PlatformConditionKind::LABEL,
 #define PLATFORM_CONDITION_(LABEL, IDENTIFIER)
@@ -131,6 +139,8 @@ ArrayRef<SupportedConditionalValue> getSupportedConditionalCompilationValues(con
     return SupportedConditionalCompilationTargetEnvironments;
   case PlatformConditionKind::PtrAuth:
     return SupportedConditionalCompilationPtrAuthSchemes;
+  case PlatformConditionKind::HasAtomicBitWidth:
+    return SupportedConditionalCompilationHasAtomicBitWidths;
   }
   llvm_unreachable("Unhandled PlatformConditionKind in switch");
 }
@@ -194,6 +204,7 @@ checkPlatformConditionSupported(PlatformConditionKind Kind, StringRef Value,
   case PlatformConditionKind::Runtime:
   case PlatformConditionKind::TargetEnvironment:
   case PlatformConditionKind::PtrAuth:
+  case PlatformConditionKind::HasAtomicBitWidth:
     return isMatching(Kind, Value, suggestedKind, suggestedValues);
   case PlatformConditionKind::CanImport:
     // All importable names are valid.
@@ -235,6 +246,14 @@ checkPlatformCondition(PlatformConditionKind Kind, StringRef Value) const {
         return true;
   }
 
+  if (Kind == PlatformConditionKind::HasAtomicBitWidth) {
+    for (auto bitWidth : AtomicBitWidths) {
+      if (bitWidth == Value) {
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -268,8 +287,107 @@ bool LangOptions::hasFeature(llvm::StringRef featureName) const {
   return false;
 }
 
+void LangOptions::setHasAtomicBitWidth(llvm::Triple triple) {
+  // We really want to use Clang's getMaxAtomicInlineWidth(), but that requires
+  // a Clang::TargetInfo and we're setting up lang opts very early in the
+  // pipeline before any ASTContext or any ClangImporter instance where we can
+  // access the target's info.
+
+  switch (triple.getArch()) {
+  // ARM is only a 32 bit arch and all archs besides the microcontroller profile
+  // ones have double word atomics.
+  case llvm::Triple::ArchType::arm:
+  case llvm::Triple::ArchType::thumb:
+    switch (triple.getSubArch()) {
+    case llvm::Triple::SubArchType::ARMSubArch_v6m:
+    case llvm::Triple::SubArchType::ARMSubArch_v7m:
+      setMaxAtomicBitWidth(32);
+      break;
+
+    default:
+      setMaxAtomicBitWidth(64);
+      break;
+    }
+    break;
+
+  // AArch64 (arm64) supports double word atomics on all archs besides the
+  // microcontroller profiles.
+  case llvm::Triple::ArchType::aarch64:
+    switch (triple.getSubArch()) {
+    case llvm::Triple::SubArchType::ARMSubArch_v8m_baseline:
+    case llvm::Triple::SubArchType::ARMSubArch_v8m_mainline:
+    case llvm::Triple::SubArchType::ARMSubArch_v8_1m_mainline:
+      setMaxAtomicBitWidth(64);
+      break;
+
+    default:
+      setMaxAtomicBitWidth(128);
+      break;
+    }
+    break;
+
+  // arm64_32 has 32 bit pointer words, but it has the same architecture as
+  // arm64 and supports 128 bit atomics.
+  case llvm::Triple::ArchType::aarch64_32:
+    setMaxAtomicBitWidth(128);
+    break;
+
+  // PowerPC does not support double word atomics.
+  case llvm::Triple::ArchType::ppc:
+    setMaxAtomicBitWidth(32);
+    break;
+
+  // All of the 64 bit PowerPC flavors do not support double word atomics.
+  case llvm::Triple::ArchType::ppc64:
+  case llvm::Triple::ArchType::ppc64le:
+    setMaxAtomicBitWidth(64);
+    break;
+
+  // SystemZ (s390x) does not support double word atomics.
+  case llvm::Triple::ArchType::systemz:
+    setMaxAtomicBitWidth(64);
+    break;
+
+  // Wasm32 supports double word atomics.
+  case llvm::Triple::ArchType::wasm32:
+    setMaxAtomicBitWidth(64);
+    break;
+
+  // x86 supports double word atomics.
+  //
+  // Technically, this is incorrect. However, on all x86 platforms where Swift
+  // is deployed this is true.
+  case llvm::Triple::ArchType::x86:
+    setMaxAtomicBitWidth(64);
+    break;
+
+  // x86_64 supports double word atomics.
+  //
+  // Technically, this is incorrect. However, on all x86_64 platforms where Swift
+  // is deployed this is true. If the ClangImporter ever stops unconditionally
+  // adding '-mcx16' to its Clang instance, then be sure to update this below.
+  case llvm::Triple::ArchType::x86_64:
+    setMaxAtomicBitWidth(128);
+    break;
+
+  default:
+    // Some exotic architectures may not support atomics at all. If that's the
+    // case please update the switch with your flavor of arch. Otherwise assume
+    // every arch supports at least word atomics.
+
+    if (triple.isArch32Bit()) {
+      setMaxAtomicBitWidth(32);
+    }
+
+    if (triple.isArch64Bit()) {
+      setMaxAtomicBitWidth(64);
+    }
+  }
+}
+
 std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   clearAllPlatformConditionValues();
+  clearAtomicBitWidths();
 
   if (triple.getOS() == llvm::Triple::Darwin &&
       triple.getVendor() == llvm::Triple::Apple) {
@@ -390,6 +508,14 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     break;
   default:
     UnsupportedArch = true;
+
+    if (Target.getOSName() == "none") {
+      if (Target.getArch() != llvm::Triple::ArchType::UnknownArch) {
+        auto ArchName = llvm::Triple::getArchTypeName(Target.getArch());
+        addPlatformConditionValue(PlatformConditionKind::Arch, ArchName);
+        UnsupportedArch = false;
+      }
+    }
   }
 
   if (UnsupportedOS || UnsupportedArch)
@@ -430,6 +556,9 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
   if (tripleIsMacCatalystEnvironment(Target))
     addPlatformConditionValue(PlatformConditionKind::TargetEnvironment,
                               "macabi");
+
+  // Set the "_hasHasAtomicBitWidth" platform condition.
+  setHasAtomicBitWidth(triple);
 
   // If you add anything to this list, change the default size of
   // PlatformConditionValues to not require an extra allocation

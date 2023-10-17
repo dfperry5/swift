@@ -1,7 +1,7 @@
 // REQUIRES: swift_swift_parser, executable_test
 
 // RUN: %empty-directory(%t)
-// RUN: %host-build-swift -swift-version 5 -emit-library -o %t/%target-library-name(MacroDefinition) -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift -g -no-toolchain-stdlib-rpath -swift-version 5
+// RUN: %host-build-swift -swift-version 5 -emit-library -o %t/%target-library-name(MacroDefinition) -module-name=MacroDefinition %S/Inputs/syntax_macro_definitions.swift
 
 // Diagnostics testing
 // RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -module-name MacroUser -DTEST_DIAGNOSTICS
@@ -12,10 +12,13 @@
 
 // RUN: %target-typecheck-verify-swift -swift-version 5 -load-plugin-library %t/%target-library-name(MacroDefinition) -module-name MacroUser -DTEST_DIAGNOSTICS -I %t -DIMPORT_MACRO_LIBRARY
 
-// RUN: not %target-swift-frontend -swift-version 5 -typecheck -load-plugin-library %t/%target-library-name(MacroDefinition) -module-name MacroUser -DTEST_DIAGNOSTICS -serialize-diagnostics-path %t/macro_expand.dia %s -emit-macro-expansion-files no-diagnostics > %t/macro-printing.txt
-// RUN: c-index-test -read-diagnostics %t/macro_expand.dia 2>&1 | %FileCheck -check-prefix CHECK-DIAGS %s
+// RUN: not %target-swift-frontend -swift-version 5 -typecheck -load-plugin-library %t/%target-library-name(MacroDefinition) -module-name MacroUser -DTEST_DIAGNOSTICS -serialize-diagnostics-path %t/macro_expand.dia %s -emit-macro-expansion-files no-diagnostics -Rmacro-loading > %t/macro-printing.txt
+// RUN: c-index-test -read-diagnostics %t/macro_expand.dia 2>&1 | %FileCheck -check-prefix CHECK-DIAGS -dump-input=always %s
 
 // RUN: %FileCheck %s  --check-prefix CHECK-MACRO-PRINTED < %t/macro-printing.txt
+
+// RUN: not %target-swift-frontend -swift-version 5 -typecheck -diagnostic-style=swift -load-plugin-library %t/%target-library-name(MacroDefinition)  -module-name MacroUser -DTEST_DIAGNOSTICS %s > %t/pretty-macro-diagnostics.txt 2>&1
+// RUN: %FileCheck %s --check-prefix PRETTY-DIAGS < %t/pretty-macro-diagnostics.txt
 
 // Debug info SIL testing
 // RUN: %target-swift-frontend -swift-version 5 -emit-sil -load-plugin-library %t/%target-library-name(MacroDefinition) %s -module-name MacroUser -o - -g | %FileCheck --check-prefix CHECK-SIL %s
@@ -33,6 +36,8 @@
 // RUN: %FileCheck -check-prefix=CHECK-MODULE-TRACE %s < %t/loaded_module_trace.trace.json
 
 // CHECK-MODULE-TRACE: {{libMacroDefinition.dylib|libMacroDefinition.so|MacroDefinition.dll}}
+
+// CHECK-DIAGS: loaded macro implementation module 'MacroDefinition' from shared library
 
 #if IMPORT_MACRO_LIBRARY
 import freestanding_macro_library
@@ -76,7 +81,7 @@ macro Invalid() = #externalMacro(module: "MacroDefinition", type: "InvalidMacro"
 
 @Invalid
 struct Bad {}
-// expected-note@-1 18 {{in expansion of macro 'Invalid' here}}
+// expected-note@-2 18 {{in expansion of macro 'Invalid' on struct 'Bad' here}}
 
 // CHECK-DIAGS: error: macro expansion cannot introduce import
 // CHECK-DIAGS: error: macro expansion cannot introduce precedence group
@@ -122,6 +127,24 @@ struct Bad {}
 // CHECK-DIAGS: END CONTENTS OF FILE
 #endif
 
+@freestanding(declaration)
+macro accidentalCodeItem() = #externalMacro(module: "MacroDefinition", type: "FakeCodeItemMacro")
+
+@attached(peer)
+macro AccidentalCodeItem() = #externalMacro(module: "MacroDefinition", type: "FakeCodeItemMacro")
+
+#if TEST_DIAGNOSTICS
+func invalidDeclarationMacro() {
+  #accidentalCodeItem
+  // expected-note@-1 {{in expansion of macro 'accidentalCodeItem' here}}
+  // CHECK-DIAGS: @__swiftmacro_9MacroUser018invalidDeclarationA0yyF18accidentalCodeItemfMf0_.swift:1:1: error: expected macro expansion to produce a declaration
+
+  @AccidentalCodeItem struct S {}
+  // expected-note@-1 {{in expansion of macro 'AccidentalCodeItem' on struct 'S' here}}
+  // CHECK-DIAGS: @__swiftmacro_9MacroUser018invalidDeclarationA0yyF1SL_18AccidentalCodeItemfMp_.swift:1:1: error: expected macro expansion to produce a declaration
+}
+#endif
+
 @freestanding(expression) macro customFileID() -> String = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
 @freestanding(expression) macro fileID<T: ExpressibleByStringLiteral>() -> T = #externalMacro(module: "MacroDefinition", type: "FileIDMacro")
 @freestanding(expression) macro recurse(_: Bool) = #externalMacro(module: "MacroDefinition", type: "RecursiveMacro")
@@ -140,9 +163,9 @@ func testFileID(a: Int, b: Int) {
   // CHECK-AST: macro_expansion_expr type='String'{{.*}}name=line
   print("Builtin result is \(#fileID)")
   print(
-    /// CHECK-IR-DAG: ![[L1:[0-9]+]] = !DILocation(line: [[@LINE+1]], column: 5
+    /// CHECK-IR-DAG: ![[L1:[0-9]+]] = distinct !DILocation(line: [[@LINE+1]], column: 5
     #addBlocker(
-      /// CHECK-IR-DAG: ![[L2:[0-9]+]] = !DILocation({{.*}}inlinedAt: ![[L1]])
+      /// CHECK-IR-DAG: ![[L2:[0-9]+]] = distinct !DILocation({{.*}}inlinedAt: ![[L1]])
       /// CHECK-IR-DAG: ![[L3:[0-9]+]] = !DILocation({{.*}}inlinedAt: ![[L2]])
       #stringify(a - b)
       )
@@ -198,6 +221,29 @@ public struct Outer {
 // CHECK: (2, "a + b")
 testStringify(a: 1, b: 1)
 
+protocol P { }
+extension Int: P { }
+
+// Stringify with closures that have local types.
+@available(SwiftStdlib 5.1, *)
+func testStringifyWithLocalTypes() {
+  _ = #stringify({
+    struct LocalType: P {
+      static var name: String = "Taylor"
+      var something: some P { self }
+    }
+
+    func f() -> some P { return LocalType().something }
+  })
+}
+
+// Stringify in closures that have anonymous parameters.
+func testStringifyWithAnonymousParameters() {
+  {
+    _ = #stringify($0 + $1)
+  }(1, 2)
+}
+
 func maybeThrowing() throws -> Int { 5 }
 
 #if TEST_DIAGNOSTICS
@@ -221,6 +267,13 @@ func testNested() {
 // CHECK-DIAGS-NOT: error: cannot convert value of type 'Nested' to expected argument type 'Bool'
 // CHECK-DIAGS: @__swiftmacro_9MacroUser10testNestedyyF9stringifyfMf_9assertAnyfMf_.swift:1:8: error: cannot convert value of type 'Nested' to expected argument type 'Bool'
 // CHECK-DIAGS-NOT: error: cannot convert value of type 'Nested' to expected argument type 'Bool'
+
+  // PRETTY-DIAGS: 1:8: error: cannot convert value of type 'Nested' to expected argument type 'Bool'
+  // PRETTY-DIAGS: macro_expand.swift:{{.*}}:39: note: expanded code originates here
+  // PRETTY-DIAGS: ─── macro expansion #stringify
+  // PRETTY-DIAGS: ─── macro expansion #assertAny
+  // PRETTY-DIAGS-NEXT: 1 │ assert(Nested())
+  // PRETTY-DIAGS-NEXT:   │        ╰─ error: cannot convert value
 }
 #endif
 
@@ -320,14 +373,11 @@ let blah = false
 #endif
 
 // Test unqualified lookup from within a macro expansion
-// FIXME: Global freestanding macros not yet supported in script mode.
-#if false
 let world = 3 // to be used by the macro expansion below
 #structWithUnqualifiedLookup()
 _ = StructWithUnqualifiedLookup().foo()
 
 #anonymousTypes { "hello" }
-#endif
 
 func testFreestandingMacroExpansion() {
   // Explicit structs to force macros to be parsed as decl.
@@ -534,3 +584,40 @@ func testExpressionAsDeclarationMacro() {
   // expected-error@-1{{macro implementation type 'StringifyMacro' doesn't conform to required protocol 'DeclarationMacro' (from macro 'stringifyAsDeclMacro')}}
 #endif
 }
+
+// Deprecated macro
+@available(*, deprecated, message: "This macro is deprecated.")
+@freestanding(expression) macro deprecatedStringify<T>(_ value: T) -> (T, String) = #externalMacro(module: "MacroDefinition", type: "StringifyMacro")
+
+@available(*, deprecated, message: "This macro is deprecated.")
+@freestanding(declaration) macro deprecatedStringifyAsDeclMacro<T>(_ value: T) = #externalMacro(module: "MacroDefinition", type: "StringifyMacro")
+
+func testDeprecated() {
+  // expected-warning@+1{{'deprecatedStringify' is deprecated: This macro is deprecated.}}
+  _ = #deprecatedStringify(1 + 1)
+}
+
+#if TEST_DIAGNOSTICS
+struct DeprecatedStructWrapper {
+  // expected-error@+2{{macro implementation type 'StringifyMacro' doesn't conform to required protocol 'DeclarationMacro' (from macro 'deprecatedStringifyAsDeclMacro')}}
+  // expected-warning@+1{{'deprecatedStringifyAsDeclMacro' is deprecated: This macro is deprecated.}}
+  #deprecatedStringifyAsDeclMacro(1 + 1)
+}
+#endif
+
+
+@freestanding(declaration, names: named(ComparableType))
+macro DefineComparableType() = #externalMacro(module: "MacroDefinition", type: "DefineComparableTypeMacro")
+
+struct HasNestedType {
+  #DefineComparableType
+}
+
+#if TEST_DIAGNOSTICS
+@freestanding(expression)
+macro missingMacro() = #externalMacro(module: "MacroDefinition", type: "BluhBlah")
+// expected-warning@-1 {{external macro implementation type 'MacroDefinition.BluhBlah' could not be found for macro 'missingMacro()'; 'MacroDefinition.BluhBlah' could not be found in library plugin '}}
+@freestanding(expression)
+macro notMacro() = #externalMacro(module: "MacroDefinition", type: "NotMacroStruct")
+// expected-warning@-1 {{macro implementation type 'MacroDefinition.NotMacroStruct' could not be found for macro 'notMacro()'; 'MacroDefinition.NotMacroStruct' is not a valid macro implementation type in library plugin '}}
+#endif

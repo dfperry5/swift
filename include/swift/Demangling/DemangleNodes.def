@@ -44,6 +44,7 @@ NODE(BoundGenericOtherNominalType)
 NODE(BoundGenericTypeAlias)
 NODE(BoundGenericFunction)
 NODE(BuiltinTypeName)
+NODE(BuiltinTupleType)
 NODE(CFunctionPointer)
 NODE(ClangType)
 CONTEXT_NODE(Class)
@@ -364,10 +365,14 @@ NODE(SymbolicExtendedExistentialType)
 // Added in Swift 5.8
 NODE(MetatypeParamsRemoved)
 NODE(HasSymbolQuery)
-NODE(RuntimeDiscoverableAttributeRecord)
-CONTEXT_NODE(RuntimeAttributeGenerator)
 NODE(OpaqueReturnTypeIndex)
 NODE(OpaqueReturnTypeParent)
+
+// Added in Swift 5.9 + 1
+NODE(AsyncRemoved)
+
+// Added in Swift 5.TBD
+NODE(ObjectiveCProtocolSymbolicReference)
 
 #undef CONTEXT_NODE
 #undef NODE

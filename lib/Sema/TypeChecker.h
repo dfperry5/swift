@@ -459,9 +459,8 @@ void typeCheckASTNode(ASTNode &node, DeclContext *DC,
 /// e.g., because of a \c return statement. Otherwise, returns either the
 /// fully type-checked body of the function (on success) or a \c nullptr
 /// value if an error occurred while type checking the transformed body.
-llvm::Optional<BraceStmt *> applyResultBuilderBodyTransform(
-    FuncDecl *func, Type builderType,
-    bool ClosuresInResultBuilderDontParticipateInInference = false);
+llvm::Optional<BraceStmt *> applyResultBuilderBodyTransform(FuncDecl *func,
+                                                            Type builderType);
 
 /// Find the return statements within the body of the given function.
 std::vector<ReturnStmt *> findReturnStatements(AnyFunctionRef fn);
@@ -621,13 +620,6 @@ typeCheckExpression(constraints::SyntacticElementTarget &target,
 llvm::Optional<constraints::SyntacticElementTarget>
 typeCheckTarget(constraints::SyntacticElementTarget &target,
                 TypeCheckExprOptions options = TypeCheckExprOptions());
-
-/// Return the type of operator function for specified LHS, or a null
-/// \c Type on error.
-FunctionType *getTypeOfCompletionOperator(DeclContext *DC, Expr *LHS,
-                                          Identifier opName,
-                                          DeclRefKind refKind,
-                                          ConcreteDeclRef &refdDecl);
 
 /// Remove any solutions from the provided vector that require more fixes than
 /// the best score or don't contain a type for the code completion token.
@@ -1171,8 +1163,8 @@ bool diagnoseIfDeprecated(SourceLoc loc,
                           const ExportContext &where);
 /// @}
 
-/// If LangOptions::DebugForbidTypecheckPrefix is set and the given decl
-/// name starts with that prefix, an llvm fatal_error is triggered.
+/// If `LangOptions::DebugForbidTypecheckPrefixes` is set and the given decl
+/// name starts with any of those prefixes, an llvm fatal error is triggered.
 /// This is for testing purposes.
 void checkForForbiddenPrefix(ASTContext &C, DeclBaseName Name);
 
@@ -1184,7 +1176,18 @@ void checkEnumElementEffects(EnumElementDecl *D, Expr *expr);
 void checkPropertyWrapperEffects(PatternBindingDecl *binding, Expr *expr);
 
 /// Whether the given expression can throw.
-bool canThrow(Expr *expr);
+bool canThrow(ASTContext &ctx, Expr *expr);
+
+/// Determine the error type that is thrown out of the body of the given
+/// do-catch statement.
+///
+/// The error type is used in the catch clauses and, for a nonexhausive
+/// do-catch, is implicitly rethrown out of the do...catch block.
+Type catchErrorType(ASTContext &ctx, DoCatchStmt *stmt);
+
+/// Given two error types, merge them into the "union" of both error types
+/// that is a supertype of both error types.
+Type errorUnion(Type type1, Type type2);
 
 /// If an expression references 'self.init' or 'super.init' in an
 /// initializer context, returns the implicit 'self' decl of the constructor.
@@ -1326,12 +1329,6 @@ bool diagnoseInvalidFunctionType(FunctionType *fnTy, SourceLoc loc,
 /// \param writtenType The interface type usually derived from a user-written
 /// type repr. \param inferredType The type inferred by the type checker.
 void notePlaceholderReplacementTypes(Type writtenType, Type inferredType);
-
-/// Check whether the given extension introduces a conformance
-/// to a protocol annotated with reflection metadata attribute(s).
-/// If that's the case, conforming type supposed to match attribute
-/// requirements.
-void checkReflectionMetadataAttributes(ExtensionDecl *extension);
 } // namespace TypeChecker
 
 /// Returns the protocol requirement kind of the given declaration.
@@ -1560,6 +1557,9 @@ public:
     return FirstDiscriminator;
   }
 };
+
+/// Report imports that are marked public but are not used in API.
+void diagnoseUnnecessaryPublicImports(SourceFile &SF);
 
 } // end namespace swift
 

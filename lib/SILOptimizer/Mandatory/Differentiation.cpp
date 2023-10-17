@@ -544,11 +544,11 @@ emitDerivativeFunctionReference(
       for (auto resultIndex : desiredResultIndices->getIndices()) {
         SILType resultType;
         if (resultIndex >= originalFnTy->getNumResults()) {
-          auto inoutParamIdx = resultIndex - originalFnTy->getNumResults();
-          auto inoutParam =
-              *std::next(originalFnTy->getIndirectMutatingParameters().begin(),
-                         inoutParamIdx);
-          resultType = inoutParam.getSILStorageInterfaceType();
+          auto semanticResultParamIdx = resultIndex - originalFnTy->getNumResults();
+          auto semanticResultParam =
+              *std::next(originalFnTy->getAutoDiffSemanticResultsParameters().begin(),
+                         semanticResultParamIdx);
+          resultType = semanticResultParam.getSILStorageInterfaceType();
         } else {
           resultType = originalFnTy->getResults()[resultIndex]
                            .getSILStorageInterfaceType();
@@ -576,7 +576,8 @@ emitDerivativeFunctionReference(
                 .second->getDerivativeGenericSignature();
       auto derivativeConstrainedGenSig =
           autodiff::getConstrainedDerivativeGenericSignature(
-              originalFn->getLoweredFunctionType(), desiredParameterIndices,
+              originalFn->getLoweredFunctionType(),
+              desiredParameterIndices, desiredResultIndices,
               contextualDerivativeGenSig,
               LookUpConformanceInModule(context.getModule().getSwiftModule()));
       minimalWitness = SILDifferentiabilityWitness::createDefinition(
@@ -750,15 +751,16 @@ static SILFunction *createEmptyVJP(ADContext &context,
                                    SILDifferentiabilityWitness *witness,
                                    IsSerialized_t isSerialized) {
   auto original = witness->getOriginalFunction();
+  auto config = witness->getConfig();
   LLVM_DEBUG({
     auto &s = getADDebugStream();
-    s << "Creating VJP:\n\t";
+    s << "Creating VJP for " << original->getName() << ":\n\t";
     s << "Original type: " << original->getLoweredFunctionType() << "\n\t";
+    s << "Config: " << config << "\n\t";
   });
 
   auto &module = context.getModule();
   auto originalTy = original->getLoweredFunctionType();
-  auto config = witness->getConfig();
 
   // === Create an empty VJP. ===
   Mangle::DifferentiationMangler mangler;
@@ -794,15 +796,16 @@ static SILFunction *createEmptyJVP(ADContext &context,
                                    SILDifferentiabilityWitness *witness,
                                    IsSerialized_t isSerialized) {
   auto original = witness->getOriginalFunction();
+  auto config = witness->getConfig();
   LLVM_DEBUG({
     auto &s = getADDebugStream();
-    s << "Creating JVP:\n\t";
+    s << "Creating JVP for " << original->getName() << ":\n\t";
     s << "Original type: " << original->getLoweredFunctionType() << "\n\t";
+    s << "Config: " << config << "\n\t";
   });
 
   auto &module = context.getModule();
   auto originalTy = original->getLoweredFunctionType();
-  auto config = witness->getConfig();
 
   Mangle::DifferentiationMangler mangler;
   auto jvpName = mangler.mangleDerivativeFunction(

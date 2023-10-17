@@ -216,7 +216,7 @@ class JSONFixitWriter
   std::string FixitsOutputPath;
   std::unique_ptr<llvm::raw_ostream> OSPtr;
   bool FixitAll;
-  std::vector<SingleEdit> AllEdits;
+  SourceEdits AllEdits;
 
 public:
   JSONFixitWriter(std::string fixitsOutputPath,
@@ -229,9 +229,8 @@ private:
                         const DiagnosticInfo &Info) override {
     if (!(FixitAll || shouldTakeFixit(Info)))
       return;
-    for (const auto &Fix : Info.FixIts) {
-      AllEdits.push_back({SM, Fix.getRange(), Fix.getText().str()});
-    }
+    for (const auto &Fix : Info.FixIts)
+      AllEdits.addEdit(SM, Fix.getRange(), Fix.getText());
   }
 
   bool finishProcessing() override {
@@ -251,7 +250,7 @@ private:
       return true;
     }
 
-    swift::writeEditsInJson(llvm::makeArrayRef(AllEdits), *OS);
+    swift::writeEditsInJson(AllEdits, *OS);
     return false;
   }
 };
@@ -810,6 +809,34 @@ static bool writeTBDIfNeeded(CompilerInstance &Instance) {
                   Instance.getOutputBackend(), tbdOpts);
 }
 
+static bool writeAPIDescriptor(ModuleDecl *M, StringRef OutputPath,
+                               llvm::vfs::OutputBackend &Backend) {
+  return withOutputPath(M->getDiags(), Backend, OutputPath,
+                        [&](raw_ostream &OS) -> bool {
+                          writeAPIJSONFile(M, OS, /*PrettyPrinted=*/false);
+                          return false;
+                        });
+}
+
+static bool writeAPIDescriptorIfNeeded(CompilerInstance &Instance) {
+  const auto &Invocation = Instance.getInvocation();
+  const auto &frontendOpts = Invocation.getFrontendOptions();
+  if (!frontendOpts.InputsAndOutputs.hasAPIDescriptorOutputPath())
+    return false;
+
+  if (!frontendOpts.InputsAndOutputs.isWholeModule()) {
+    Instance.getDiags().diagnose(
+        SourceLoc(), diag::api_descriptor_only_supported_in_whole_module);
+    return false;
+  }
+
+  const std::string &APIDescriptorPath =
+      Invocation.getAPIDescriptorPathForWholeModule();
+
+  return writeAPIDescriptor(Instance.getMainModule(), APIDescriptorPath,
+                            Instance.getOutputBackend());
+}
+
 static bool performCompileStepsPostSILGen(CompilerInstance &Instance,
                                           std::unique_ptr<SILModule> SM,
                                           ModuleOrSourceFile MSF,
@@ -974,6 +1001,10 @@ static bool emitAnyWholeModulePostTypeCheckSupplementaryOutputs(
 
   {
     hadAnyError |= writeTBDIfNeeded(Instance);
+  }
+
+  {
+    hadAnyError |= writeAPIDescriptorIfNeeded(Instance);
   }
 
   {
@@ -1262,10 +1293,7 @@ static bool performScanDependencies(CompilerInstance &Instance) {
     else
       return dependencies::scanDependencies(Instance);
   } else {
-    if (Instance.getInvocation().getFrontendOptions().ImportPrescan)
-      return dependencies::batchPrescanDependencies(Instance, batchScanInput);
-    else
-      return dependencies::batchScanDependencies(Instance, batchScanInput);
+    return dependencies::batchScanDependencies(Instance, batchScanInput);
   }
 }
 
@@ -1364,13 +1392,25 @@ static bool performAction(CompilerInstance &Instance,
                                 [](CompilerInstance &Instance) {
                                   return Instance.getASTContext().hadError();
                                 });
+  case FrontendOptions::ActionType::Immediate: {
+    const auto &Ctx = Instance.getASTContext();
+    if (Ctx.LangOpts.hasFeature(Feature::LazyImmediate)) {
+      ReturnValue = RunImmediatelyFromAST(Instance);
+      return Ctx.hadError();
+    }
+    return withSemanticAnalysis(
+        Instance, observer, [&](CompilerInstance &Instance) {
+          assert(FrontendOptions::doesActionGenerateSIL(opts.RequestedAction) &&
+                 "All actions not requiring SILGen must have been handled!");
+          return performCompileStepsPostSema(Instance, ReturnValue, observer);
+        });
+  }
   case FrontendOptions::ActionType::EmitSILGen:
   case FrontendOptions::ActionType::EmitSIBGen:
   case FrontendOptions::ActionType::EmitSIL:
   case FrontendOptions::ActionType::EmitSIB:
   case FrontendOptions::ActionType::EmitModuleOnly:
   case FrontendOptions::ActionType::MergeModules:
-  case FrontendOptions::ActionType::Immediate:
   case FrontendOptions::ActionType::EmitAssembly:
   case FrontendOptions::ActionType::EmitIRGen:
   case FrontendOptions::ActionType::EmitIR:
@@ -1453,13 +1493,17 @@ static bool performCompile(CompilerInstance &Instance,
   }() && "Only supports parsing .swift files");
 
   bool hadError = performAction(Instance, ReturnValue, observer);
+  auto canIgnoreErrorForExit = [&Instance, &opts]() {
+    return opts.AllowModuleWithCompilerErrors ||
+      (opts.isTypeCheckAction() && Instance.downgradeInterfaceVerificationErrors());
+  };
 
   // We might have freed the ASTContext already, but in that case we would
   // have already performed these actions.
   if (Instance.hasASTContext() &&
       FrontendOptions::doesActionPerformEndOfPipelineActions(Action)) {
     performEndOfPipelineActions(Instance);
-    if (!opts.AllowModuleWithCompilerErrors)
+    if (!canIgnoreErrorForExit())
       hadError |= Instance.getASTContext().hadError();
   }
   return hadError;
@@ -1542,6 +1586,11 @@ static bool validateTBDIfNeeded(const CompilerInvocation &Invocation,
   const bool canPerformTBDValidation = [&]() {
     // If the user has requested we skip validation, honor it.
     if (mode == FrontendOptions::TBDValidationMode::None) {
+      return false;
+    }
+
+    // Embedded Swift does not support TBD.
+    if (Invocation.getLangOptions().hasFeature(Feature::Embedded)) {
       return false;
     }
 
@@ -1896,6 +1945,7 @@ static void emitIndexDataForSourceFile(SourceFile *PrimarySourceFile,
                                  opts.IndexIgnoreStdlib,
                                  opts.IndexIncludeLocals,
                                  isDebugCompilation,
+                                 opts.DisableImplicitModules,
                                  Invocation.getTargetTriple(),
                                  *Instance.getDependencyTracker(),
                                  Invocation.getIRGenOptions().FilePrefixMap);
@@ -1914,6 +1964,7 @@ static void emitIndexDataForSourceFile(SourceFile *PrimarySourceFile,
                                  opts.IndexIgnoreStdlib,
                                  opts.IndexIncludeLocals,
                                  isDebugCompilation,
+                                 opts.DisableImplicitModules,
                                  Invocation.getTargetTriple(),
                                  *Instance.getDependencyTracker(),
                                  Invocation.getIRGenOptions().FilePrefixMap);

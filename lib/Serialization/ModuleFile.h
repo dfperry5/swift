@@ -349,6 +349,9 @@ private:
   Decl *handleErrorAndSupplyMissingMember(ASTContext &context,
                                           Decl *container,
                                           llvm::Error &&error) const;
+  Decl *handleErrorAndSupplyMissingClassMember(
+      ASTContext &context, llvm::Error &&error,
+      ClassDecl *containingClass) const;
 
 public:
   /// Change the status of the current module.
@@ -619,6 +622,11 @@ public:
   /// Whether this module was built with -experimental-hermetic-seal-at-link.
   bool hasHermeticSealAtLink() const {
     return Core->Bits.HasHermeticSealAtLink;
+  }
+
+  /// Whether this module was built using embedded Swift.
+  bool isEmbeddedSwiftModule() const {
+    return Core->Bits.IsEmbeddedSwiftModule;
   }
 
   /// Whether this module was built with C++ interoperability enabled.

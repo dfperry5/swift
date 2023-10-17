@@ -219,10 +219,9 @@ OPERAND_OWNERSHIP(InstantaneousUse, IsEscapingClosure)
 OPERAND_OWNERSHIP(InstantaneousUse, ClassMethod)
 OPERAND_OWNERSHIP(InstantaneousUse, SuperMethod)
 OPERAND_OWNERSHIP(InstantaneousUse, ClassifyBridgeObject)
-OPERAND_OWNERSHIP(InstantaneousUse, SetDeallocating)
-#define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
-  OPERAND_OWNERSHIP(InstantaneousUse, StrongCopy##Name##Value)
-#define UNCHECKED_REF_STORAGE(Name, ...)                                       \
+OPERAND_OWNERSHIP(InstantaneousUse, UnownedCopyValue)
+OPERAND_OWNERSHIP(InstantaneousUse, WeakCopyValue)
+#define REF_STORAGE(Name, ...)                                                 \
   OPERAND_OWNERSHIP(InstantaneousUse, StrongCopy##Name##Value)
 #include "swift/AST/ReferenceStorage.def"
 
@@ -294,8 +293,8 @@ OPERAND_OWNERSHIP(DestroyingConsume, DestroyValue)
 OPERAND_OWNERSHIP(DestroyingConsume, EndLifetime)
 OPERAND_OWNERSHIP(DestroyingConsume, BeginCOWMutation)
 OPERAND_OWNERSHIP(DestroyingConsume, EndCOWMutation)
-
-// TODO: Should this be a forwarding consume.
+OPERAND_OWNERSHIP(DestroyingConsume, EndInitLetRef)
+// The move_value instruction creates a distinct lifetime.
 OPERAND_OWNERSHIP(DestroyingConsume, MoveValue)
 
 // Instructions that move an owned value.
@@ -313,6 +312,7 @@ OPERAND_OWNERSHIP(PointerEscape, ExtractExecutor)
 
 // Instructions that propagate a value within a borrow scope.
 OPERAND_OWNERSHIP(GuaranteedForwarding, TupleExtract)
+OPERAND_OWNERSHIP(GuaranteedForwarding, TuplePackExtract)
 OPERAND_OWNERSHIP(GuaranteedForwarding, StructExtract)
 OPERAND_OWNERSHIP(GuaranteedForwarding, DifferentiableFunctionExtract)
 OPERAND_OWNERSHIP(GuaranteedForwarding, LinearFunctionExtract)
@@ -367,7 +367,7 @@ FORWARDING_OWNERSHIP(UnconditionalCheckedCast)
 FORWARDING_OWNERSHIP(InitExistentialRef)
 FORWARDING_OWNERSHIP(DifferentiableFunction)
 FORWARDING_OWNERSHIP(LinearFunction)
-FORWARDING_OWNERSHIP(MarkMustCheck)
+FORWARDING_OWNERSHIP(MarkUnresolvedNonCopyableValue)
 FORWARDING_OWNERSHIP(MarkUnresolvedReferenceBinding)
 FORWARDING_OWNERSHIP(MoveOnlyWrapperToCopyableValue)
 FORWARDING_OWNERSHIP(CopyableToMoveOnlyWrapperValue)
@@ -432,8 +432,8 @@ OperandOwnershipClassifier::visitSelectEnumInst(SelectEnumInst *i) {
   if (getValue() == i->getEnumOperand()) {
     return OperandOwnership::InstantaneousUse;
   }
-  return getOwnershipKind().getForwardingOperandOwnership(
-    /*allowUnowned*/true);
+  assert(i->getType().isTrivial(i->getFunction()));
+  return OperandOwnership::TrivialUse;
 }
 
 OperandOwnership OperandOwnershipClassifier::visitBranchInst(BranchInst *bi) {
@@ -452,7 +452,7 @@ OperandOwnership OperandOwnershipClassifier::visitBranchInst(BranchInst *bi) {
 OperandOwnership
 OperandOwnershipClassifier::visitStoreBorrowInst(StoreBorrowInst *i) {
   if (getValue() == i->getSrc()) {
-    return OperandOwnership::InteriorPointer;
+    return OperandOwnership::Borrow;
   }
   return OperandOwnership::TrivialUse;
 }
@@ -659,6 +659,14 @@ OperandOwnershipClassifier::visitMarkDependenceInst(MarkDependenceInst *mdi) {
   // a borrow of the base (mark_dependence %base -> end_dependence is analogous
   // to a borrow scope).
   return OperandOwnership::PointerEscape;
+}
+
+OperandOwnership
+OperandOwnershipClassifier::visitBeginDeallocRefInst(BeginDeallocRefInst *bdr) {
+  if (getOperandIndex() == 0) {
+    return OperandOwnership::DestroyingConsume;
+  }
+  return OperandOwnership::NonUse;
 }
 
 OperandOwnership OperandOwnershipClassifier::visitKeyPathInst(KeyPathInst *I) {
@@ -944,7 +952,7 @@ BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse, InitializeDistributedRemoteActor)
 BUILTIN_OPERAND_OWNERSHIP(InstantaneousUse,
                           InitializeNonDefaultDistributedActor)
 
-BUILTIN_OPERAND_OWNERSHIP(PointerEscape, AutoDiffAllocateSubcontext)
+BUILTIN_OPERAND_OWNERSHIP(PointerEscape, AutoDiffAllocateSubcontextWithType)
 BUILTIN_OPERAND_OWNERSHIP(PointerEscape, AutoDiffProjectTopLevelSubcontext)
 
 // FIXME: ConvertTaskToJob is documented as taking NativePointer. It's operand's
@@ -956,8 +964,7 @@ BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildComplexEqualitySerialExecutorRef)
 BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildDefaultActorExecutorRef)
 BUILTIN_OPERAND_OWNERSHIP(BitwiseEscape, BuildMainActorExecutorRef)
 
-BUILTIN_OPERAND_OWNERSHIP(TrivialUse, AutoDiffCreateLinearMapContext)
-
+BUILTIN_OPERAND_OWNERSHIP(TrivialUse, AutoDiffCreateLinearMapContextWithType)
 #undef BUILTIN_OPERAND_OWNERSHIP
 
 #define SHOULD_NEVER_VISIT_BUILTIN(ID)                                         \

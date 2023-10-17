@@ -39,7 +39,7 @@ SILInstruction *SILCombiner::optimizeBuiltinCompareEq(BuiltinInst *BI,
       // cmp_eq %X, -1 -> xor (cmp_eq %X, 0), -1
       if (!NegateResult) {
         if (auto *ILOp = dyn_cast<IntegerLiteralInst>(BI->getArguments()[1]))
-          if (ILOp->getValue().isAllOnesValue()) {
+          if (ILOp->getValue().isAllOnes()) {
             auto X = BI->getArguments()[0];
             SILValue One(ILOp);
             SILValue Zero(
@@ -162,7 +162,6 @@ SILCombiner::optimizeBuiltinCOWBufferForReadingOSSA(BuiltinInst *bi) {
             return;
           case InteriorPointerOperandKind::OpenExistentialBox:
           case InteriorPointerOperandKind::ProjectBox:
-          case InteriorPointerOperandKind::StoreBorrow:
             // Can not mark this immutable.
             return;
           }
@@ -731,14 +730,14 @@ SILInstruction *SILCombiner::visitBuiltinInst(BuiltinInst *I) {
 
     return optimizeBitOp(I,
       [](APInt &left, const APInt &right) { left &= right; }    /* combine */,
-      [](const APInt &i) -> bool { return i.isAllOnesValue(); } /* isNeutral */,
+      [](const APInt &i) -> bool { return i.isAllOnes(); }      /* isNeutral */,
       [](const APInt &i) -> bool { return i.isMinValue(); }     /* isZero */,
       Builder, this);
   case BuiltinValueKind::Or:
     return optimizeBitOp(I,
       [](APInt &left, const APInt &right) { left |= right; }    /* combine */,
       [](const APInt &i) -> bool { return i.isMinValue(); }     /* isNeutral */,
-      [](const APInt &i) -> bool { return i.isAllOnesValue(); } /* isZero */,
+      [](const APInt &i) -> bool { return i.isAllOnes(); }      /* isZero */,
       Builder, this);
   case BuiltinValueKind::Xor:
     return optimizeBitOp(I,

@@ -25,6 +25,7 @@
 #include "swift/AST/TypeLoc.h"
 #include "swift/Basic/Debug.h"
 #include "swift/Sema/ConstraintLocator.h"
+#include "swift/Sema/ContextualTypeInfo.h"
 #include "swift/Sema/OverloadChoice.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/ilist.h"
@@ -49,23 +50,6 @@ class ConstraintFix;
 class ConstraintLocator;
 class ConstraintSystem;
 enum class TrailingClosureMatching;
-
-/// Describes contextual type information about a particular element
-/// (expression, statement etc.) within a constraint system.
-struct ContextualTypeInfo {
-  TypeLoc typeLoc;
-  ContextualTypePurpose purpose;
-
-  ContextualTypeInfo() : typeLoc(TypeLoc()), purpose(CTP_Unused) {}
-
-  ContextualTypeInfo(Type contextualTy, ContextualTypePurpose purpose)
-      : typeLoc(TypeLoc::withoutLoc(contextualTy)), purpose(purpose) {}
-
-  ContextualTypeInfo(TypeLoc typeLoc, ContextualTypePurpose purpose)
-      : typeLoc(typeLoc), purpose(purpose) {}
-
-  Type getType() const { return typeLoc.getType(); }
-};
 
 /// Describes the kind of constraint placed on one or more types.
 enum class ConstraintKind : char {
@@ -234,6 +218,9 @@ enum class ConstraintKind : char {
   ExplicitGenericArguments,
   /// Both (first and second) pack types should have the same reduced shape.
   SameShape,
+  /// The first type is a tuple containing a single unlabeled element that is a
+  /// pack expansion. The second type is that pack expansion.
+  MaterializePackExpansion,
 };
 
 /// Classification of the different kinds of constraints.
@@ -703,6 +690,7 @@ public:
     case ConstraintKind::UnresolvedMemberChainBase:
     case ConstraintKind::PackElementOf:
     case ConstraintKind::SameShape:
+    case ConstraintKind::MaterializePackExpansion:
       return ConstraintClassification::Relational;
 
     case ConstraintKind::ValueMember:

@@ -108,6 +108,7 @@ static FuncDecl *deriveDistributedActor_resolve(DerivedConformance &derived) {
                                name, SourceLoc(),
                                /*async=*/false,
                                /*throws=*/true,
+                               /*ThrownType=*/Type(),
                                /*genericParams=*/nullptr,
                                params,
                                /*returnType*/decl->getDeclaredInterfaceType(),
@@ -257,7 +258,9 @@ static FuncDecl* createLocalFunc_doInvokeOnReturn(
       DeclName(C, doInvokeLocalFuncIdent, doInvokeParamsList),
       sloc,
       /*async=*/true,
-      /*throws=*/true, doInvokeGenericParamList, doInvokeParamsList,
+      /*throws=*/true, 
+      /*ThrownType=*/Type(),
+      doInvokeGenericParamList, doInvokeParamsList,
       /*returnType=*/C.TheEmptyTupleType, parentFunc);
   doInvokeOnReturnFunc->setImplicit();
   doInvokeOnReturnFunc->setSynthesized();
@@ -419,6 +422,7 @@ static FuncDecl *deriveDistributedActorSystem_invokeHandlerOnReturn(
       FuncDecl::createImplicit(C, StaticSpellingKind::None, name, SourceLoc(),
                                /*async=*/true,
                                /*throws=*/true,
+                               /*ThrownType=*/Type(),
                                /*genericParams=*/nullptr, params,
                                /*returnType*/ TupleType::getEmpty(C), system);
   funcDecl->setSynthesized(true);
@@ -649,7 +653,7 @@ deriveBodyDistributedActor_unownedExecutor(AbstractFunctionDecl *getter, void *)
   };
 
   // Build a reference to self.
-  Type selfType = getter->getImplicitSelfDecl()->getType();
+  Type selfType = getter->getImplicitSelfDecl()->getTypeInContext();
   Expr *selfArg = DerivedConformance::createSelfDeclRef(getter);
   selfArg->setType(selfType);
 
@@ -694,7 +698,7 @@ deriveBodyDistributedActor_unownedExecutor(AbstractFunctionDecl *getter, void *)
         [&](SubstitutableType *dependentType) {
           if (auto gp = dyn_cast<GenericTypeParamType>(dependentType)) {
             if (gp->getDepth() == 0 && gp->getIndex() == 0) {
-              return getter->getImplicitSelfDecl()->getType();
+              return getter->getImplicitSelfDecl()->getTypeInContext();
             }
           }
 

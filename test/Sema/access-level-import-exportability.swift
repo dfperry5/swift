@@ -1,5 +1,5 @@
 // RUN: %empty-directory(%t)
-// RUN: split-file %s %t
+// RUN: split-file --leading-lines %s %t
 
 /// Build the libraries.
 // RUN: %target-swift-frontend -emit-module %t/PublicLib.swift -o %t \
@@ -15,21 +15,17 @@
 
 /// Check diagnostics.
 // RUN: %target-swift-frontend -typecheck %t/MinimalClient.swift -I %t \
-// RUN:   -package-name TestPackage -swift-version 5 \
-// RUN:   -enable-experimental-feature AccessLevelOnImport -verify
+// RUN:   -package-name TestPackage -swift-version 5 -verify
 // RUN: %target-swift-frontend -typecheck %t/CompletenessClient.swift -I %t \
-// RUN:   -package-name TestPackage -swift-version 5 \
-// RUN:   -enable-experimental-feature AccessLevelOnImport -verify
+// RUN:   -package-name TestPackage -swift-version 5 -verify
 
 /// Check diagnostics with library-evolution.
 // RUN: %target-swift-frontend -typecheck %t/MinimalClient.swift -I %t \
 // RUN:   -package-name TestPackage -swift-version 5 \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport -verify
+// RUN:   -enable-library-evolution -verify
 // RUN: %target-swift-frontend -typecheck %t/CompletenessClient.swift -I %t \
 // RUN:   -package-name TestPackage -swift-version 5 \
-// RUN:   -enable-library-evolution \
-// RUN:   -enable-experimental-feature AccessLevelOnImport -verify
+// RUN:   -enable-library-evolution -verify
 
 //--- PublicLib.swift
 public protocol PublicImportProto {
@@ -119,17 +115,17 @@ public struct PrivateLibWrapper<T> {
 
 /// Short test mostly to count the notes.
 //--- MinimalClient.swift
-public import PublicLib
-package import PackageLib
-internal import InternalLib // expected-note@:1 {{type 'InternalImportType' imported as 'internal' from 'InternalLib' here}}
-fileprivate import FileprivateLib // expected-note@:1 {{type 'FileprivateImportClass' imported as 'fileprivate' from 'FileprivateLib' here}}
+public import PublicLib // expected-warning {{public import of 'PublicLib' was not used in public declarations or inlinable code}}
+package import PackageLib // expected-warning {{package import of 'PackageLib' was not used in package declarations}}
+internal import InternalLib // expected-note {{struct 'InternalImportType' imported as 'internal' from 'InternalLib' here}}
+fileprivate import FileprivateLib // expected-note {{class 'FileprivateImportClass' imported as 'fileprivate' from 'FileprivateLib' here}}
 private import PrivateLib
 
 public func PublicFuncUsesInternal(_: InternalImportType) { // expected-error {{function cannot be declared public because its parameter uses an internal type}}
     var _: InternalImportType
 }
 
-public class PublicSubclassFilepriovate : FileprivateImportClass {} // expected-error {{class cannot be declared public because its superclass is fileprivate}}
+public class PublicSubclassFileprivate : FileprivateImportClass {} // expected-error {{class cannot be declared public because its superclass is fileprivate}}
 
 /// More complete test.
 //--- CompletenessClient.swift
@@ -207,7 +203,7 @@ fileprivate func FileprivateFuncUsesInternal(_: InternalImportType) {
 fileprivate func FileprivateFuncUsesFileprivate(_: FileprivateImportType) {
     var _: FileprivateImportType
 }
-fileprivate func FileprivateFuncUsesPrivate(_: PrivateImportType) { // expected-error {{function cannot be declared fileprivate because its parameter uses a private type}}
+fileprivate func FileprivateFuncUsesPrivate(_: PrivateImportType) {
     var _: PrivateImportType
 }
 
@@ -291,7 +287,7 @@ fileprivate func FileprivateFuncReturnUsesInternal() -> InternalImportType {
 fileprivate func FileprivateFuncReturnUsesFileprivate() -> FileprivateImportType {
     fatalError()
 }
-fileprivate func FileprivateFuncReturnUsesPrivate() -> PrivateImportType { // expected-error {{function cannot be declared fileprivate because its result uses a private type}}
+fileprivate func FileprivateFuncReturnUsesPrivate() -> PrivateImportType {
     fatalError()
 }
 
@@ -319,7 +315,8 @@ public struct PublicSubscriptUsesPublic {
     }
 }
 public struct PublicSubscriptUsesPackage {
-    public subscript(index: PackageImportType) -> PackageImportType { // expected-error {{subscript cannot be declared public because its index uses a package type}}
+    public subscript(index: PackageImportType) -> PackageImportType { // expected-error {{subscript cannot be declared public because its element type uses a package type}}
+    // This error should be on the `index` like the other ones.
         fatalError()
     }
 }
@@ -415,7 +412,7 @@ fileprivate struct FileprivateSubscriptUsesFileprivate {
     }
 }
 fileprivate struct FileprivateSubscriptUsesPrivate {
-    fileprivate subscript(index: PrivateImportType) -> PrivateImportType { // expected-error {{subscript cannot be declared fileprivate because its index uses a private type}}
+    fileprivate subscript(index: PrivateImportType) -> PrivateImportType {
         fatalError()
     }
 }
@@ -462,7 +459,7 @@ public protocol PublicProtoRefinesPrivate: PrivateImportProto {} // expected-err
 public class PublicSubclassPublic : PublicImportClass {}
 public class PublicSubclassPackage : PackageImportClass {} // expected-error {{class cannot be declared public because its superclass is package}}
 public class PublicSubclassInternal : InternalImportClass {} // expected-error {{class cannot be declared public because its superclass is internal}}
-public class PublicSubclassFilepriovate : FileprivateImportClass {} // expected-error {{class cannot be declared public because its superclass is fileprivate}}
+public class PublicSubclassFileprivate : FileprivateImportClass {} // expected-error {{class cannot be declared public because its superclass is fileprivate}}
 public class PublicSubclassPrivate : PrivateImportClass {} // expected-error {{class cannot be declared public because its superclass is private}}
 
 
@@ -481,7 +478,7 @@ package protocol PackageProtoRefinesPrivate: PrivateImportProto {} // expected-e
 package class PackageSubclassPublic : PublicImportClass {}
 package class PackageSubclassPackage : PackageImportClass {}
 package class PackageSubclassInternal : InternalImportClass {} // expected-error {{class cannot be declared package because its superclass is internal}}
-package class PackageSubclassFilepriovate : FileprivateImportClass {} // expected-error {{class cannot be declared package because its superclass is fileprivate}}
+package class PackageSubclassFileprivate : FileprivateImportClass {} // expected-error {{class cannot be declared package because its superclass is fileprivate}}
 package class PackageSubclassPrivate : PrivateImportClass {} // expected-error {{class cannot be declared package because its superclass is private}}
 
 
@@ -500,7 +497,7 @@ internal protocol InternalProtoRefinesPrivate: PrivateImportProto {} // expected
 internal class InternalSubclassPublic : PublicImportClass {}
 internal class InternalSubclassPackage : PackageImportClass {}
 internal class InternalSubclassInternal : InternalImportClass {}
-internal class InternalSubclassFilepriovate : FileprivateImportClass {} // expected-error {{class cannot be declared internal because its superclass is fileprivate}}
+internal class InternalSubclassFileprivate : FileprivateImportClass {} // expected-error {{class cannot be declared internal because its superclass is fileprivate}}
 internal class InternalSubclassPrivate : PrivateImportClass {} // expected-error {{class cannot be declared internal because its superclass is private}}
 
 
@@ -508,19 +505,19 @@ fileprivate protocol FileprivateProtoUsesPublic: PublicImportProto where T == Pu
 fileprivate protocol FileprivateProtoWherePackage: PublicImportProto where T == PackageImportType {}
 fileprivate protocol FileprivateProtoWhereInternal: PublicImportProto where T == InternalImportType {}
 fileprivate protocol FileprivateProtoWhereFileprivate: PublicImportProto where T == FileprivateImportType {}
-fileprivate protocol FileprivateProtoWherePrivate: PublicImportProto where T == PrivateImportType {} // expected-error {{fileprivate protocol's 'where' clause cannot use a private struct}}
+fileprivate protocol FileprivateProtoWherePrivate: PublicImportProto where T == PrivateImportType {}
 
 fileprivate protocol FileprivateProtoRefinesPublic: PublicImportProto {}
 fileprivate protocol FileprivateProtoRefinesPackage: PackageImportProto {}
 fileprivate protocol FileprivateProtoRefinesInternal: InternalImportProto {}
 fileprivate protocol FileprivateProtoRefinesFileprivate: FileprivateImportProto {}
-fileprivate protocol FileprivateProtoRefinesPrivate: PrivateImportProto {} // expected-error {{fileprivate protocol cannot refine a private protocol}}
+fileprivate protocol FileprivateProtoRefinesPrivate: PrivateImportProto {}
 
 fileprivate class FileprivateSubclassPublic : PublicImportClass {}
 fileprivate class FileprivateSubclassPackage : PackageImportClass {}
 fileprivate class FileprivateSubclassInternal : InternalImportClass {}
-fileprivate class FileprivateSubclassFilepriovate : FileprivateImportClass {}
-fileprivate class FileprivateSubclassPrivate : PrivateImportClass {} // expected-error {{class cannot be declared fileprivate because its superclass is private}}
+fileprivate class FileprivateSubclassFileprivate : FileprivateImportClass {}
+fileprivate class FileprivateSubclassPrivate : PrivateImportClass {}
 
 
 private protocol PrivateProtoUsesPublic: PublicImportProto where T == PublicImportType {}
@@ -538,7 +535,7 @@ private protocol PrivateProtoRefinesPrivate: PrivateImportProto {}
 private class PrivateSubclassPublic : PublicImportClass {}
 private class PrivateSubclassPackage : PackageImportClass {}
 private class PrivateSubclassInternal : InternalImportClass {}
-private class PrivateSubclassFilepriovate : FileprivateImportClass {}
+private class PrivateSubclassFileprivate : FileprivateImportClass {}
 private class PrivateSubclassPrivate : PrivateImportClass {}
 
 public struct PublicTypeAliasUses {
@@ -570,7 +567,7 @@ fileprivate struct FileprivateTypeAliasUses {
     fileprivate typealias TAPackage = PackageImportProto
     fileprivate typealias TAInternal = InternalImportProto
     fileprivate typealias TAFileprivate = FileprivateImportProto
-    fileprivate typealias TAPrivate = PrivateImportProto // expected-error {{type alias cannot be declared fileprivate because its underlying type uses a private type}}
+    fileprivate typealias TAPrivate = PrivateImportProto
 }
 
 private struct PrivateTypeAliasUses {
@@ -629,13 +626,13 @@ fileprivate protocol FileprivateProtocol {
     associatedtype ATDefaultInternal = InternalImportProto
     associatedtype ATDefaultFileprivate = FileprivateImportProto
     // Accocciated type have a minimum formal access level at internal.
-    associatedtype ATDefaultPrivate = PrivateImportProto // expected-error {{associated type in an internal protocol uses a private type in its default definition}}
+    associatedtype ATDefaultPrivate = PrivateImportProto
 
     associatedtype ATRequirePublic: PublicImportProto
     associatedtype ATRequirePackage: PackageImportProto
     associatedtype ATRequireInternal: InternalImportProto
     associatedtype ATRequireFileprivate: FileprivateImportProto
-    associatedtype ATRequirePrivate: PrivateImportProto // expected-error {{associated type in an internal protocol uses a private type in its requirement}}
+    associatedtype ATRequirePrivate: PrivateImportProto
 }
 
 private protocol PrivateProtocol {
@@ -732,7 +729,7 @@ fileprivate struct FileprivateVars {
     fileprivate var b: PackageImportType
     fileprivate var c: InternalImportType
     fileprivate var d: FileprivateImportType
-    fileprivate var e: PrivateImportType // expected-error {{property cannot be declared fileprivate because its type uses a private type}}
+    fileprivate var e: PrivateImportType
 
     @PublicLibWrapper
     fileprivate var f: PublicImportType
@@ -743,13 +740,13 @@ fileprivate struct FileprivateVars {
     @FileprivateLibWrapper
     fileprivate var i: PublicImportType
     @PrivateLibWrapper
-    fileprivate var j: PublicImportType // expected-error {{property cannot be declared fileprivate because its property wrapper type uses a private type}}
+    fileprivate var j: PublicImportType
 
     fileprivate var k = PublicImportType()
     fileprivate var l = PackageImportType()
     fileprivate var m = InternalImportType()
     fileprivate var n = FileprivateImportType()
-    fileprivate var o = PrivateImportType() // expected-error {{property cannot be declared fileprivate because its type 'PrivateImportType' uses a private type}}
+    fileprivate var o = PrivateImportType()
 }
 
 private struct PrivateVars {
@@ -799,7 +796,7 @@ fileprivate struct FileprivateGenericUsesPublic<A: PublicImportProto> {}
 fileprivate struct FileprivateGenericUsesPackage<A: PackageImportProto> {}
 fileprivate struct FileprivateGenericUsesInternal<A: InternalImportProto> {}
 fileprivate struct FileprivateGenericUsesFileprivate<A: FileprivateImportProto> {}
-fileprivate struct FileprivateGenericUsesPrivate<A: PrivateImportProto> {} // expected-error {{generic struct cannot be declared fileprivate because its generic parameter uses a private type}}
+fileprivate struct FileprivateGenericUsesPrivate<A: PrivateImportProto> {}
 
 private struct PrivateGenericUsesPublic<A: PublicImportProto> {}
 private struct PrivateGenericUsesPackage<A: PackageImportProto> {}

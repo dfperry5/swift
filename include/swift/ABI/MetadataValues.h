@@ -1391,6 +1391,12 @@ namespace SpecialPointerAuthDiscriminators {
   /// Protocol conformance descriptors.
   const uint16_t ProtocolConformanceDescriptor = 0xc6eb;
 
+  const uint16_t ProtocolDescriptor = 0xe909; // = 59657
+
+  // Type descriptors as arguments.
+  const uint16_t OpaqueTypeDescriptor = 0xbdd1; // = 48593
+  const uint16_t ContextDescriptor = 0xb5e3; // = 46563
+
   /// Pointer to value witness table stored in type metadata.
   ///
   /// Computed with ptrauth_string_discriminator("value_witness_table_t").
@@ -2472,6 +2478,8 @@ enum class TaskOptionRecordKind : uint8_t {
   AsyncLet  = 2,
   /// Request a child task for an 'async let'.
   AsyncLetWithBuffer = 3,
+  /// Information about the result type of the task, used in embedded Swift.
+  ResultTypeInfo = 4,
   /// Request a child task for swift_task_run_inline.
   RunInline = UINT8_MAX,
 };

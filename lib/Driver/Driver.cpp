@@ -84,7 +84,7 @@ void Driver::parseDriverKind(ArrayRef<const char *> Args) {
   // The default driver kind is determined by Name.
   StringRef DriverName = Name;
 
-  std::string OptName;
+  StringRef OptName;
   // However, the driver kind may be overridden if the first argument is
   // --driver-mode.
   if (!Args.empty()) {
@@ -126,7 +126,7 @@ ArrayRef<const char *> Driver::getArgsWithoutProgramNameAndDriverMode(
   if (Args.empty())
     return Args;
 
-  const std::string OptName =
+  StringRef OptName =
     getOpts().getOption(options::OPT_driver_mode).getPrefixedName();
   if (StringRef(Args[0]).startswith(OptName))
     Args = Args.slice(1);
@@ -1607,6 +1607,7 @@ void Driver::buildOutputInfo(const ToolChain &TC, const DerivedArgList &Args,
 
     case options::OPT_parse:
     case options::OPT_resolve_imports:
+    case options::OPT_experimental_lazy_typecheck:
     case options::OPT_typecheck:
     case options::OPT_dump_parse:
     case options::OPT_print_ast:
@@ -2089,6 +2090,7 @@ void Driver::buildActions(SmallVectorImpl<const Action *> &TopLevelActions,
       case file_types::TY_JSONDependencies:
       case file_types::TY_JSONFeatures:
       case file_types::TY_SwiftABIDescriptor:
+      case file_types::TY_SwiftAPIDescriptor:
       case file_types::TY_ConstValues:
       case file_types::TY_SwiftFixIt:
       case file_types::TY_ModuleSemanticInfo:

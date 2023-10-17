@@ -50,10 +50,10 @@ enable_language(CXX)
 set(SWIFT_ASM_DIALECT ASM)
 set(SWIFT_ASM_EXT S)
 set(SWIFT_ASM_AVAILABLE YES)
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64")
     if(CMAKE_VERSION VERSION_LESS "3.26")
-      message(warning "We can't build assembly language for ARM64 until CMake 3.26")
+      message(WARNING "We can't build assembly language for ARM64 until CMake 3.26")
       set(SWIFT_ASM_AVAILABLE NO)
     else()
       set(SWIFT_ASM_DIALECT ASM_MARMASM)
@@ -94,6 +94,7 @@ include(CMakeDependentOption)
 include(CheckLanguage)
 include(GNUInstallDirs)
 include(SwiftImplicitImport)
+include(FetchContent)
 
 # Enable Swift for the host compiler build if we have the language. It is
 # optional until we have a bootstrap story.
@@ -158,7 +159,7 @@ else()
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     set(SWIFT_HOST_VARIANT_ARCH_default "x86_64")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|arm64")
-    if(SWIFT_HOST_VARIANT_SDK_default STREQUAL OSX)
+    if(SWIFT_HOST_VARIANT_SDK_default STREQUAL "OSX")
       set(SWIFT_HOST_VARIANT_ARCH_default "arm64")
     else()
       set(SWIFT_HOST_VARIANT_ARCH_default "aarch64")
@@ -345,6 +346,13 @@ How to build the swift compiler modules. Possible values are
                                    compiler, provided in `SWIFT_NATIVE_SWIFT_TOOLS_PATH`
 ]=] OFF)
 
+option(BRIDGING_MODE [=[
+How swift-C++ bridging code is compiled:
+    INLINE:       uses full swift C++ interop and briding functions are inlined
+    PURE:         uses limited C++ interp an bridging functions are not inlined
+    DEFAULT:      based on the build configuration
+]=] DEFAULT)
+
 # The following only works with the Ninja generator in CMake >= 3.0.
 set(SWIFT_PARALLEL_LINK_JOBS "" CACHE STRING
   "Define the maximum number of linker jobs for swift.")
@@ -380,7 +388,7 @@ set(SWIFT_STDLIB_BUILD_TYPE "${CMAKE_BUILD_TYPE}" CACHE STRING
 #   - MultiThreadedDebug (/MTd)
 #   - MultiThreadedDLL (/MD)
 #   - MultiThreadedDebugDLL (/MDd)
-if(CMAKE_BUILD_TYPE STREQUAL Debug)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(SWIFT_STDLIB_MSVC_RUNTIME_LIBRARY_default MultiThreadedDebugDLL)
 else()
   set(SWIFT_STDLIB_MSVC_RUNTIME_LIBRARY_default MultiThreadedDLL)
@@ -388,6 +396,17 @@ endif()
 set(SWIFT_STDLIB_MSVC_RUNTIME_LIBRARY
   ${SWIFT_STDLIB_MSVC_RUNTIME_LIBRARY_default}
   CACHE STRING "MSVC Runtime Library for the standard library")
+
+
+if(BRIDGING_MODE STREQUAL "DEFAULT" OR NOT BRIDGING_MODE)
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
+    # In debug builds, to workaround a problem with LLDB's `po` command (rdar://115770255).
+    # On windows to workaround a build problem.
+    set(BRIDGING_MODE "PURE")
+  else()
+    set(BRIDGING_MODE "INLINE")
+  endif()
+endif()
 
 is_build_type_optimized("${SWIFT_STDLIB_BUILD_TYPE}" swift_optimized)
 if(swift_optimized)
@@ -675,7 +694,7 @@ if(SWIFT_BUILT_STANDALONE)
   project(Swift C CXX ${SWIFT_ASM_DIALECT})
 endif()
 
-if(MSVC OR "${CMAKE_SIMULATE_ID}" STREQUAL MSVC)
+if(MSVC OR "${CMAKE_SIMULATE_ID}" STREQUAL "MSVC")
   include(ClangClCompileRules)
 elseif(UNIX)
   include(UnixCompileRules)
@@ -691,13 +710,12 @@ if(CMAKE_C_COMPILER_ID MATCHES Clang)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Werror=c++98-compat-extra-semi>)
 endif()
 
-# Make sure we know where swift-syntax is because we need it to build the parser.
-if(NOT EXISTS "${SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE}")
-  message(SEND_ERROR "swift-syntax is required to build the Swift compiler. Please run update-checkout or specify SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE")
-endif()
+option(SWIFT_BUILD_SWIFT_SYNTAX
+  "Enable building swift syntax"
+  FALSE)
 
 set(SWIFT_BUILD_HOST_DISPATCH FALSE)
-if(SWIFT_ENABLE_DISPATCH AND NOT CMAKE_SYSTEM_NAME STREQUAL Darwin)
+if(SWIFT_ENABLE_DISPATCH AND NOT CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   # Only build libdispatch for the host if the host tools are being built and
   # specifically if these two libraries that depend on it are built.
   if(SWIFT_INCLUDE_TOOLS AND SWIFT_BUILD_SOURCEKIT)
@@ -829,12 +847,20 @@ elseif(BOOTSTRAPPING_MODE MATCHES "BOOTSTRAPPING.*")
   else()
     set(BOOTSTRAPPING_MODE "HOSTTOOLS")
   endif()
-elseif(BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS" OR SWIFT_SWIFT_PARSER)
+elseif(BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS" OR SWIFT_BUILD_SWIFT_SYNTAX)
   # We are building using a pre-installed host toolchain but not bootstrapping
   # the Swift modules. This happens when building using 'build-tooling-libs'
   # where we haven't built a new Swift compiler. Use the Swift compiler from the
   # pre-installed host toolchain to build the Swift modules.
   set(SWIFT_EXEC_FOR_SWIFT_MODULES "${CMAKE_Swift_COMPILER}")
+endif()
+
+if(SWIFT_BUILD_SWIFT_SYNTAX)
+  # Only "HOSTTOOLS" is supported in Linux when Swift parser integration is enabled.
+  if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD" AND NOT BOOTSTRAPPING_MODE STREQUAL "HOSTTOOLS")
+    message(WARNING "Force setting BOOTSTRAPPING=HOSTTOOLS because Swift parser integration is enabled")
+    set(BOOTSTRAPPING_MODE "HOSTTOOLS")
+  endif()
 endif()
 
 if(BOOTSTRAPPING_MODE MATCHES "HOSTTOOLS|.*-WITH-HOSTLIBS")
@@ -883,11 +909,11 @@ endif()
 # build environment.
 if(LLVM_USE_LINKER)
   set(SWIFT_USE_LINKER_default "${LLVM_USE_LINKER}")
-elseif(${SWIFT_HOST_VARIANT_SDK} STREQUAL ANDROID)
+elseif(SWIFT_HOST_VARIANT_SDK STREQUAL "ANDROID")
   set(SWIFT_USE_LINKER_default "lld")
-elseif(CMAKE_SYSTEM_NAME STREQUAL Windows AND NOT CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
   set(SWIFT_USE_LINKER_default "lld")
-elseif(CMAKE_SYSTEM_NAME STREQUAL Darwin)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   set(SWIFT_USE_LINKER_default "")
 else()
   set(SWIFT_USE_LINKER_default "gold")
@@ -942,19 +968,6 @@ if(XCODE)
   # clang-11, so we might be able to undo this.
   set(SWIFT_SDKS "OSX")
 endif()
-
-# When we have the early SwiftSyntax build, we can include its parser.
-if(SWIFT_PATH_TO_EARLYSWIFTSYNTAX_BUILD_DIR)
-  set(SWIFT_PATH_TO_EARLYSWIFTSYNTAX_TARGETS
-    ${SWIFT_PATH_TO_EARLYSWIFTSYNTAX_BUILD_DIR}/cmake/SwiftSyntaxTargets.cmake)
-  if(NOT EXISTS "${SWIFT_PATH_TO_EARLYSWIFTSYNTAX_TARGETS}")
-    message(STATUS "Skipping Swift Swift parser integration due to missing early SwiftSyntax")
-  else()
-    set(SWIFT_SWIFT_PARSER TRUE)
-    include(${SWIFT_PATH_TO_EARLYSWIFTSYNTAX_TARGETS})
-  endif()
-endif()
-
 
 # FIXME: the parameters we specify in SWIFT_SDKS are lacking architecture specifics,
 # so we need to hard-code it. For example, the SDK for Android is just 'ANDROID',
@@ -1164,13 +1177,17 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin" AND NOT CMAKE_CROSSCOMPILING)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "")
 endif()
 
+swift_get_host_triple(SWIFT_HOST_TRIPLE)
+set(SWIFT_HOST_MODULE_TRIPLE "${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_ARCH_${SWIFT_HOST_VARIANT_ARCH}_MODULE}")
+set(SWIFT_HOST_LIBRARIES_DEST_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/swift/host")
+
 if(SWIFT_INCLUDE_TOOLS)
   message(STATUS "Building host Swift tools for ${SWIFT_HOST_VARIANT_SDK} ${SWIFT_HOST_VARIANT_ARCH}")
   message(STATUS "  Build type:     ${CMAKE_BUILD_TYPE}")
   message(STATUS "  Assertions:     ${LLVM_ENABLE_ASSERTIONS}")
   message(STATUS "  LTO:            ${SWIFT_TOOLS_ENABLE_LTO}")
   message(STATUS "  Bootstrapping:  ${BOOTSTRAPPING_MODE}")
-  message(STATUS "  Swift parser:   ${SWIFT_SWIFT_PARSER}")
+  message(STATUS "  Swift parser:   ${SWIFT_BUILD_SWIFT_SYNTAX}")
   message(STATUS "")
 else()
   message(STATUS "Not building host Swift tools")
@@ -1214,7 +1231,7 @@ endif()
 # Find required dependencies.
 #
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_package(Python3 3.6 COMPONENTS Interpreter REQUIRED)
 
 #
 # Find optional dependencies.
@@ -1289,11 +1306,6 @@ else()
     endif()
   endif()
 
-  if (BUILD_SWIFT_CONCURRENCY_BACK_DEPLOYMENT_LIBRARIES)
-    # Build the back-deployed concurrency library.
-    add_subdirectory(stdlib/public/BackDeployConcurrency)
-  endif()
-
   # Some tools (e.g. swift-reflection-dump) rely on a host swiftRemoteInspection,
   # so ensure we build that when building tools.
   if(SWIFT_INCLUDE_TOOLS OR SWIFT_BUILD_STDLIB_CXX_MODULE)
@@ -1321,6 +1333,38 @@ endif()
 add_subdirectory(include)
 
 if(SWIFT_INCLUDE_TOOLS)
+  # Include 'swift-syntax'.
+  # This is a function because we want to set some 'CMAKE_*' variables temporarily.'
+  # TODO: Replace this with 'block()' after CMake 3.25
+  function(include_swift_syntax)
+    if(NOT SWIFT_BUILD_SWIFT_SYNTAX)
+      return()
+    endif()
+    if(NOT EXISTS "${SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE}")
+      message(SEND_ERROR "swift-syntax is required to build the Swift compiler. Please run update-checkout or specify SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE")
+      return()
+    endif()
+
+    set(CMAKE_Swift_COMPILER_TARGET ${SWIFT_HOST_TRIPLE})
+    set(BUILD_SHARED_LIBS ON)
+    # All libraries in 'swift-syntax' goes to 'lib/swift/host'.
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${SWIFT_HOST_LIBRARIES_DEST_DIR}")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${SWIFT_HOST_LIBRARIES_DEST_DIR}")
+    if(SWIFT_HOST_VARIANT_SDK MATCHES "LINUX|ANDROID|OPENBSD|FREEBSD")
+      set(SWIFT_HOST_LIBRARIES_RPATH "$ORIGIN;$ORIGIN/../${SWIFT_SDK_${SWIFT_HOST_VARIANT_SDK}_LIB_SUBDIR}")
+    endif()
+    # Add unique ABI prefix to swift-syntax libraries so that compiler libraries (e.g. sourcekitdInProc)
+    # can be used from tools that has its own swift-syntax libraries as SwiftPM dependencies.
+    set(SWIFT_MODULE_ABI_NAME_PREFIX "Compiler")
+
+    file(TO_CMAKE_PATH "${SWIFT_PATH_TO_SWIFT_SYNTAX_SOURCE}" swift_syntax_path)
+    FetchContent_Declare(SwiftSyntax
+      SOURCE_DIR "${swift_syntax_path}"
+    )
+    FetchContent_MakeAvailable(SwiftSyntax)
+  endfunction()
+  include_swift_syntax()
+
   add_subdirectory(lib)
 
   # SwiftCompilerSources must come before "tools".

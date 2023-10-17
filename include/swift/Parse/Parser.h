@@ -156,6 +156,12 @@ public:
   /// ASTScopes are not created in inactive clauses and lookups to decls will fail.
   bool InInactiveClauseEnvironment = false;
   bool InSwiftKeyPath = false;
+  bool InFreestandingMacroArgument = false;
+
+  // A cached answer to
+  //     Context.LangOpts.hasFeature(Feature::NoncopyableGenerics)
+  // to ensure there's no parsing performance regression.
+  bool EnabledNoncopyableGenerics;
 
   /// Whether we should delay parsing nominal type, extension, and function
   /// bodies.
@@ -601,6 +607,10 @@ public:
             cast<AccessorDecl>(CurDeclContext)->isCoroutine());
   }
 
+  /// Whether the current token is the contextual keyword for a \c then
+  /// statement.
+  bool isContextualThenKeyword(bool preferExpr);
+
   /// `discard self` is the only valid phrase, but we peek ahead for just any
   /// identifier after `discard` to determine if it's the statement. This helps
   /// us avoid interpreting `discard(self)` as the statement and not a call.
@@ -612,8 +622,7 @@ public:
   /// a nice diagnostic.
   bool isContextualDiscardKeyword() {
     // must be `discard` ...
-    if (!(Tok.isContextualKeyword("_forget") // NOTE: support for deprecated _forget
-        || Tok.isContextualKeyword("discard")))
+    if (!Tok.isContextualKeyword("discard"))
       return false;
 
     // followed by either an identifier, `self`, or `Self`.
@@ -641,7 +650,7 @@ public:
     while (Tok.isNot(K..., tok::eof, tok::r_brace, tok::pound_endif,
                      tok::pound_else, tok::pound_elseif,
                      tok::code_complete) &&
-           !isStartOfStmt() &&
+           !isStartOfStmt(/*preferExpr*/ false) &&
            !isStartOfSwiftDecl(/*allowPoundIfAttributes=*/true)) {
       skipSingle();
     }
@@ -1072,6 +1081,11 @@ public:
       llvm::function_ref<bool(Parser &)> parseSILTargetName,
       llvm::function_ref<bool(Parser &)> parseSILSIPModule);
 
+  /// Parse the @storageRestrictions(initializes:accesses:) attribute.
+  /// \p Attr is where to store the parsed attribute
+  ParserResult<StorageRestrictionsAttr>
+  parseStorageRestrictionsAttribute(SourceLoc AtLoc, SourceLoc Loc);
+
   /// Parse the @_implements attribute.
   /// \p Attr is where to store the parsed attribute
   ParserResult<ImplementsAttr> parseImplementsAttribute(SourceLoc AtLoc,
@@ -1080,6 +1094,10 @@ public:
   /// Parse the @differentiable attribute.
   ParserResult<DifferentiableAttr> parseDifferentiableAttribute(SourceLoc AtLoc,
                                                                 SourceLoc Loc);
+
+  /// Parse the @_extern attribute.
+  bool parseExternAttribute(DeclAttributes &Attributes, bool &DiscardAttribute,
+                            StringRef AttrName, SourceLoc AtLoc, SourceLoc Loc);
 
   /// Parse the arguments inside the @differentiable attribute.
   bool parseDifferentiableAttributeArguments(
@@ -1265,13 +1283,10 @@ public:
   ParserStatus parseGetEffectSpecifier(ParsedAccessors &accessors,
                                        SourceLoc &asyncLoc,
                                        SourceLoc &throwsLoc,
+                                       TypeRepr *&thrownTy,
                                        bool &hasEffectfulGet,
                                        AccessorKind currentKind,
                                        SourceLoc const& currentLoc);
-
-  ParserStatus parseInitAccessorEffects(ParsedAccessors &accessors,
-                                        AccessorKind currentKind,
-                                        DeclAttributes &Attributes);
 
   /// Parse accessors provided as a separate list, for use in macro
   /// expansions.
@@ -1613,6 +1628,7 @@ public:
                                       bool &reasync,
                                       SourceLoc &throws,
                                       bool &rethrows,
+                                      TypeRepr *&thrownType,
                                       TypeRepr *&retType);
 
   /// Parse 'async' and 'throws', if present, putting the locations of the
@@ -1629,10 +1645,14 @@ public:
   /// lieu of 'throws'.
   ParserStatus parseEffectsSpecifiers(SourceLoc existingArrowLoc,
                                       SourceLoc &asyncLoc, bool *reasync,
-                                      SourceLoc &throwsLoc, bool *rethrows);
+                                      SourceLoc &throwsLoc, bool *rethrows,
+                                      TypeRepr *&thrownType);
+
+  /// Returns 'true' if \p T is consider a throwing effect specifier.
+  static bool isThrowsEffectSpecifier(const Token &T);
 
   /// Returns 'true' if \p T is considered effects specifier.
-  bool isEffectsSpecifier(const Token &T);
+  static bool isEffectsSpecifier(const Token &T);
 
   //===--------------------------------------------------------------------===//
   // Pattern Parsing
@@ -1860,6 +1880,7 @@ public:
           ParameterList *&params,
           SourceLoc &asyncLoc,
           SourceLoc &throwsLoc,
+          TypeExpr *&thrownType,
           SourceLoc &arrowLoc,
           TypeExpr *&explicitResultType,
           SourceLoc &inLoc);
@@ -1918,7 +1939,13 @@ public:
   //===--------------------------------------------------------------------===//
   // Statement Parsing
 
-  bool isStartOfStmt();
+  /// Whether we are at the start of a statement.
+  ///
+  /// \param preferExpr If either an expression or statement could be parsed and
+  /// this parameter is \c true, the function returns \c false such that an
+  /// expression can be parsed.
+  bool isStartOfStmt(bool preferExpr);
+
   bool isTerminatorForBraceItemListKind(BraceItemListKind Kind,
                                         ArrayRef<ASTNode> ParsedDecls);
   ParserResult<Stmt> parseStmt();
@@ -1927,6 +1954,7 @@ public:
   ParserResult<Stmt> parseStmtContinue();
   ParserResult<Stmt> parseStmtReturn(SourceLoc tryLoc);
   ParserResult<Stmt> parseStmtYield(SourceLoc tryLoc);
+  ParserResult<Stmt> parseStmtThen(SourceLoc tryLoc);
   ParserResult<Stmt> parseStmtThrow(SourceLoc tryLoc);
   ParserResult<Stmt> parseStmtDiscard();
   ParserResult<Stmt> parseStmtDefer();
@@ -2046,6 +2074,11 @@ public:
 
   void performIDEInspectionSecondPassImpl(
       IDEInspectionDelayedDeclState &info);
+
+  /// Returns true if the caller should skip calling `parseType` afterwards.
+  bool parseLegacyTildeCopyable(SourceLoc *parseTildeCopyable,
+                                ParserStatus &Status,
+                                SourceLoc &TildeCopyableLoc);
 };
 
 /// Describes a parsed declaration name.

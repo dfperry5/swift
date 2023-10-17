@@ -1,10 +1,8 @@
 // RUN: %empty-directory(%t)
 // RUN: split-file %s %t
 
-// RUN: %target-swift-emit-ir %use_no_opaque_pointers %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop | %FileCheck %s
-// RUN: %target-swift-emit-ir %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop
-// RUN: %target-swift-emit-ir %use_no_opaque_pointers %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop -g | %FileCheck --check-prefix=DEBUG %s
-// RUN: %target-swift-emit-ir %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop -g
+// RUN: %target-swift-emit-ir %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop | %FileCheck %s
+// RUN: %target-swift-emit-ir %t/test.swift -I %t/Inputs -enable-experimental-cxx-interop -g | %FileCheck --check-prefix=DEBUG %s
 
 // UNSUPPORTED: OS=windows-msvc
 
@@ -94,6 +92,11 @@ public:
 class ClassWithDestructor {
   int m = 0;
 public:
+#if __is_target_os(windows)
+  // On windows, force this type to be address-only.
+  inline ClassWithDestructor() noexcept {}
+  inline ClassWithDestructor(const ClassWithDestructor &other) noexcept : m(other.m)  {}
+#endif
   inline ~ClassWithDestructor() {
     (void)freeFunctionNoThrow(0);
   }
@@ -102,6 +105,11 @@ public:
 class ClassWithThrowingDestructor {
   int m = 0;
 public:
+#if __is_target_os(windows)
+  // On windows, force this type to be address-only.
+  inline ClassWithThrowingDestructor() noexcept {}
+  inline ClassWithThrowingDestructor(const ClassWithThrowingDestructor &other) noexcept : m(other.m) {}
+#endif
   inline ~ClassWithThrowingDestructor() noexcept(false) {
     throw 2;
   }
@@ -141,6 +149,8 @@ struct StructWithDefaultConstructor {
 
 
 struct NonTrivial {
+  NonTrivial() noexcept;
+  NonTrivial(const NonTrivial &other) noexcept;
   ~NonTrivial() {}
 };
 
@@ -272,23 +282,25 @@ func testStructWithDefaultDestructor() -> CInt {
   return result
 }
 
-let _ = testFreeFunctionNoThrowOnly()
-let _ = testFreeFunctionCalls()
-let _ = testMethodCalls()
-testTemplateCalls()
-testFuncPtrCall()
-testCFuncPtrCall()
-testProtocolConformanceThunkInvoke()
-let _ = testSubscriptThunkInvoke()
-testClassWithDestructor()
-testClassWithThrowingDestructor()
-let _ = testClassWithCopyConstructor()
-let _ = testClassWithThrowingCopyConstructor()
-let _ = testClassWithThrowingConstructor()
-let _ = testClassWithNoThrowingConstructor()
-let _ = testStructWithDefaultConstructor()
-let _ = testStructWithDefaultCopyConstructor()
-let _ = testStructWithDefaultDestructor()
+public func test() {
+  let _ = testFreeFunctionNoThrowOnly()
+  let _ = testFreeFunctionCalls()
+  let _ = testMethodCalls()
+  testTemplateCalls()
+  testFuncPtrCall()
+  testCFuncPtrCall()
+  testProtocolConformanceThunkInvoke()
+  let _ = testSubscriptThunkInvoke()
+  testClassWithDestructor()
+  testClassWithThrowingDestructor()
+  let _ = testClassWithCopyConstructor()
+  let _ = testClassWithThrowingCopyConstructor()
+  let _ = testClassWithThrowingConstructor()
+  let _ = testClassWithNoThrowingConstructor()
+  let _ = testStructWithDefaultConstructor()
+  let _ = testStructWithDefaultCopyConstructor()
+  let _ = testStructWithDefaultDestructor()
+}
 
 // CHECK: define {{.*}} @"$s4test0A23FreeFunctionNoThrowOnlys5Int32VyF"() #[[#SWIFTMETA:]] {
 // CHECK-NEXT: :
@@ -297,7 +309,7 @@ let _ = testStructWithDefaultDestructor()
 // CHECK-NEXT:  ret i32
 // CHECK-NEXT: }
 
-// CHECK: define {{.*}} @"$s4test0A17FreeFunctionCallss5Int32VyF"() #[[#SWIFTUWMETA:]] personality i32 (...)* @__gxx_personality_v0
+// CHECK: define {{.*}} @"$s4test0A17FreeFunctionCallss5Int32VyF"() #[[#SWIFTUWMETA:]] personality ptr @__gxx_personality_v0
 // CHECK:   invoke i32 @_Z18freeFunctionThrowsi(i32 0)
 // CHECK-NEXT:  to label %[[CONT1:.*]] unwind label %[[UNWIND1:.*]]
 // CHECK-EMPTY:
@@ -311,14 +323,14 @@ let _ = testStructWithDefaultDestructor()
 // CHECK:  ret
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND1]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND2]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-NEXT: }
@@ -335,14 +347,14 @@ let _ = testStructWithDefaultDestructor()
 // CHECK: ret
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND3]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND4]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-NEXT: }
@@ -363,14 +375,14 @@ let _ = testStructWithDefaultDestructor()
 // CHECK: ret
 
 // CHECK: define {{.*}} @"$s4test0A11FuncPtrCallyyF"() #[[#SWIFTUWMETA]] personality
-// CHECK: call i32 (i32)* @_Z24getFreeFunctionThrowsPtrv()
+// CHECK: call ptr @_Z24getFreeFunctionThrowsPtrv()
 // CHECK: invoke i32 %{{.*}}(i32 2)
 // CHECK-NEXT: to label %[[CONT20:.*]] unwind label %{{.*}}
 // CHECK: [[CONT20]]:
 // CHECK-NEXT: ret void
 
 // CHECK: define {{.*}} @"$s4test0A12CFuncPtrCallyyF"() #[[#SWIFTUWMETA]] personality
-// CHECK: call void ()* @getCFreeFunctionPointer()
+// CHECK: call ptr @getCFreeFunctionPointer()
 // CHECK: invoke void %{{.*}}()
 // CHECK-NEXT: to label %[[CONT21:.*]] unwind label %{{.*}}
 // CHECK: [[CONT21]]:
@@ -383,8 +395,8 @@ let _ = testStructWithDefaultDestructor()
 // CHECK-NEXT: ret i32
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND30]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-NEXT: }
@@ -407,8 +419,8 @@ let _ = testStructWithDefaultDestructor()
 // CHECK: ret void
 // CHECK-EMPTY:
 // CHECK-NEXT: [[UNWIND40]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 // CHECK-NEXT: }
@@ -422,18 +434,18 @@ let _ = testStructWithDefaultDestructor()
 // CHECK-NEXT:  to label %[[CONT41:.*]] unwind label %[[UNWIND41:.*]]
 
 // CHECK: [[UNWIND41]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 
 // CHECK: define {{.*}} @"$s4test0A28ClassWithThrowingConstructors5Int32VyF"() #[[#SWIFTUWMETA]] personality
-// CHECK: invoke {{.*}} @_ZN28ClassWithThrowingConstructorC{{.*}}(%{{.*}}* %[[#CONSTRUCTORTHIS:]])
+// CHECK: invoke {{.*}} @_ZN28ClassWithThrowingConstructorC{{.*}}(ptr %[[#CONSTRUCTORTHIS:]])
 // CHECK-NEXT:  to label %[[CONT42:.*]] unwind label %[[UNWIND42:.*]]
 
 // CHECK: [[UNWIND42]]:
-// CHECK-NEXT: landingpad { i8*, i32 }
-// CHECK-NEXT:    catch i8* null
+// CHECK-NEXT: landingpad { ptr, i32 }
+// CHECK-NEXT:    catch ptr null
 // CHECK-NEXT: call void @llvm.trap()
 // CHECK-NEXT: unreachable
 
@@ -474,14 +486,14 @@ let _ = testStructWithDefaultDestructor()
 // DEBUG:  ret
 // DEBUG-EMPTY:
 // DEBUG-NEXT: [[UNWIND1]]:
-// DEBUG-NEXT: landingpad { i8*, i32 }
-// DEBUG-NEXT:    catch i8* null, !dbg ![[#DEBUGLOC_FREEFUNCTIONTHROWS1]]
+// DEBUG-NEXT: landingpad { ptr, i32 }
+// DEBUG-NEXT:    catch ptr null, !dbg ![[#DEBUGLOC_FREEFUNCTIONTHROWS1]]
 // DEBUG-NEXT: call void @llvm.trap(), !dbg ![[#DEBUGLOC_TRAP1:]]
 // DEBUG-NEXT: unreachable, !dbg ![[#DEBUGLOC_TRAP1]]
 // DEBUG-EMPTY:
 // DEBUG-NEXT: [[UNWIND2]]:
-// DEBUG-NEXT: landingpad { i8*, i32 }
-// DEBUG-NEXT:    catch i8* null, !dbg ![[#DEBUGLOC_FREEFUNCTIONTHROWS2]]
+// DEBUG-NEXT: landingpad { ptr, i32 }
+// DEBUG-NEXT:    catch ptr null, !dbg ![[#DEBUGLOC_FREEFUNCTIONTHROWS2]]
 // DEBUG-NEXT: call void @llvm.trap(), !dbg ![[#DEBUGLOC_TRAP2:]]
 // DEBUG-NEXT: unreachable, !dbg ![[#DEBUGLOC_TRAP2]]
 // DEBUG-NEXT: }

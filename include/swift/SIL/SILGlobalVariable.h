@@ -42,6 +42,7 @@ class SILGlobalVariable
   static SwiftMetatype registeredMetatype;
     
 public:
+  using iterator = SILBasicBlock::iterator;
   using const_iterator = SILBasicBlock::const_iterator;
 
 private:
@@ -173,6 +174,8 @@ public:
   /// static initializer.
   SILInstruction *getStaticInitializerValue();
 
+  bool mustBeInitializedStatically() const;
+
   /// Returns true if the global is a statically initialized heap object.
   bool isInitializedObject() {
     return dyn_cast_or_null<ObjectInst>(getStaticInitializerValue()) != nullptr;
@@ -180,6 +183,8 @@ public:
 
   const_iterator begin() const { return StaticInitializerBlock.begin(); }
   const_iterator end() const { return StaticInitializerBlock.end(); }
+  iterator begin() { return StaticInitializerBlock.begin(); }
+  iterator end() { return StaticInitializerBlock.end(); }
 
   void dropAllReferences() {
     StaticInitializerBlock.dropAllReferences();

@@ -65,7 +65,7 @@ public struct Builder {
   public func createBuiltinBinaryFunction(name: String,
       operandType: Type, resultType: Type, arguments: [Value]) -> BuiltinInst {
     return arguments.withBridgedValues { valuesRef in
-      return name._withStringRef { nameStr in
+      return name._withBridgedStringRef { nameStr in
         let bi = bridged.createBuiltinBinaryFunction(
           nameStr, operandType.bridged, resultType.bridged, valuesRef)
         return notifyNew(bi.getAs(BuiltinInst.self))
@@ -74,7 +74,7 @@ public struct Builder {
   }
 
   public func createCondFail(condition: Value, message: String) -> CondFailInst {
-    return message._withStringRef { messageStr in
+    return message._withBridgedStringRef { messageStr in
       let cf = bridged.createCondFail(condition.bridged, messageStr)
       return notifyNew(cf.getAs(CondFailInst.self))
     }
@@ -113,15 +113,19 @@ public struct Builder {
     return notifyNew(cast.getAs(UpcastInst.self))
   }
 
-  public func createLoad(fromAddress: Value, ownership: LoadInst.Ownership) -> LoadInst {
+  public func createLoad(fromAddress: Value, ownership: LoadInst.LoadOwnership) -> LoadInst {
     let load = bridged.createLoad(fromAddress.bridged, ownership.rawValue)
     return notifyNew(load.getAs(LoadInst.self))
   }
 
-  @discardableResult
-  public func createSetDeallocating(operand: Value, isAtomic: Bool) -> SetDeallocatingInst {
-    let setDeallocating = bridged.createSetDeallocating(operand.bridged, isAtomic)
-    return notifyNew(setDeallocating.getAs(SetDeallocatingInst.self))
+  public func createBeginDeallocRef(reference: Value, allocation: AllocRefInstBase) -> BeginDeallocRefInst {
+    let beginDealloc = bridged.createBeginDeallocRef(reference.bridged, allocation.bridged)
+    return notifyNew(beginDealloc.getAs(BeginDeallocRefInst.self))
+  }
+
+  public func createEndInitLetRef(operand: Value) -> EndInitLetRefInst {
+    let endInit = bridged.createEndInitLetRef(operand.bridged)
+    return notifyNew(endInit.getAs(EndInitLetRefInst.self))
   }
 
   @discardableResult
@@ -157,6 +161,15 @@ public struct Builder {
     return notifyNew(bridged.createCopyValue(operand.bridged).getAs(CopyValueInst.self))
   }
 
+  public func createBeginBorrow(of value: Value) -> BeginBorrowInst {
+    return notifyNew(bridged.createBeginBorrow(value.bridged).getAs(BeginBorrowInst.self))
+  }
+
+  @discardableResult
+  public func createEndBorrow(of beginBorrow: Value) -> EndBorrowInst {
+    return notifyNew(bridged.createEndBorrow(beginBorrow.bridged).getAs(EndBorrowInst.self))
+  }
+
   @discardableResult
   public func createCopyAddr(from fromAddr: Value, to toAddr: Value,
                              takeSource: Bool = false, initializeDest: Bool = false) -> CopyAddrInst {
@@ -167,6 +180,11 @@ public struct Builder {
   @discardableResult
   public func createDestroyValue(operand: Value) -> DestroyValueInst {
     return notifyNew(bridged.createDestroyValue(operand.bridged).getAs(DestroyValueInst.self))
+  }
+
+  @discardableResult
+  public func createDestroyAddr(address: Value) -> DestroyAddrInst {
+    return notifyNew(bridged.createDestroyAddr(address.bridged).getAs(DestroyAddrInst.self))
   }
 
   @discardableResult
@@ -181,7 +199,7 @@ public struct Builder {
     arguments: [Value],
     isNonThrowing: Bool = false,
     isNonAsync: Bool = false,
-    specializationInfo: ApplyInst.SpecializationInfo = nil
+    specializationInfo: ApplyInst.SpecializationInfo = ApplyInst.SpecializationInfo()
   ) -> ApplyInst {
     let apply = arguments.withBridgedValues { valuesRef in
       bridged.createApply(function.bridged, substitutionMap.bridged, valuesRef,
@@ -250,6 +268,18 @@ public struct Builder {
     return notifyNew(structInst.getAs(StructInst.self))
   }
 
+  public func createStructExtract(struct: Value, fieldIndex: Int) -> StructExtractInst {
+    return notifyNew(bridged.createStructExtract(`struct`.bridged, fieldIndex).getAs(StructExtractInst.self))
+  }
+
+  public func createStructElementAddr(structAddress: Value, fieldIndex: Int) -> StructElementAddrInst {
+    return notifyNew(bridged.createStructElementAddr(structAddress.bridged, fieldIndex).getAs(StructElementAddrInst.self))
+  }
+
+  public func createDestructureStruct(struct: Value) -> DestructureStructInst {
+    return notifyNew(bridged.createDestructureStruct(`struct`.bridged).getAs(DestructureStructInst.self))
+  }
+
   public func createTuple(type: Type, elements: [Value]) -> TupleInst {
     let tuple = elements.withBridgedValues { valuesRef in
       return bridged.createTuple(type.bridged, valuesRef)
@@ -257,8 +287,20 @@ public struct Builder {
     return notifyNew(tuple.getAs(TupleInst.self))
   }
 
+  public func createTupleExtract(tuple: Value, elementIndex: Int) -> TupleExtractInst {
+    return notifyNew(bridged.createTupleExtract(tuple.bridged, elementIndex).getAs(TupleExtractInst.self))
+  }
+
+  public func createTupleElementAddr(tupleAddress: Value, elementIndex: Int) -> TupleElementAddrInst {
+    return notifyNew(bridged.createTupleElementAddr(tupleAddress.bridged, elementIndex).getAs(TupleElementAddrInst.self))
+  }
+
+  public func createDestructureTuple(tuple: Value) -> DestructureTupleInst {
+    return notifyNew(bridged.createDestructureTuple(tuple.bridged).getAs(DestructureTupleInst.self))
+  }
+
   @discardableResult
-  public func createStore(source: Value, destination: Value, ownership: StoreInst.Ownership) -> StoreInst {
+  public func createStore(source: Value, destination: Value, ownership: StoreInst.StoreOwnership) -> StoreInst {
     let store = bridged.createStore(source.bridged, destination.bridged, ownership.rawValue)
     return notifyNew(store.getAs(StoreInst.self))
   }
@@ -270,5 +312,15 @@ public struct Builder {
                                                            existentialType.bridged,
                                                            useConformancesOf.bridged)
     return notifyNew(initExistential.getAs(InitExistentialRefInst.self))
+  }
+
+  public func createMetatype(of type: Type, representation: Type.MetatypeRepresentation) -> MetatypeInst {
+    let metatype = bridged.createMetatype(type.bridged, representation)
+    return notifyNew(metatype.getAs(MetatypeInst.self))
+  }
+
+  public func createEndCOWMutation(instance: Value, keepUnique: Bool = false) -> EndCOWMutationInst {
+    let endMutation = bridged.createEndCOWMutation(instance.bridged, keepUnique)
+    return notifyNew(endMutation.getAs(EndCOWMutationInst.self))
   }
 }

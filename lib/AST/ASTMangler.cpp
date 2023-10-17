@@ -653,8 +653,7 @@ std::string ASTMangler::mangleAutoDiffGeneratedDeclaration(
 static Type getTypeForDWARFMangling(Type t) {
   return t.subst(
     [](SubstitutableType *t) -> Type {
-      if (isa<GenericTypeParamType>(t) &&
-          cast<GenericTypeParamType>(t)->isParameterPack()) {
+      if (t->isRootParameterPack()) {
         return PackType::getSingletonPackExpansion(t->getCanonicalType());
       }
       return t->getCanonicalType();
@@ -926,8 +925,6 @@ void ASTMangler::appendSymbolKind(SymbolKind SKind) {
     case SymbolKind::BackDeploymentThunk: return appendOperator("Twb");
     case SymbolKind::BackDeploymentFallback: return appendOperator("TwB");
     case SymbolKind::HasSymbolQuery: return appendOperator("TwS");
-    case SymbolKind::RuntimeDiscoverableAttributeRecord:
-      return appendOperator("Ha");
   }
 }
 
@@ -2041,6 +2038,13 @@ void ASTMangler::appendImplFunctionType(SILFunctionType *fn,
     case SILFunctionTypeRepresentation::WitnessMethod:
       OpArgs.push_back('W');
       break;
+    case SILFunctionTypeRepresentation::KeyPathAccessorGetter:
+    case SILFunctionTypeRepresentation::KeyPathAccessorSetter:
+    case SILFunctionTypeRepresentation::KeyPathAccessorEquals:
+    case SILFunctionTypeRepresentation::KeyPathAccessorHash:
+      // KeyPath accessors are mangled separately based on their index types
+      // by mangleKeyPathGetterThunkHelper, and so on.
+      llvm_unreachable("key path accessors should not mangle its function type");
   }
 
   // Coroutine kind.  This is mangled in all pointer auth modes.
@@ -2442,14 +2446,6 @@ void ASTMangler::appendContext(const DeclContext *ctx, StringRef useModuleName) 
       }
       return;
     }
-
-    case InitializerKind::RuntimeAttribute: {
-      auto attrInit = cast<RuntimeAttributeInitializer>(ctx);
-
-      auto *decl = attrInit->getAttachedToDecl();
-      appendRuntimeAttributeGeneratorEntity(decl, attrInit->getAttr());
-      return;
-    }
     }
     llvm_unreachable("bad initializer kind");
 
@@ -2584,6 +2580,11 @@ void ASTMangler::appendSymbolicReference(SymbolicReferent referent) {
 }
 
 void ASTMangler::appendAnyGenericType(const GenericTypeDecl *decl) {
+  auto *nominal = dyn_cast<NominalTypeDecl>(decl);
+
+  if (nominal && isa<BuiltinTupleDecl>(nominal))
+    return appendOperator("BT");
+
   // Check for certain standard types.
   if (tryAppendStandardSubstitution(decl))
     return;
@@ -2593,8 +2594,6 @@ void ASTMangler::appendAnyGenericType(const GenericTypeDecl *decl) {
     appendOpaqueDeclName(opaque);
     return;
   }
-  
-  auto *nominal = dyn_cast<NominalTypeDecl>(decl);
 
   // For generic types, this uses the unbound type.
   if (nominal) {
@@ -2612,9 +2611,6 @@ void ASTMangler::appendAnyGenericType(const GenericTypeDecl *decl) {
     addTypeSubstitution(nominal->getDeclaredType(), nullptr);
     return;
   }
-
-  if (nominal && isa<BuiltinTupleDecl>(nominal))
-    return appendOperator("BT");
 
   appendContextOf(decl);
 
@@ -3660,7 +3656,7 @@ void ASTMangler::appendDependentProtocolConformance(
 
     // Inherited conformance.
     bool isInheritedConformance =
-      entry.first->isEqual(currentProtocol->getProtocolSelfType());
+      entry.first->isEqual(currentProtocol->getSelfInterfaceType());
     if (isInheritedConformance) {
       appendProtocolName(entry.second);
       // For now, this is never an unknown index and so must be adjusted by 2.
@@ -3846,14 +3842,6 @@ std::string ASTMangler::mangleDistributedThunk(const AbstractFunctionDecl *thunk
   }
 
   return mangleEntity(thunk, SymbolKind::DistributedThunk);
-}
-
-std::string ASTMangler::mangleRuntimeAttributeGeneratorEntity(
-    const ValueDecl *decl, CustomAttr *attr, SymbolKind SKind) {
-  beginMangling();
-  appendRuntimeAttributeGeneratorEntity(decl, attr);
-  appendSymbolKind(SKind);
-  return finalize();
 }
 
 void ASTMangler::appendMacroExpansionContext(
@@ -4210,19 +4198,4 @@ void ASTMangler::appendConstrainedExistential(Type base, GenericSignature sig,
     }
   }
   return appendOperator("XP");
-}
-
-void ASTMangler::appendRuntimeAttributeGeneratorEntity(const ValueDecl *decl,
-                                                       CustomAttr *attr) {
-  auto *attrType = decl->getRuntimeDiscoverableAttrTypeDecl(attr);
-
-  appendContext(attrType, attrType->getAlternateModuleName());
-
-  if (auto dc = dyn_cast<DeclContext>(decl)) {
-    appendContext(dc, decl->getAlternateModuleName());
-  } else {
-    appendEntity(decl);
-  }
-
-  appendOperator("fa");
 }

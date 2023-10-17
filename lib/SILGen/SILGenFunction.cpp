@@ -47,11 +47,12 @@ using namespace Lowering;
 //===----------------------------------------------------------------------===//
 
 SILGenFunction::SILGenFunction(SILGenModule &SGM, SILFunction &F,
-                               DeclContext *DC)
+                               DeclContext *DC, bool IsEmittingTopLevelCode)
     : SGM(SGM), F(F), silConv(SGM.M), FunctionDC(DC),
       StartOfPostmatter(F.end()), B(*this),
       SF(DC ? DC->getParentSourceFile() : nullptr), Cleanups(*this),
-      StatsTracer(SGM.M.getASTContext().Stats, "SILGen-function", &F) {
+      StatsTracer(SGM.M.getASTContext().Stats, "SILGen-function", &F),
+      IsEmittingTopLevelCode(IsEmittingTopLevelCode) {
   assert(DC && "creating SGF without a DeclContext?");
   B.setInsertionPoint(createBasicBlock());
   B.setCurrentDebugScope(F.getDebugScope());
@@ -199,13 +200,6 @@ DeclName SILGenModule::getMagicFunctionName(SILDeclRef ref) {
   case SILDeclRef::Kind::EntryPoint: {
     auto *file = ref.getDecl()->getDeclContext()->getParentSourceFile();
     return getMagicFunctionName(file);
-  }
-  case SILDeclRef::Kind::RuntimeAttributeGenerator: {
-    if (auto *var = dyn_cast<VarDecl>(ref.getDecl()))
-      return var->getName();
-
-    auto *DC = dyn_cast<DeclContext>(ref.getDecl());
-    return getMagicFunctionName(DC ? DC : ref.getDecl()->getDeclContext());
   }
   }
 
@@ -521,8 +515,8 @@ SILGenFunction::emitSiblingMethodRef(SILLocation loc,
   methodTy =
       methodTy.substGenericArgs(SGM.M, subMap, getTypeExpansionContext());
 
-  return std::make_tuple(ManagedValue::forUnmanaged(methodValue),
-                         methodTy);
+  return std::make_tuple(
+      ManagedValue::forObjectRValueWithoutOwnership(methodValue), methodTy);
 }
 
 void SILGenFunction::emitCaptures(SILLocation loc,
@@ -563,7 +557,8 @@ void SILGenFunction::emitCaptures(SILLocation loc,
       SILType dynamicSILType = getLoweredType(dynamicSelfMetatype);
 
       SILValue value = B.createMetatype(loc, dynamicSILType);
-      capturedArgs.push_back(ManagedValue::forUnmanaged(value));
+      capturedArgs.push_back(
+          ManagedValue::forObjectRValueWithoutOwnership(value));
       continue;
     }
 
@@ -655,15 +650,45 @@ void SILGenFunction::emitCaptures(SILLocation loc,
 
     // Get an address value for a SILValue if it is address only in an type
     // expansion context without opaque archetype substitution.
-    auto getAddressValue = [&](SILValue entryValue, bool forceCopy) -> SILValue {
-      if (SGM.M.useLoweredAddresses()
-          && SGM.Types
-                 .getTypeLowering(
-                     valueType,
-                     TypeExpansionContext::noOpaqueTypeArchetypesSubstitution(
-                         expansion.getResilienceExpansion()))
-                 .isAddressOnly()
-          && !entryValue->getType().isAddress()) {
+    auto getAddressValue = [&](SILValue entryValue, bool forceCopy,
+                               bool forLValue) -> SILValue {
+      if (!SGM.M.useLoweredAddresses() && !forLValue && !isPack) {
+        // In opaque values mode, addresses aren't used except by lvalues.
+        auto &lowering = getTypeLowering(entryValue->getType());
+        if (entryValue->getType().isAddress()) {
+          // If the value is currently an address, load it, copying if needed.
+          if (lowering.isTrivial()) {
+            SILValue result = lowering.emitLoad(
+                B, loc, entryValue, LoadOwnershipQualifier::Trivial);
+            return result;
+          }
+          if (forceCopy) {
+            SILValue result =
+                lowering.emitLoadOfCopy(B, loc, entryValue, IsNotTake);
+            enterDestroyCleanup(result);
+            return result;
+          } else {
+            auto load = B.createLoadBorrow(
+                             loc, ManagedValue::forBorrowedRValue(entryValue))
+                            .getValue();
+            return load;
+          }
+        } else {
+          // Otherwise, just return it, copying if needed.
+          if (forceCopy && !lowering.isTrivial()) {
+            auto result = B.emitCopyValueOperation(loc, entryValue);
+            return result;
+          }
+          return entryValue;
+        }
+      } else if (SGM.M.useLoweredAddresses() &&
+                 SGM.Types
+                     .getTypeLowering(
+                         valueType, TypeExpansionContext::
+                                        noOpaqueTypeArchetypesSubstitution(
+                                            expansion.getResilienceExpansion()))
+                     .isAddressOnly() &&
+                 !entryValue->getType().isAddress()) {
 
         assert(!isPack);
 
@@ -689,7 +714,6 @@ void SILGenFunction::emitCaptures(SILLocation loc,
         if (!forceCopy)
           enterDestroyCleanup(addr);
         return addr;
-
       } else if (forceCopy) {
         // We cannot pass a valid SILDebugVariable while creating the temp here
         // See rdar://60425582
@@ -720,7 +744,8 @@ void SILGenFunction::emitCaptures(SILLocation loc,
         // Our 'let' binding can guarantee the lifetime for the callee,
         // if we don't need to do anything more to it.
         if (canGuarantee && !vd->getInterfaceType()->is<ReferenceStorageType>()) {
-          auto guaranteed = ManagedValue::forUnmanaged(val).borrow(*this, loc);
+          auto guaranteed = B.borrowObjectRValue(
+              *this, loc, val, ManagedValue::ScopeKind::Lexical);
           if (eliminateMoveOnlyWrapper)
             guaranteed = B.createGuaranteedMoveOnlyWrapperToCopyableValue(
                 loc, guaranteed);
@@ -739,9 +764,10 @@ void SILGenFunction::emitCaptures(SILLocation loc,
         // If we have a mutable binding for a 'let', such as 'self' in an
         // 'init' method, load it.
         if (val->getType().isMoveOnly()) {
-          val = B.createMarkMustCheckInst(
+          val = B.createMarkUnresolvedNonCopyableValueInst(
               loc, val,
-              MarkMustCheckInst::CheckKind::AssignableButNotConsumable);
+              MarkUnresolvedNonCopyableValueInst::CheckKind::
+                  AssignableButNotConsumable);
         }
         val = emitLoad(loc, val, tl, SGFContext(), IsNotTake).forward(*this);
       }
@@ -759,26 +785,38 @@ void SILGenFunction::emitCaptures(SILLocation loc,
       if (canGuarantee) {
         // No-escaping stored declarations are captured as the
         // address of the value.
-        auto addr = getAddressValue(val, /*forceCopy=*/false);
-        capturedArgs.push_back(ManagedValue::forBorrowedRValue(addr));
-      }
-      else if (!silConv.useLoweredAddresses()) {
+        auto addr =
+            getAddressValue(val, /*forceCopy=*/false, /*forLValue=*/false);
         capturedArgs.push_back(
-          B.createCopyValue(loc, ManagedValue::forUnmanaged(val)));
+            addr->getOwnershipKind() == OwnershipKind::Owned
+                ? ManagedValue::forOwnedRValue(addr, CleanupHandle::invalid())
+                : ManagedValue::forBorrowedRValue(addr));
       } else {
-        auto addr = getAddressValue(val, /*forceCopy=*/true);
+        auto addr =
+            getAddressValue(val, /*forceCopy=*/true, /*forLValue=*/false);
+        if (!useLoweredAddresses()) {
+          auto &lowering = getTypeLowering(addr->getType());
+          auto rvalue =
+              lowering.isTrivial()
+                  ? ManagedValue::forObjectRValueWithoutOwnership(addr)
+                  : ManagedValue::forOwnedRValue(addr,
+                                                 CleanupHandle::invalid());
+          capturedArgs.push_back(rvalue);
+          break;
+        }
         // If our address is move only wrapped, unwrap it.
         if (addr->getType().isMoveOnlyWrapped()) {
           addr = B.createMoveOnlyWrapperToCopyableAddr(loc, addr);
         }
-        capturedArgs.push_back(ManagedValue::forLValue(addr));
+        capturedArgs.push_back(ManagedValue::forOwnedAddressRValue(
+            addr, CleanupHandle::invalid()));
       }
       break;
     }
     case CaptureKind::StorageAddress: {
       assert(!isPack);
 
-      auto addr = getAddressValue(val, /*forceCopy=*/false);
+      auto addr = getAddressValue(val, /*forceCopy=*/false, /*forLValue=*/true);
 
       // No-escaping stored declarations are captured as the
       // address of the value.
@@ -795,26 +833,27 @@ void SILGenFunction::emitCaptures(SILLocation loc,
     case CaptureKind::Box: {
       assert(!isPack);
 
-      auto entryValue = getAddressValue(val, /*forceCopy=*/false);
-      // LValues are captured as both the box owning the value and the
-      // address of the value.
-      assert(entryValue->getType().isAddress() && "no address for captured var!");
+      assert(val->getType().isAddress() &&
+             "no address for captured var!");
       // Boxes of opaque return values stay opaque.
       auto minimalLoweredType = SGM.Types.getLoweredRValueType(
           TypeExpansionContext::minimal(), type->getCanonicalType());
       // If this is a boxed variable, we can use it directly.
       if (Entry.box &&
-          entryValue->getType().getASTType() == minimalLoweredType) {
-        // If our captured value is a box with a moveonlywrapped type inside,
-        // unwrap it.
-        auto box = ManagedValue::forBorrowedObjectRValue(Entry.box);
+          val->getType().getASTType() == minimalLoweredType) {
+        ManagedValue box;
         // We can guarantee our own box to the callee.
         if (canGuarantee) {
-          box = box.borrow(*this, loc);
+          box = B.borrowObjectRValue(*this, loc, Entry.box,
+                                     ManagedValue::ScopeKind::Lexical);
         } else {
-          box = box.copy(*this, loc);
+          box = B.copyOwnedObjectRValue(loc, Entry.box,
+                                        ManagedValue::ScopeKind::Lexical);
         }
+        assert(box);
 
+        // If our captured value is a box with a moveonlywrapped type inside,
+        // unwrap it.
         if (box.getType().isBoxedMoveOnlyWrappedType(&F)) {
           CleanupCloner cloner(*this, box);
           box = cloner.clone(
@@ -824,7 +863,7 @@ void SILGenFunction::emitCaptures(SILLocation loc,
         capturedArgs.push_back(box);
 
         if (captureCanEscape)
-          escapesToMark.push_back(entryValue);
+          escapesToMark.push_back(val);
       } else {
         // Address only 'let' values are passed by box.  This isn't great, in
         // that a variable captured by multiple closures will be boxed for each
@@ -838,12 +877,13 @@ void SILGenFunction::emitCaptures(SILLocation loc,
         // in-place.
         // TODO: Use immutable box for immutable captures.
         auto boxTy = SGM.Types.getContextBoxTypeForCapture(
-            vd, minimalLoweredType, FunctionDC->getGenericEnvironmentOfContext(),
+            vd, minimalLoweredType,
+            FunctionDC->getGenericEnvironmentOfContext(),
             /*mutable*/ true);
 
         AllocBoxInst *allocBox = B.createAllocBox(loc, boxTy);
         ProjectBoxInst *boxAddress = B.createProjectBox(loc, allocBox, 0);
-        B.createCopyAddr(loc, entryValue, boxAddress, IsNotTake,
+        B.createCopyAddr(loc, val, boxAddress, IsNotTake,
                          IsInitialization);
         if (canGuarantee)
           capturedArgs.push_back(
@@ -857,26 +897,23 @@ void SILGenFunction::emitCaptures(SILLocation loc,
     case CaptureKind::ImmutableBox: {
       assert(!isPack);
 
-      auto entryValue = getAddressValue(val, /*forceCopy=*/false);
-      // LValues are captured as both the box owning the value and the
-      // address of the value.
-      assert(entryValue->getType().isAddress() &&
+      assert(val->getType().isAddress() &&
              "no address for captured var!");
       // Boxes of opaque return values stay opaque.
       auto minimalLoweredType = SGM.Types.getLoweredRValueType(
           TypeExpansionContext::minimal(), type->getCanonicalType());
       // If this is a boxed variable, we can use it directly.
       if (Entry.box &&
-          entryValue->getType().getASTType() == minimalLoweredType) {
+          val->getType().getASTType() == minimalLoweredType) {
         // We can guarantee our own box to the callee.
         if (canGuarantee) {
-          capturedArgs.push_back(
-              ManagedValue::forUnmanaged(Entry.box).borrow(*this, loc));
+          capturedArgs.push_back(B.borrowObjectRValue(
+              *this, loc, Entry.box, ManagedValue::ScopeKind::Lexical));
         } else {
-          capturedArgs.push_back(emitManagedRetain(loc, Entry.box));
+          capturedArgs.push_back(emitManagedCopy(loc, Entry.box));
         }
         if (captureCanEscape)
-          escapesToMark.push_back(entryValue);
+          escapesToMark.push_back(val);
       } else {
         // Address only 'let' values are passed by box.  This isn't great, in
         // that a variable captured by multiple closures will be boxed for each
@@ -896,7 +933,7 @@ void SILGenFunction::emitCaptures(SILLocation loc,
 
         AllocBoxInst *allocBox = B.createAllocBox(loc, boxTy);
         ProjectBoxInst *boxAddress = B.createProjectBox(loc, allocBox, 0);
-        B.createCopyAddr(loc, entryValue, boxAddress, IsNotTake,
+        B.createCopyAddr(loc, val, boxAddress, IsNotTake,
                          IsInitialization);
         if (canGuarantee)
           capturedArgs.push_back(
@@ -957,14 +994,13 @@ SILGenFunction::emitClosureValue(SILLocation loc, SILDeclRef constant,
   // If we're in top-level code, we don't need to physically capture script
   // globals, but we still need to mark them as escaping so that DI can flag
   // uninitialized uses.
-  if (this == SGM.TopLevelSGF) {
+  if (isEmittingTopLevelCode()) {
     auto captureInfo = closure.getCaptureInfo();
-    SGM.emitMarkFunctionEscapeForTopLevelCodeGlobals(
-        loc, captureInfo);
+    emitMarkFunctionEscapeForTopLevelCodeGlobals(loc, captureInfo);
   }
-  
+
   if (loweredCaptureInfo.getCaptures().empty() && !wasSpecialized) {
-    auto result = ManagedValue::forUnmanaged(functionRef);
+    auto result = ManagedValue::forObjectRValueWithoutOwnership(functionRef);
     if (!alreadyConverted)
       result = emitOrigToSubstValue(loc, result,
                                     AbstractionPattern(expectedType),
@@ -1015,11 +1051,12 @@ void SILGenFunction::emitFunction(FuncDecl *fd) {
     emitDistributedActorFactory(fd);
   } else {
     prepareEpilog(fd->getResultInterfaceType(),
-                  fd->hasThrows(), CleanupLocation(fd));
+                  fd->getEffectiveThrownErrorType(), CleanupLocation(fd));
 
-    if (shouldLowerToUnavailableCodeStub(fd))
+    if (fd->requiresUnavailableDeclABICompatibilityStubs())
       emitApplyOfUnavailableCodeReached();
 
+    assert(!fd->isBodySkipped());
     emitProfilerIncrement(fd->getTypecheckedBody());
 
     // Emit the actual function body as usual
@@ -1041,7 +1078,8 @@ void SILGenFunction::emitClosure(AbstractClosureExpr *ace) {
   emitProlog(captureInfo, ace->getParameters(), /*selfParam=*/nullptr,
              ace, resultIfaceTy, ace->isBodyThrowing(), ace->getLoc(),
              OrigFnType);
-  prepareEpilog(resultIfaceTy, ace->isBodyThrowing(), CleanupLocation(ace));
+  prepareEpilog(resultIfaceTy, ace->getEffectiveThrownType(),
+                CleanupLocation(ace));
 
   emitProfilerIncrement(ace);
   if (auto *ce = dyn_cast<ClosureExpr>(ace)) {
@@ -1187,7 +1225,7 @@ void SILGenFunction::emitArtificialTopLevel(Decl *mainDecl) {
       unwrappedTy = SILType::getPrimitiveObjectType(canInnerTy);
     }
 
-    auto managedArgv = ManagedValue::forUnmanaged(argv);
+    auto managedArgv = ManagedValue::forObjectRValueWithoutOwnership(argv);
 
     if (unwrappedTy != argv->getType()) {
       auto converted =
@@ -1370,7 +1408,7 @@ void SILGenFunction::emitAsyncMainThreadStart(SILDeclRef entryPoint) {
 
   auto wrapCallArgs = [this, &moduleLoc](SILValue originalValue, FuncDecl *fd,
                             uint32_t paramIndex) -> SILValue {
-    Type parameterType = fd->getParameters()->get(paramIndex)->getType();
+    Type parameterType = fd->getParameters()->get(paramIndex)->getTypeInContext();
     SILType paramSILType = SILType::getPrimitiveObjectType(parameterType->getCanonicalType());
     // If the types are the same, we don't need to do anything!
     if (paramSILType == originalValue->getType())
@@ -1396,10 +1434,11 @@ void SILGenFunction::emitAsyncMainThreadStart(SILDeclRef entryPoint) {
                              taskCreationFlagMask.getOpaqueValue());
 
   SILValue task =
-      emitBuiltinCreateAsyncTask(*this, moduleLoc, subs,
-                                 {ManagedValue::forUnmanaged(taskFlags),
-                                  ManagedValue::forUnmanaged(mainFunctionRef)},
-                                 {})
+      emitBuiltinCreateAsyncTask(
+          *this, moduleLoc, subs,
+          {ManagedValue::forObjectRValueWithoutOwnership(taskFlags),
+           ManagedValue::forObjectRValueWithoutOwnership(mainFunctionRef)},
+          {})
           .forward(*this);
   DestructureTupleInst *structure = B.createDestructureTuple(moduleLoc, task);
   task = structure->getResult(0);
@@ -1444,7 +1483,8 @@ void SILGenFunction::emitAsyncMainThreadStart(SILDeclRef entryPoint) {
             getASTContext(),
             DeclBaseName(getASTContext().getIdentifier("_asyncMainDrainQueue")),
             /*Arguments*/ emptyParams),
-        {}, /*async*/ false, /*throws*/ false, {}, emptyParams,
+        {}, /*async*/ false, /*throws*/ false, /*thrownType*/Type(), {},
+        emptyParams,
         getASTContext().getNeverType(), moduleDecl);
     drainQueueFuncDecl->getAttrs().add(new (getASTContext()) SILGenNameAttr(
         "swift_task_asyncMainDrainQueue", /*raw*/ false, /*implicit*/ true));
@@ -1509,8 +1549,6 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, Expr *value,
     }
 
     params = ParameterList::create(ctx, SourceLoc(), {param}, SourceLoc());
-  } else if (function.kind == SILDeclRef::Kind::RuntimeAttributeGenerator) {
-    params = ParameterList::createEmpty(getASTContext());
   }
 
   auto captureInfo = SGM.M.Types.getLoweredLocalCaptures(function);
@@ -1523,7 +1561,7 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, Expr *value,
     // been recorded for this expression, not the sub-expression.
     emitProfilerIncrement(topLevelValue);
   }
-  prepareEpilog(interfaceType, false, CleanupLocation(Loc));
+  prepareEpilog(interfaceType, llvm::None, CleanupLocation(Loc));
 
   {
     llvm::Optional<SILGenFunction::OpaqueValueRAII> opaqueValue;
@@ -1586,7 +1624,7 @@ void SILGenFunction::emitGeneratorFunction(SILDeclRef function, VarDecl *var) {
   emitBasicProlog(/*paramList*/ nullptr, /*selfParam*/ nullptr,
                   interfaceType, dc, /*throws=*/ false,SourceLoc(),
                   /*ignored parameters*/ 0);
-  prepareEpilog(interfaceType, false, CleanupLocation(loc));
+  prepareEpilog(interfaceType, llvm::None, CleanupLocation(loc));
 
   auto pbd = var->getParentPatternBinding();
   const auto i = pbd->getPatternEntryIndexForVarDecl(var);
@@ -1642,7 +1680,7 @@ void SILGenFunction::emitGeneratorFunction(
              /*selfParam=*/nullptr, dc, resultInterfaceType, /*throws=*/false,
              SourceLoc(), pattern);
 
-  prepareEpilog(resultInterfaceType, /*hasThrows=*/false, CleanupLocation(loc));
+  prepareEpilog(resultInterfaceType, llvm::None, CleanupLocation(loc));
 
   emitStmt(body);
 
@@ -1650,7 +1688,7 @@ void SILGenFunction::emitGeneratorFunction(
   mergeCleanupBlocks();
 }
 
-Initialization *SILGenFunction::getSingleValueStmtInit(Expr *E) {
+std::unique_ptr<Initialization> SILGenFunction::getSingleValueStmtInit(Expr *E) {
   if (SingleValueStmtInitStack.empty())
     return nullptr;
 
@@ -1658,8 +1696,9 @@ Initialization *SILGenFunction::getSingleValueStmtInit(Expr *E) {
   // SingleValueStmtExpr initialization.
   if (!SingleValueStmtInitStack.back().Exprs.contains(E))
     return nullptr;
-
-  return SingleValueStmtInitStack.back().Init;
+  
+  auto resultAddr = SingleValueStmtInitStack.back().InitializationBuffer;
+  return std::make_unique<KnownAddressInitialization>(resultAddr);
 }
 
 void SILGenFunction::emitProfilerIncrement(ASTNode Node) {
@@ -1745,4 +1784,144 @@ ParamDecl *SILGenFunction::isMappedToInitAccessorArgument(VarDecl *property) {
     return nullptr;
 
   return arg->second;
+}
+
+SILValue
+SILGenFunction::emitApplyOfSetterToBase(SILLocation loc, SILDeclRef setter,
+                                        ManagedValue base,
+                                        SubstitutionMap substitutions) {
+  auto setterFRef = [&]() -> SILValue {
+    auto setterInfo = getConstantInfo(getTypeExpansionContext(), setter);
+    if (setter.hasDecl() && setter.getDecl()->shouldUseObjCDispatch()) {
+      // Emit a thunk we might have to bridge arguments.
+      auto foreignSetterThunk = setter.asForeign(false);
+      return emitDynamicMethodRef(
+                 loc, foreignSetterThunk,
+                 SGM.Types
+                     .getConstantInfo(getTypeExpansionContext(),
+                                      foreignSetterThunk)
+                     .SILFnType)
+          .getValue();
+    }
+
+    return emitGlobalFunctionRef(loc, setter, setterInfo);
+  }();
+
+  auto getSetterType = [&](SILValue setterFRef) {
+    CanSILFunctionType setterTy =
+        setterFRef->getType().castTo<SILFunctionType>();
+    return setterTy->substGenericArgs(SGM.M, substitutions,
+                                      getTypeExpansionContext());
+  };
+
+  SILFunctionConventions setterConv(getSetterType(setterFRef), SGM.M);
+
+  // Emit captures for the setter
+  SmallVector<SILValue, 4> capturedArgs;
+  auto captureInfo = SGM.Types.getLoweredLocalCaptures(setter);
+  if (!captureInfo.getCaptures().empty()) {
+    SmallVector<ManagedValue, 4> captures;
+    emitCaptures(loc, setter, CaptureEmission::AssignByWrapper, captures);
+
+    llvm::transform(captures, std::back_inserter(capturedArgs),
+                    [](auto &capture) { return capture.getValue(); });
+  } else {
+    assert(base);
+
+    SILValue capturedBase;
+    unsigned argIdx = setterConv.getNumSILArguments() - 1;
+
+    if (setterConv.getSILArgumentConvention(argIdx).isInoutConvention()) {
+      capturedBase = base.getValue();
+    } else if (base.getType().isAddress() &&
+               base.getType().getObjectType() ==
+                   setterConv.getSILArgumentType(argIdx,
+                                                 getTypeExpansionContext())) {
+      // If the base is a reference and the setter expects a value, emit a
+      // load. This pattern is emitted for property wrappers with a
+      // nonmutating setter, for example.
+      capturedBase = B.createTrivialLoadOr(loc, base.getValue(),
+                                           LoadOwnershipQualifier::Copy);
+      // On-stack partial apply doesn't take ownership of the base, so
+      // we have to destroy it manually.
+      enterDestroyCleanup(capturedBase);
+    } else {
+      capturedBase = base.borrow(*this, loc).getValue();
+    }
+
+    capturedArgs.push_back(capturedBase);
+  }
+
+  PartialApplyInst *setterPAI =
+      B.createPartialApply(loc, setterFRef, substitutions, capturedArgs,
+                           ParameterConvention::Direct_Guaranteed,
+                           PartialApplyInst::OnStackKind::OnStack);
+  return emitManagedRValueWithCleanup(setterPAI).getValue();
+}
+
+void SILGenFunction::emitAssignOrInit(SILLocation loc, ManagedValue selfValue,
+                                      VarDecl *field, ManagedValue newValue,
+                                      SubstitutionMap substitutions) {
+  auto fieldTy = field->getValueInterfaceType();
+  if (!substitutions.empty())
+    fieldTy = fieldTy.subst(substitutions);
+
+  // Emit the init accessor function partially applied to the base.
+  SILValue initFRef = emitGlobalFunctionRef(
+      loc, getAccessorDeclRef(field->getOpaqueAccessor(AccessorKind::Init)));
+
+  auto initTy = initFRef->getType().castTo<SILFunctionType>();
+
+  if (!substitutions.empty()) {
+    // If there are substitutions we need to emit partial apply to
+    // apply substitutions to the init accessor reference type.
+    initTy = initTy->substGenericArgs(SGM.M, substitutions,
+                                      getTypeExpansionContext());
+
+    // Emit partial apply without argument to produce a substituted
+    // init accessor reference.
+    PartialApplyInst *initPAI =
+        B.createPartialApply(loc, initFRef, substitutions, ArrayRef<SILValue>(),
+                             ParameterConvention::Direct_Guaranteed);
+    initFRef = emitManagedRValueWithCleanup(initPAI).getValue();
+  }
+
+  // Check whether value is supposed to be passed indirectly and
+  // materialize if required.
+  {
+    SILFunctionConventions initConv(initTy, SGM.M);
+
+    auto newValueArgIdx = initConv.getSILArgIndexOfFirstParam();
+    // If we need the argument in memory, materialize an address.
+    if (initConv.getSILArgumentConvention(newValueArgIdx)
+            .isIndirectConvention() &&
+        !newValue.getType().isAddress()) {
+      newValue = newValue.materialize(*this, loc);
+    }
+  }
+
+  SILValue setterFRef;
+  if (auto *setter = field->getOpaqueAccessor(AccessorKind::Set)) {
+    setterFRef = emitApplyOfSetterToBase(loc, SILDeclRef(setter), selfValue,
+                                         substitutions);
+  } else {
+    setterFRef = SILUndef::get(initFRef->getType(), F);
+  }
+
+  auto isValueSelf = !selfValue.getType().getASTType()->mayHaveSuperclass();
+  // If we are emitting `assign_or_init` instruction for a value
+  // type, we need to make sure that "self" is always a l-value
+  // reference to "rootself" because `nonmutating set` loads "self"
+  // and referencing `selfValue` in such case is incorrect because
+  // it's a copy which is going to be skipped by DI.
+  auto selfRef = selfValue;
+  if (isValueSelf && !selfRef.isLValue()) {
+    auto *ctor = cast<ConstructorDecl>(FunctionDC->getAsDecl());
+    selfRef = maybeEmitValueOfLocalVarDecl(ctor->getImplicitSelfDecl(),
+                                           AccessKind::ReadWrite);
+  }
+
+  B.createAssignOrInit(loc, field, selfRef.getValue(),
+                       newValue.forward(*this), initFRef, setterFRef,
+                       AssignOrInitInst::Unknown);
 }

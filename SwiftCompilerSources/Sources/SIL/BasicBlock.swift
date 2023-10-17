@@ -14,15 +14,14 @@ import Basic
 import SILBridging
 
 @_semantics("arc.immortal")
-final public class BasicBlock : CustomStringConvertible, HasShortDescription {
+final public class BasicBlock : CustomStringConvertible, HasShortDescription, Equatable {
   public var next: BasicBlock? { bridged.getNext().block }
   public var previous: BasicBlock? { bridged.getPrevious().block }
 
   public var parentFunction: Function { bridged.getFunction().function }
 
   public var description: String {
-    let stdString = bridged.getDebugDescription()
-    return String(_cxxString: stdString)
+    return String(taking: bridged.getDebugDescription())
   }
   public var shortDescription: String { name }
 
@@ -65,11 +64,10 @@ final public class BasicBlock : CustomStringConvertible, HasShortDescription {
  
   public var name: String { "bb\(index)" }
 
+  public static func == (lhs: BasicBlock, rhs: BasicBlock) -> Bool { lhs === rhs }
+
   public var bridged: BridgedBasicBlock { BridgedBasicBlock(SwiftObject(self)) }
 }
-
-public func == (lhs: BasicBlock, rhs: BasicBlock) -> Bool { lhs === rhs }
-public func != (lhs: BasicBlock, rhs: BasicBlock) -> Bool { lhs !== rhs }
 
 /// The list of instructions in a BasicBlock.
 ///
@@ -98,7 +96,7 @@ public struct InstructionList : CollectionLikeSequence, IteratorProtocol {
 
   public func reversed() -> ReverseInstructionList {
     if let inst = currentInstruction {
-      let lastInst = inst.parentBlock.bridged.getLastInst().instruction
+      let lastInst = inst.bridged.getLastInstOfParent().instruction
       return ReverseInstructionList(first: lastInst)
     }
     return ReverseInstructionList(first: nil)

@@ -10,12 +10,10 @@
 #
 # ----------------------------------------------------------------------------
 
-from .backdeployconcurrency import BackDeployConcurrency
 from .benchmarks import Benchmarks
 from .cmark import CMark
 from .curl import LibCurl
 from .earlyswiftdriver import EarlySwiftDriver
-from .earlyswiftsyntax import EarlySwiftSyntax
 from .foundation import Foundation
 from .indexstoredb import IndexStoreDB
 from .libcxx import LibCXX
@@ -44,7 +42,6 @@ from .xctest import XCTest
 from .zlib import Zlib
 
 __all__ = [
-    'BackDeployConcurrency',
     'CMark',
     'Foundation',
     'LibCXX',
@@ -65,7 +62,6 @@ __all__ = [
     'SwiftPM',
     'SwiftDriver',
     'EarlySwiftDriver',
-    'EarlySwiftSyntax',
     'XCTest',
     'SwiftSyntax',
     'SKStressTester',

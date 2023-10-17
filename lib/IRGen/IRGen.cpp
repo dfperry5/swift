@@ -369,8 +369,6 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
     MPM.addPass(InlineTreePrinterPass());
 
   // Add bitcode/ll output passes to pass manager.
-  ModulePassManager EmptyPassManager;
-  auto &PassManagerToRun = Opts.DisableLLVMOptzns ? EmptyPassManager : MPM;
 
   switch (Opts.OutputKind) {
   case IRGenOutputKind::LLVMAssemblyBeforeOptimization:
@@ -380,7 +378,7 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
   case IRGenOutputKind::Module:
     break;
   case IRGenOutputKind::LLVMAssemblyAfterOptimization:
-    PassManagerToRun.addPass(PrintModulePass(*out, "", false));
+    MPM.addPass(PrintModulePass(*out, "", false));
     break;
   case IRGenOutputKind::LLVMBitcode: {
     // Emit a module summary by default for Regular LTO except ld64-based ones
@@ -389,7 +387,7 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
         TargetMachine->getTargetTriple().getVendor() != llvm::Triple::Apple;
 
     if (Opts.LLVMLTOKind == IRGenLLVMLTOKind::Thin) {
-      PassManagerToRun.addPass(ThinLTOBitcodeWriterPass(*out, nullptr));
+      MPM.addPass(ThinLTOBitcodeWriterPass(*out, nullptr));
     } else {
       if (EmitRegularLTOSummary) {
         Module->addModuleFlag(llvm::Module::Error, "ThinLTO", uint32_t(0));
@@ -399,14 +397,14 @@ void swift::performLLVMOptimizations(const IRGenOptions &Opts,
         Module->addModuleFlag(llvm::Module::Error, "EnableSplitLTOUnit",
                               uint32_t(1));
       }
-      PassManagerToRun.addPass(BitcodeWriterPass(
+      MPM.addPass(BitcodeWriterPass(
           *out, /*ShouldPreserveUseListOrder*/ false, EmitRegularLTOSummary));
     }
     break;
   }
   }
 
-  PassManagerToRun.run(*Module, MAM);
+  MPM.run(*Module, MAM);
 
   if (AlignModuleToPageSize) {
     align(Module);
@@ -739,6 +737,21 @@ static void setPointerAuthOptions(PointerAuthOptions &opts,
   opts.ProtocolConformanceDescriptorsAsArguments =
       PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
 
+  opts.ProtocolDescriptorsAsArguments =
+      PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
+
+  opts.OpaqueTypeDescriptorsAsArguments =
+      PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
+
+  opts.ContextDescriptorsAsArguments =
+      PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
+
+  opts.OpaqueTypeDescriptorsAsArguments =
+      PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
+
+  opts.ContextDescriptorsAsArguments =
+      PointerAuthSchema(dataKey, /*address*/ false, Discrimination::Decl);
+
   // Coroutine resumption functions are never stored globally in the ABI,
   // so we can do some things that aren't normally okay to do.  However,
   // we can't use ASIB because that would break ARM64 interoperation.
@@ -1062,7 +1075,7 @@ getSymbolSourcesToEmit(const IRGenDescriptor &desc) {
   auto &ctx = desc.getParentModule()->getASTContext();
   auto tbdDesc = desc.getTBDGenDescriptor();
   tbdDesc.getOptions().PublicSymbolsOnly = false;
-  auto symbolMap =
+  const auto *symbolMap =
       llvm::cantFail(ctx.evaluator(SymbolSourceMapRequest{std::move(tbdDesc)}));
 
   // Then split up the symbols so they can be emitted by the appropriate part
@@ -1070,17 +1083,19 @@ getSymbolSourcesToEmit(const IRGenDescriptor &desc) {
   SILRefsToEmit silRefsToEmit;
   IREntitiesToEmit irEntitiesToEmit;
   for (const auto &symbol : *desc.SymbolsToEmit) {
-    auto source = symbolMap.find(symbol);
-    assert(source && "Couldn't find symbol");
-    switch (source->kind) {
+    auto itr = symbolMap->find(symbol);
+    assert(itr != symbolMap->end() && "Couldn't find symbol");
+    const auto &source = itr->getValue();
+    switch (source.kind) {
     case SymbolSource::Kind::SIL:
-      silRefsToEmit.push_back(source->getSILDeclRef());
+      silRefsToEmit.push_back(source.getSILDeclRef());
       break;
     case SymbolSource::Kind::IR:
-      irEntitiesToEmit.push_back(source->getIRLinkEntity());
+      irEntitiesToEmit.push_back(source.getIRLinkEntity());
       break;
     case SymbolSource::Kind::LinkerDirective:
     case SymbolSource::Kind::Unknown:
+    case SymbolSource::Kind::Global:
       llvm_unreachable("Not supported");
     }
   }
@@ -1106,9 +1121,8 @@ GeneratedModule IRGenRequest::evaluate(Evaluator &evaluator,
   // SIL for the file or module.
   auto SILMod = std::unique_ptr<SILModule>(desc.SILMod);
   if (!SILMod) {
-    auto loweringDesc = ASTLoweringDescriptor{
-        desc.Ctx, desc.Conv, desc.SILOpts, nullptr,
-        symsToEmit.transform([](const auto &x) { return x.silRefsToEmit; })};
+    auto loweringDesc = ASTLoweringDescriptor{desc.Ctx, desc.Conv, desc.SILOpts,
+                                              nullptr, llvm::None};
     SILMod = llvm::cantFail(Ctx.evaluator(LoweredSILRequest{loweringDesc}));
 
     // If there was an error, bail.
@@ -1170,7 +1184,6 @@ GeneratedModule IRGenRequest::evaluate(Evaluator &evaluator,
       IGM.emitAccessibleFunctions();
       IGM.emitBuiltinReflectionMetadata();
       IGM.emitReflectionMetadataVersion();
-      IGM.emitRuntimeDiscoverableAttributes(filesToEmit);
       irgen.emitEagerClassInitialization();
       irgen.emitObjCActorsNeedingSuperclassSwizzle();
       irgen.emitDynamicReplacements();

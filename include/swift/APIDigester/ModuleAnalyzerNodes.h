@@ -438,7 +438,7 @@ class SDKNodeRoot: public SDKNode {
   uint8_t JsonFormatVer;
 public:
   SDKNodeRoot(SDKNodeInitInfo Info);
-  static SDKNode *getInstance(SDKContext &Ctx);
+  static SDKNode *getInstance(SDKContext &Ctx, ArrayRef<ModuleDecl*> modules);
   static bool classof(const SDKNode *N);
   void registerDescendant(SDKNode *D);
   virtual void jsonize(json::Output &Out) override;
@@ -446,6 +446,7 @@ public:
   ArrayRef<SDKNodeDecl*> getDescendantsByUsr(StringRef Usr) {
     return DescendantDeclTable[Usr].getArrayRef();
   }
+  llvm::Optional<StringRef> getSingleModuleName() const;
 };
 
 class SDKNodeType: public SDKNode {
@@ -535,8 +536,8 @@ public:
   ViewerIterator(const ViewerIterator& mit) : Viewer(mit.Viewer), P(mit.P) {}
   ViewerIterator& operator++();
   ViewerIterator operator++(int) {ViewerIterator tmp(*this); operator++(); return tmp;}
-  bool operator==(const ViewerIterator& rhs) {return P==rhs.P;}
-  bool operator!=(const ViewerIterator& rhs) {return P!=rhs.P;}
+  bool operator==(const ViewerIterator& rhs) const {return P==rhs.P;}
+  bool operator!=(const ViewerIterator& rhs) const {return P!=rhs.P;}
   const NodePtr& operator*() {return *P;}
 };
 
@@ -777,8 +778,7 @@ public:
   void visitAllRoots(SDKNodeVisitor &Visitor) {
     SDKNode::preorderVisit(RootNode, Visitor);
   }
-  SwiftDeclCollector(SDKContext &Ctx) : Ctx(Ctx),
-    RootNode(SDKNodeRoot::getInstance(Ctx)) {}
+  SwiftDeclCollector(SDKContext &Ctx, ArrayRef<ModuleDecl*> modules = {});
 
   // Construct all roots vector from a given file where a forest was
   // previously dumped.
@@ -818,8 +818,6 @@ public:
   void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason,
                  DynamicLookupInfo dynamicLookupInfo = {}) override;
   void processDecl(Decl *D);
-public:
-  void lookupVisibleDecls(ArrayRef<ModuleDecl *> Modules);
 };
 
 void detectRename(SDKNode *L, SDKNode *R);

@@ -1,4 +1,4 @@
-// RUN: %target-sil-opt -unit-test-runner %s -o /dev/null 2>&1 | %FileCheck %s
+// RUN: %target-sil-opt -test-runner %s -o /dev/null 2>&1 | %FileCheck %s
 
 class C {}
 sil @getC : $@convention(thin) () -> (@owned C)
@@ -15,13 +15,14 @@ sil @getC : $@convention(thin) () -> (@owned C)
 // CHECK:   def in range [0, 1) value:   [[RB:%.*]] = argument of bb3 : $C
 // CHECK-NEXT: bb2: LiveWithin
 // CHECK-NEXT: bb3: LiveWithin
-// CHECK-NEXT: last user:   br bb3([[B]] : $C)
+// All users are printed here.
+// CHECK:      last user:   br bb3([[B]] : $C)
 // CHECK-NEXT: at 1
 // CHECK-NEXT: last user:   end_borrow [[RB]] : $C
 // CHECK-NEXT: at 1
 sil [ossa] @testReborrow : $@convention(thin) () -> () {
 bb0:
-  test_specification """
+  specify_test """
                      fieldsensitive-multidefuse-liverange
                      @instruction
                      defs: 
@@ -72,7 +73,7 @@ bb4:
 // CHECK-LABEL: end running test 1 of 1 on testMultiDefUseAddressReinit
 sil [ossa] @testMultiDefUseAddressReinit : $@convention(thin) (@owned C) -> () {
 bb0(%0: @owned $C):
-  test_specification """
+  specify_test """
                      fieldsensitive-multidefuse-liverange
                      @instruction
                      defs: 
@@ -120,7 +121,7 @@ bb0:
   br bb3
 
 bb1(%1 : @owned $C, %2 : @owned $C):
-  test_specification """
+  specify_test """
                      fieldsensitive-multidefuse-liverange
                      @instruction
                      defs: 
@@ -161,7 +162,7 @@ bb0:
   %stack = alloc_stack $C
   %c = apply %getC() : $@convention(thin) () -> (@owned C)
   store %c to [init] %stack : $*C
-  test_specification """
+  specify_test """
                      fieldsensitive-multidefuse-liverange
                      @instruction[-3]
                      defs: 

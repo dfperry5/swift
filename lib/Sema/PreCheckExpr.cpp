@@ -20,6 +20,7 @@
 #include "TypoCorrection.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/DiagnosticsParse.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/NameLookup.h"
@@ -483,7 +484,7 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
         if (Lookup.outerResults().empty()) {
           Context.Diags.diagnose(Loc, diag::use_local_before_declaration, Name);
           Context.Diags.diagnose(innerDecl, diag::decl_declared_here,
-                                 localDeclAfterUse->getName());
+                                 localDeclAfterUse);
           Expr *error = new (Context) ErrorExpr(UDRE->getSourceRange());
           return error;
         }
@@ -521,14 +522,14 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
       // FIXME: What if the unviable candidates have different levels of access?
       const ValueDecl *first = inaccessibleResults.front().getValueDecl();
       Context.Diags.diagnose(
-          Loc, diag::candidate_inaccessible, first->getBaseName(),
+          Loc, diag::candidate_inaccessible, first,
           first->getFormalAccessScope().accessLevelForDiagnostics());
 
       // FIXME: If any of the candidates (usually just one) are in the same
       // module we could offer a fix-it.
       for (auto lookupResult : inaccessibleResults) {
         auto *VD = lookupResult.getValueDecl();
-        VD->diagnose(diag::decl_declared_here, VD->getName());
+        VD->diagnose(diag::decl_declared_here, VD);
       }
 
       // Don't try to recover here; we'll get more access-related diagnostics
@@ -650,16 +651,12 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
 
   // FIXME: Need to refactor the way we build an AST node from a lookup result!
 
-  // If we have an unambiguous reference to a type decl, form a TypeExpr.
-  if (Lookup.size() == 1 && UDRE->getRefKind() == DeclRefKind::Ordinary &&
-      isa<TypeDecl>(Lookup[0].getValueDecl())) {
-    auto *D = cast<TypeDecl>(Lookup[0].getValueDecl());
+  auto buildTypeExpr = [&](TypeDecl *D) -> Expr * {
     // FIXME: This is odd.
     if (isa<ModuleDecl>(D)) {
-      return new (Context) DeclRefExpr(D, UDRE->getNameLoc(),
-                                       /*Implicit=*/false,
-                                       AccessSemantics::Ordinary,
-                                       D->getInterfaceType());
+      return new (Context) DeclRefExpr(
+          D, UDRE->getNameLoc(),
+          /*Implicit=*/false, AccessSemantics::Ordinary, D->getInterfaceType());
     }
 
     auto *LookupDC = Lookup[0].getDeclContext();
@@ -668,12 +665,19 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
           UDRE->getNameLoc(), D, LookupDC,
           // It might happen that LookupDC is null if this is checking
           // synthesized code, in that case, don't map the type into context,
-          // but return as is -- the synthesis should ensure the type is correct.
+          // but return as is -- the synthesis should ensure the type is
+          // correct.
           LookupDC ? LookupDC->mapTypeIntoContext(D->getInterfaceType())
                    : D->getInterfaceType());
     } else {
       return TypeExpr::createForDecl(UDRE->getNameLoc(), D, LookupDC);
     }
+  };
+
+  // If we have an unambiguous reference to a type decl, form a TypeExpr.
+  if (Lookup.size() == 1 && UDRE->getRefKind() == DeclRefKind::Ordinary &&
+      isa<TypeDecl>(Lookup[0].getValueDecl())) {
+    return buildTypeExpr(cast<TypeDecl>(Lookup[0].getValueDecl()));
   }
 
   if (AllDeclRefs) {
@@ -708,6 +712,24 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
         unsigned yDepth = yGeneric->getGenericParams().back()->getDepth();
         return xDepth < yDepth;
       });
+    }
+
+    // Filter out macro declarations without `#` if there are valid
+    // non-macro results.
+    if (llvm::any_of(ResultValues,
+                     [](const ValueDecl *D) { return !isa<MacroDecl>(D); })) {
+      ResultValues.erase(
+          llvm::remove_if(ResultValues,
+                          [](const ValueDecl *D) { return isa<MacroDecl>(D); }),
+          ResultValues.end());
+
+      // If there is only one type reference in results, let's handle
+      // this in a special way.
+      if (ResultValues.size() == 1 &&
+          UDRE->getRefKind() == DeclRefKind::Ordinary &&
+          isa<TypeDecl>(ResultValues.front())) {
+        return buildTypeExpr(cast<TypeDecl>(ResultValues.front()));
+      }
     }
 
     return buildRefExpr(ResultValues, DC, UDRE->getNameLoc(),
@@ -796,7 +818,7 @@ Expr *TypeChecker::resolveDeclRefExpr(UnresolvedDeclRefExpr *UDRE,
   Context.Diags.diagnose(Loc, diag::ambiguous_decl_ref, Name);
   for (auto Result : Lookup) {
     auto *Decl = Result.getValueDecl();
-    Context.Diags.diagnose(Decl, diag::decl_declared_here, Decl->getName());
+    Context.Diags.diagnose(Decl, diag::decl_declared_here, Decl);
   }
   return new (Context) ErrorExpr(UDRE->getSourceRange());
 }
@@ -1993,6 +2015,12 @@ TypeExpr *PreCheckExpression::simplifyTypeExpr(Expr *E) {
           TupleTypeRepr::create(Ctx, {ErrRepr}, ArgRange);
     }
 
+    TypeRepr *ThrownTypeRepr = nullptr;
+    if (auto thrownTypeExpr = AE->getThrownTypeExpr()) {
+      ThrownTypeRepr = extractTypeRepr(thrownTypeExpr);
+      assert(ThrownTypeRepr && "Parser ensures that this never fails");
+    }
+
     TypeRepr *ResultTypeRepr = extractTypeRepr(AE->getResultExpr());
     if (!ResultTypeRepr) {
       Ctx.Diags.diagnose(AE->getResultExpr()->getLoc(),
@@ -2003,7 +2031,8 @@ TypeExpr *PreCheckExpression::simplifyTypeExpr(Expr *E) {
 
     auto NewTypeRepr = new (Ctx)
         FunctionTypeRepr(nullptr, ArgsTypeRepr, AE->getAsyncLoc(),
-                         AE->getThrowsLoc(), AE->getArrowLoc(), ResultTypeRepr);
+                         AE->getThrowsLoc(), ThrownTypeRepr, AE->getArrowLoc(),
+                         ResultTypeRepr);
     return new (Ctx) TypeExpr(NewTypeRepr);
   }
   

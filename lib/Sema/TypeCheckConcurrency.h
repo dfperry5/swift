@@ -33,7 +33,6 @@ class ActorIsolation;
 class AnyFunctionType;
 class ASTContext;
 class ClassDecl;
-class ClosureActorIsolation;
 class ClosureExpr;
 class ConcreteDeclRef;
 class CustomAttr;
@@ -57,7 +56,6 @@ void addAsyncNotes(AbstractFunctionDecl const* func);
 /// Check actor isolation rules.
 void checkTopLevelActorIsolation(TopLevelCodeDecl *decl);
 void checkFunctionActorIsolation(AbstractFunctionDecl *decl);
-void checkInitializerActorIsolation(Initializer *init, Expr *expr);
 void checkEnumElementActorIsolation(EnumElementDecl *element, Expr *expr);
 void checkPropertyWrapperActorIsolation(VarDecl *wrappedVar, Expr *expr);
 
@@ -240,22 +238,23 @@ public:
       llvm::Optional<ReferencedActor> actorInstance = llvm::None,
       llvm::Optional<ActorIsolation> knownDeclIsolation = llvm::None,
       llvm::Optional<ActorIsolation> knownContextIsolation = llvm::None,
-      llvm::function_ref<ClosureActorIsolation(AbstractClosureExpr *)>
+      llvm::function_ref<ActorIsolation(AbstractClosureExpr *)>
           getClosureActorIsolation = __AbstractClosureExpr_getActorIsolation);
 
   operator Kind() const { return kind; }
 };
 
-/// Specifies whether checks applied to function types should
-/// apply to their params, results, or both
+/// Individual options used with \c FunctionCheckOptions
 enum class FunctionCheckKind {
-  /// Check params and results
-  ParamsResults,
-  /// Check params only
-  Params,
-  /// Check results only
-  Results,
+  /// Check params
+  Params = 1 << 0,
+  /// Check results
+  Results = 1 << 1,
 };
+
+/// Specifies whether checks applied to function types should apply to
+/// their parameters, their results, both, or neither.
+using FunctionCheckOptions = OptionSet<FunctionCheckKind>;
 
 /// Diagnose the presence of any non-sendable types when referencing a
 /// given declaration from a particular declaration context.
@@ -264,6 +263,9 @@ enum class FunctionCheckKind {
 /// reference is will move values of the declaration's types across a
 /// concurrency domain, whether in/out of an actor or in/or of a concurrent
 /// function or closure.
+///
+/// \param base The base expression of the reference, which must be 'Sendable'
+/// in order to cross actor isolation boundaries.
 ///
 /// \param declRef The declaration being referenced from another concurrency
 /// domain, including the substitutions so that (e.g.) we can consider the
@@ -277,7 +279,7 @@ enum class FunctionCheckKind {
 /// \param refKind Describes what kind of reference is being made, which is
 /// used to tailor the diagnostic.
 ///
-/// \param funcCheckKind Describes whether function types in this reference
+/// \param funcCheckOptions Describes whether function types in this reference
 /// should be checked for sendability of their results, params, or both
 ///
 /// \param diagnoseLoc Provides an alternative source location to `refLoc`
@@ -286,10 +288,14 @@ enum class FunctionCheckKind {
 ///
 /// \returns true if an problem was detected, false otherwise.
 bool diagnoseNonSendableTypesInReference(
-    ConcreteDeclRef declRef, const DeclContext *fromDC, SourceLoc refLoc,
+    Expr *base, ConcreteDeclRef declRef,
+    const DeclContext *fromDC, SourceLoc refLoc,
     SendableCheckReason refKind,
     llvm::Optional<ActorIsolation> knownIsolation = llvm::None,
-    FunctionCheckKind funcCheckKind = FunctionCheckKind::ParamsResults,
+    FunctionCheckOptions funcCheckOptions =
+        (FunctionCheckOptions() |
+         FunctionCheckKind::Params |
+         FunctionCheckKind::Results),
     SourceLoc diagnoseLoc = SourceLoc());
 
 /// Produce a diagnostic for a missing conformance to Sendable.
@@ -535,6 +541,11 @@ bool isAccessibleAcrossActors(
 bool isPotentiallyIsolatedActor(
     VarDecl *var, llvm::function_ref<bool(ParamDecl *)> isIsolated =
                       [](ParamDecl *P) { return P->isIsolated(); });
+
+/// Check whether the given ApplyExpr makes an unsatisfied isolation jump
+/// and if so, emit diagnostics for any nonsendable arguments to the apply
+bool diagnoseApplyArgSendability(
+    swift::ApplyExpr *apply, const DeclContext *declContext);
 
 } // end namespace swift
 

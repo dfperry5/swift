@@ -37,6 +37,7 @@
 #include "swift/Basic/UUID.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/Optional.h"
@@ -180,10 +181,13 @@ public:
     /// they have a type variable originator.
     SolverAllocated = 0x8000,
 
-    /// This type contains a concrete pack.
-    HasConcretePack = 0x10000,
+    /// Contains a PackType.
+    HasPack = 0x10000,
 
-    Last_Property = HasConcretePack
+    /// Contains a PackArchetypeType.
+    HasPackArchetype = 0x20000,
+
+    Last_Property = HasPackArchetype
   };
   enum { BitWidth = countBitsUsed(Property::Last_Property) };
 
@@ -259,7 +263,9 @@ public:
 
   bool hasParameterPack() const { return Bits & HasParameterPack; }
 
-  bool hasConcretePack() const { return Bits & HasConcretePack; }
+  bool hasPack() const { return Bits & HasPack; }
+
+  bool hasPackArchetype() const { return Bits & HasPackArchetype; }
 
   /// Does a type with these properties structurally contain a
   /// parameterized existential type?
@@ -375,7 +381,7 @@ class alignas(1 << TypeAlignInBits) TypeBase
 
 protected:
   enum { NumAFTExtInfoBits = 11 };
-  enum { NumSILExtInfoBits = 11 };
+  enum { NumSILExtInfoBits = 13 };
 
   // clang-format off
   union { uint64_t OpaqueBits;
@@ -402,13 +408,14 @@ protected:
 
   SWIFT_INLINE_BITFIELD_EMPTY(ParenType, SugarType);
 
-  SWIFT_INLINE_BITFIELD_FULL(AnyFunctionType, TypeBase, NumAFTExtInfoBits+1+1+1+16,
+  SWIFT_INLINE_BITFIELD_FULL(AnyFunctionType, TypeBase, NumAFTExtInfoBits+1+1+1+1+16,
     /// Extra information which affects how the function is called, like
     /// regparm and the calling convention.
     ExtInfoBits : NumAFTExtInfoBits,
     HasExtInfo : 1,
     HasClangTypeInfo : 1,
     HasGlobalActor : 1,
+    HasThrownError : 1,
     : NumPadBits,
     NumParams : 16
   );
@@ -420,12 +427,12 @@ protected:
     NumProtocols : 16
   );
 
-  SWIFT_INLINE_BITFIELD_FULL(TypeVariableType, TypeBase, 7+30,
+  SWIFT_INLINE_BITFIELD_FULL(TypeVariableType, TypeBase, 7+29,
     /// Type variable options.
     Options : 7,
     : NumPadBits,
     /// The unique number assigned to this type variable.
-    ID : 30
+    ID : 29
   );
 
   SWIFT_INLINE_BITFIELD(SILFunctionType, TypeBase, NumSILExtInfoBits+1+4+1+2+1+1,
@@ -629,8 +636,8 @@ public:
 
   bool isPlaceholder();
 
-  /// Returns true if this is a move-only type.
-  bool isPureMoveOnly();
+  /// Returns true if this is a noncopyable type.
+  bool isNoncopyable();
 
   /// Does the type have outer parenthesis?
   bool hasParenSugar() const { return getKind() == TypeKind::Paren; }
@@ -689,16 +696,26 @@ public:
     return getRecursiveProperties().hasLocalArchetype();
   }
 
+  /// Whether the type contains a generic parameter declared as a parameter
+  /// pack.
   bool hasParameterPack() const {
     return getRecursiveProperties().hasParameterPack();
   }
 
-  bool hasConcretePack() const {
-    return getRecursiveProperties().hasConcretePack();
+  /// Whether the type contains a PackType.
+  bool hasPack() const {
+    return getRecursiveProperties().hasPack();
   }
 
-  /// Whether the type has some flavor of pack.
-  bool hasPack() const { return hasParameterPack() || hasConcretePack(); }
+  /// Whether the type contains a PackArchetypeType.
+  bool hasPackArchetype() const {
+    return getRecursiveProperties().hasPackArchetype();
+  }
+
+  /// Whether the type has any flavor of pack.
+  bool hasAnyPack() const {
+    return hasParameterPack() || hasPack() || hasPackArchetype();
+  }
 
   /// Determine whether the type involves a parameterized existential type.
   bool hasParameterizedExistential() const {
@@ -768,6 +785,10 @@ public:
   /// Like \c isTypeParameter, this routine will return \c false for types that
   /// include type parameters in nested positions e.g. \c X<T...>.
   bool isParameterPack();
+
+  /// Determine whether this type is directly a type parameter pack, which
+  /// can only be a GenericTypeParamType.
+  bool isRootParameterPack();
 
   /// Determine whether this type can dynamically be an optional type.
   ///
@@ -2494,10 +2515,6 @@ public:
   
   bool containsPackExpansionType() const;
 
-  /// Check whether this tuple consists of a single unlabeled element
-  /// of \c PackExpansionType.
-  bool isSingleUnlabeledPackExpansion() const;
-
 private:
   TupleType(ArrayRef<TupleTypeElt> elements, const ASTContext *CanCtx,
             RecursiveTypeProperties properties)
@@ -3177,6 +3194,12 @@ public:
     /// Whether the parameter is marked '@noDerivative'.
     bool isNoDerivative() const { return Flags.isNoDerivative(); }
 
+    /// Whether the parameter might be a semantic result for autodiff purposes.
+    /// This includes inout parameters.
+    bool isAutoDiffSemanticResult() const {
+      return isInOut();
+    }
+
     ValueOwnership getValueOwnership() const {
       return Flags.getValueOwnership();
     }
@@ -3298,6 +3321,8 @@ protected:
           !Info.value().getClangTypeInfo().empty();
       Bits.AnyFunctionType.HasGlobalActor =
           !Info.value().getGlobalActor().isNull();
+      Bits.AnyFunctionType.HasThrownError =
+          !Info.value().getThrownError().isNull();
       // The use of both assert() and static_assert() is intentional.
       assert(Bits.AnyFunctionType.ExtInfoBits == Info.value().getBits() &&
              "Bits were dropped!");
@@ -3309,6 +3334,7 @@ protected:
       Bits.AnyFunctionType.HasClangTypeInfo = false;
       Bits.AnyFunctionType.ExtInfoBits = 0;
       Bits.AnyFunctionType.HasGlobalActor = false;
+      Bits.AnyFunctionType.HasThrownError = false;
     }
     Bits.AnyFunctionType.NumParams = NumParams;
     assert(Bits.AnyFunctionType.NumParams == NumParams && "Params dropped!");
@@ -3351,10 +3377,29 @@ public:
     return Bits.AnyFunctionType.HasGlobalActor;
   }
 
+  bool hasThrownError() const {
+    return Bits.AnyFunctionType.HasThrownError;
+  }
+
   ClangTypeInfo getClangTypeInfo() const;
   ClangTypeInfo getCanonicalClangTypeInfo() const;
 
   Type getGlobalActor() const;
+  Type getThrownError() const;
+
+  /// Retrieve the "effective" thrown interface type, or llvm::None if
+  /// this function cannot throw.
+  ///
+  /// Functions with untyped throws will produce "any Error", functions that
+  /// cannot throw or are specified to throw "Never" will return llvm::None.
+  llvm::Optional<Type> getEffectiveThrownErrorType() const;
+
+  /// Retrieve the "effective" thrown interface type, or `Never` if
+  /// this function cannot throw.
+  ///
+  /// Functions with untyped throws will produce `any Error`, functions that
+  /// cannot throw or are specified to throw `Never` will return `Never`.
+  Type getEffectiveThrownErrorTypeOrNever() const;
 
   /// Returns true if the function type stores a Clang type that cannot
   /// be derived from its Swift type. Returns false otherwise, including if
@@ -3379,23 +3424,14 @@ public:
   ExtInfo getExtInfo() const {
     assert(hasExtInfo());
     return ExtInfo(Bits.AnyFunctionType.ExtInfoBits, getClangTypeInfo(),
-                   getGlobalActor());
+                   getGlobalActor(), getThrownError());
   }
 
   /// Get the canonical ExtInfo for the function type.
   ///
   /// The parameter useClangFunctionType is present only for staging purposes.
   /// In the future, we will always use the canonical clang function type.
-  ExtInfo getCanonicalExtInfo(bool useClangFunctionType) const {
-    assert(hasExtInfo());
-    Type globalActor = getGlobalActor();
-    if (globalActor)
-      globalActor = globalActor->getCanonicalType();
-    return ExtInfo(Bits.AnyFunctionType.ExtInfoBits,
-                   useClangFunctionType ? getCanonicalClangTypeInfo()
-                                        : ClangTypeInfo(),
-                   globalActor);
-  }
+  ExtInfo getCanonicalExtInfo(bool useClangFunctionType) const;
 
   bool hasSameExtInfoAs(const AnyFunctionType *otherFn);
 
@@ -3494,8 +3530,8 @@ public:
   /// Preconditions:
   /// - Parameters corresponding to parameter indices must conform to
   ///   `Differentiable`.
-  /// - There is one semantic function result type: either the formal original
-  ///   result or an `inout` parameter. It must conform to `Differentiable`.
+  /// - There are semantic function result type: either the formal original
+  ///   result or a "wrt" semantic result parameter.
   ///
   /// Differential typing rules: takes "wrt" parameter derivatives and returns a
   /// "wrt" result derivative.
@@ -3503,10 +3539,7 @@ public:
   /// - Case 1: original function has no `inout` parameters.
   ///   - Original:     `(T0, T1, ...) -> R`
   ///   - Differential: `(T0.Tan, T1.Tan, ...) -> R.Tan`
-  /// - Case 2: original function has a non-wrt `inout` parameter.
-  ///   - Original:     `(T0, inout T1, ...) -> Void`
-  ///   - Differential: `(T0.Tan, ...) -> T1.Tan`
-  /// - Case 3: original function has a wrt `inout` parameter.
+  /// - Case 2: original function has a wrt `inout` parameter.
   ///   - Original:     `(T0, inout T1, ...) -> Void`
   ///   - Differential: `(T0.Tan, inout T1.Tan, ...) -> Void`
   ///
@@ -3516,10 +3549,7 @@ public:
   /// - Case 1: original function has no `inout` parameters.
   ///   - Original: `(T0, T1, ...) -> R`
   ///   - Pullback: `R.Tan -> (T0.Tan, T1.Tan, ...)`
-  /// - Case 2: original function has a non-wrt `inout` parameter.
-  ///   - Original: `(T0, inout T1, ...) -> Void`
-  ///   - Pullback: `(T1.Tan) -> (T0.Tan, ...)`
-  /// - Case 3: original function has a wrt `inout` parameter.
+  /// - Case 2: original function has a wrt `inout` parameter.
   ///   - Original: `(T0, inout T1, ...) -> Void`
   ///   - Pullback: `(inout T1.Tan) -> (T0.Tan, ...)`
   ///
@@ -3561,6 +3591,10 @@ public:
   /// replaced.
   AnyFunctionType *withExtInfo(ExtInfo info) const;
 
+  bool containsPackExpansionParam() const {
+    return containsPackExpansionType(getParams());
+  }
+
   static bool containsPackExpansionType(ArrayRef<Param> params);
 
   static void printParams(ArrayRef<Param> Params, raw_ostream &OS,
@@ -3593,7 +3627,8 @@ BEGIN_CAN_TYPE_WRAPPER(AnyFunctionType, Type)
   }
 
   PROXY_CAN_TYPE_SIMPLE_GETTER(getResult)
-  
+  PROXY_CAN_TYPE_SIMPLE_GETTER(getThrownError)
+
   CanAnyFunctionType withExtInfo(ExtInfo info) const {
     return CanAnyFunctionType(getPointer()->withExtInfo(info));
   }
@@ -3623,7 +3658,7 @@ class FunctionType final
   }
 
   size_t numTrailingObjects(OverloadToken<Type>) const {
-    return hasGlobalActor() ? 1 : 0;
+    return hasGlobalActor() + hasThrownError();
   }
 
 public:
@@ -3648,9 +3683,15 @@ public:
   Type getGlobalActor() const {
     if (!hasGlobalActor())
       return Type();
-    return *getTrailingObjects<Type>();
+    return getTrailingObjects<Type>()[0];
   }
 
+  Type getThrownError() const {
+    if (!hasThrownError())
+      return Type();
+    return getTrailingObjects<Type>()[hasGlobalActor()];
+  }
+                                      
   void Profile(llvm::FoldingSetNodeID &ID) {
     llvm::Optional<ExtInfo> info = llvm::None;
     if (hasExtInfo())
@@ -3755,7 +3796,7 @@ class GenericFunctionType final : public AnyFunctionType,
   }
                                     
   size_t numTrailingObjects(OverloadToken<Type>) const {
-    return hasGlobalActor() ? 1 : 0;
+    return hasGlobalActor() + hasThrownError();
   }
 
   /// Construct a new generic function type.
@@ -3777,9 +3818,15 @@ public:
   Type getGlobalActor() const {
     if (!hasGlobalActor())
       return Type();
-    return *getTrailingObjects<Type>();
+    return getTrailingObjects<Type>()[0];
   }
 
+  Type getThrownError() const {
+    if (!hasThrownError())
+      return Type();
+    return getTrailingObjects<Type>()[hasGlobalActor()];
+  }
+                                    
   /// Retrieve the generic signature of this function type.
   GenericSignature getGenericSignature() const {
     return Signature;
@@ -4081,6 +4128,9 @@ public:
   bool isIndirectMutating() const {
     return getConvention() == ParameterConvention::Indirect_Inout
         || getConvention() == ParameterConvention::Indirect_InoutAliasable;
+  }
+  bool isAutoDiffSemanticResult() const {
+    return isIndirectMutating();
   }
 
   bool isPack() const {
@@ -4621,6 +4671,7 @@ public:
   }
 
   bool isSendable() const { return getExtInfo().isSendable(); }
+  bool isUnimplementable() const { return getExtInfo().isUnimplementable(); }
   bool isAsync() const { return getExtInfo().isAsync(); }
 
   /// Return the array of all the yields.
@@ -4814,6 +4865,37 @@ public:
   /// Returns the number of indirect mutating parameters.
   unsigned getNumIndirectMutatingParameters() const {
     return llvm::count_if(getParameters(), IndirectMutatingParameterFilter());
+  }
+
+  struct AutoDiffSemanticResultsParameterFilter {
+    bool operator()(SILParameterInfo param) const {
+      return param.isAutoDiffSemanticResult();
+    }
+  };
+
+  using AutoDiffSemanticResultsParameterIter =
+    llvm::filter_iterator<const SILParameterInfo *,
+                          AutoDiffSemanticResultsParameterFilter>;
+  using AutoDiffSemanticResultsParameterRange =
+      iterator_range<AutoDiffSemanticResultsParameterIter>;
+
+  /// A range of SILParameterInfo for all semantic results parameters.
+  AutoDiffSemanticResultsParameterRange
+  getAutoDiffSemanticResultsParameters() const {
+    return llvm::make_filter_range(getParameters(),
+                                   AutoDiffSemanticResultsParameterFilter());
+  }
+
+  /// Returns the number of semantic results parameters.
+  unsigned getNumAutoDiffSemanticResultsParameters() const {
+    return llvm::count_if(getParameters(), AutoDiffSemanticResultsParameterFilter());
+  }
+
+  /// Returns the number of function potential semantic results:
+  ///  * Usual results
+  ///  * Inout parameters
+  unsigned getNumAutoDiffSemanticResults() const {
+    return getNumResults() + getNumAutoDiffSemanticResultsParameters();
   }
 
   /// Get the generic signature that the component types are specified
@@ -5297,7 +5379,7 @@ class SILMoveOnlyWrappedType final : public TypeBase,
       : TypeBase(TypeKind::SILMoveOnlyWrapped, &innerType->getASTContext(),
                  innerType->getRecursiveProperties()),
         innerType(innerType) {
-    assert(!innerType->isPureMoveOnly() && "Inner type must be copyable");
+    assert(!innerType->isNoncopyable() && "Inner type must be copyable");
   }
 
 public:

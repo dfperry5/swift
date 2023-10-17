@@ -24,15 +24,10 @@ namespace llvm {
 }
 
 namespace swift {
+enum class ModuleLoadingBehavior;
+}
 
-/// How a dependency should be loaded.
-///
-/// \sa getTransitiveLoadingBehavior
-enum class ModuleLoadingBehavior {
-  Required,
-  Optional,
-  Ignored
-};
+namespace swift {
 
 /// Serialized core data of a module. The difference with `ModuleFile` is that
 /// `ModuleFileSharedCore` provides immutable data and is independent of a
@@ -366,6 +361,9 @@ private:
 
     /// Whether this module was built with -experimental-hermetic-seal-at-link.
     unsigned HasHermeticSealAtLink : 1;
+
+    /// Whether this module was built with embedded Swift.
+    unsigned IsEmbeddedSwiftModule : 1;
 
     /// Whether this module file is compiled with '-enable-testing'.
     unsigned IsTestable : 1;

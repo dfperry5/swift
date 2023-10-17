@@ -1122,13 +1122,30 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     Printer << "@_cdecl(\"" << cast<CDeclAttr>(this)->Name << "\")";
     break;
 
-  case DAK_Expose:
+  case DAK_Expose: {
     Printer.printAttrName("@_expose");
-    Printer << "(Cxx";
+    auto Attr = cast<ExposeAttr>(this);
+    switch (Attr->getExposureKind()) {
+    case ExposureKind::Wasm:
+      Printer << "(wasm";
+      break;
+    case ExposureKind::Cxx:
+      Printer << "(Cxx";
+      break;
+    }
     if (!cast<ExposeAttr>(this)->Name.empty())
       Printer << ", \"" << cast<ExposeAttr>(this)->Name << "\"";
     Printer << ")";
     break;
+  }
+
+  case DAK_Extern: {
+    auto *Attr = cast<ExternAttr>(this);
+    Printer.printAttrName("@_extern");
+    // For now, it accepts only "wasm" as its kind.
+    Printer << "(wasm, module: \"" << Attr->ModuleName << "\", name: \"" << Attr->Name << "\")";
+    break;
+  }
 
   case DAK_Section:
     Printer.printAttrName("@_section");
@@ -1198,12 +1215,13 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
       }
     }
     SmallVector<Requirement, 4> requirementsScratch;
-    auto requirements = attr->getSpecializedSignature().getRequirements();
     auto *FnDecl = dyn_cast_or_null<AbstractFunctionDecl>(D);
+    auto specializedSig = attr->getSpecializedSignature(FnDecl);
+    auto requirements = specializedSig.getRequirements();
     if (FnDecl && FnDecl->getGenericSignature()) {
       auto genericSig = FnDecl->getGenericSignature();
 
-      if (auto sig = attr->getSpecializedSignature()) {
+      if (auto sig = specializedSig) {
         requirementsScratch = sig.requirementsNotSatisfiedBy(genericSig);
         requirements = requirementsScratch;
       }
@@ -1389,6 +1407,23 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
     }
     Printer << "(";
     Printer << getMacroRoleString(Attr->getMacroRole());
+
+    // Print conformances, if present.
+    auto conformances = evaluateOrDefault(
+        D->getASTContext().evaluator,
+        ResolveMacroConformances{Attr, D},
+        {});
+    if (!conformances.empty()) {
+      Printer << ", conformances: ";
+      interleave(conformances,
+                 [&](Type type) {
+                   type.print(Printer, Options);
+                 },
+                 [&] {
+                   Printer << ", ";
+                 });
+    }
+
     if (!Attr->getNames().empty()) {
       Printer << ", names: ";
       interleave(
@@ -1442,6 +1477,54 @@ bool DeclAttribute::printImpl(ASTPrinter &Printer, const PrintOptions &Options,
       Printer << attr->Metadata;
     }
 
+    Printer << ")";
+    break;
+  }
+  
+  case DAK_RawLayout: {
+    auto *attr = cast<RawLayoutAttr>(this);
+    Printer.printAttrName("@_rawLayout");
+    Printer << "(";
+    
+    if (auto sizeAndAlign = attr->getSizeAndAlignment()) {
+      Printer << "size: " << sizeAndAlign->first
+              << ", alignment: " << sizeAndAlign->second;
+    } else if (auto type = attr->getScalarLikeType()) {
+      Printer << "like: ";
+      type->print(Printer, Options);
+    } else if (auto array = attr->getArrayLikeTypeAndCount()) {
+      Printer << "likeArrayOf: ";
+      array->first->print(Printer, Options);
+      Printer << ", count: " << array->second;
+    } else {
+      llvm_unreachable("unhandled @_rawLayout form");
+    }
+    Printer << ")";
+    break;
+  }
+
+  case DAK_StorageRestrictions: {
+    auto *attr = cast<StorageRestrictionsAttr>(this);
+    Printer.printAttrName("@storageRestrictions");
+    Printer << "(";
+
+    auto initializes = attr->getInitializesNames();
+    auto accesses = attr->getAccessesNames();
+
+    bool needsComma = !initializes.empty() && !accesses.empty();
+
+    if (!initializes.empty()) {
+      Printer << "initializes: ";
+      interleave(initializes, Printer, ", ");
+    }
+
+    if (needsComma)
+      Printer << ", ";
+
+    if (!accesses.empty()) {
+      Printer << "accesses: ";
+      interleave(accesses, Printer, ", ");
+    }
     Printer << ")";
     break;
   }
@@ -1596,10 +1679,8 @@ StringRef DeclAttribute::getAttrName() const {
     return "<<synthesized protocol>>";
   case DAK_Specialize:
     return "_specialize";
-  case DAK_Initializes:
-    return "initializes";
-  case DAK_Accesses:
-    return "accesses";
+  case DAK_StorageRestrictions:
+    return "storageRestrictions";
   case DAK_Implements:
     return "_implements";
   case DAK_ClangImporterSynthesizedType:
@@ -1634,6 +1715,10 @@ StringRef DeclAttribute::getAttrName() const {
     case MacroSyntax::Attached:
       return "attached";
     }
+  case DAK_RawLayout:
+    return "_rawLayout";
+  case DAK_Extern:
+    return "_extern";
   }
   llvm_unreachable("bad DeclAttrKind");
 }
@@ -1839,6 +1924,14 @@ Type TypeEraserAttr::getResolvedType(const ProtocolDecl *PD) const {
                            ResolveTypeEraserTypeRequest{
                                const_cast<ProtocolDecl *>(PD),
                                const_cast<TypeEraserAttr *>(this)},
+                           ErrorType::get(ctx));
+}
+
+Type RawLayoutAttr::getResolvedLikeType(StructDecl *sd) const {
+  auto &ctx = sd->getASTContext();
+  return evaluateOrDefault(ctx.evaluator,
+                           ResolveRawLayoutLikeTypeRequest{sd,
+                               const_cast<RawLayoutAttr *>(this)},
                            ErrorType::get(ctx));
 }
 
@@ -2131,6 +2224,14 @@ ValueDecl * SpecializeAttr::getTargetFunctionDecl(const ValueDecl *onDecl) const
                            nullptr);
 }
 
+GenericSignature SpecializeAttr::getSpecializedSignature(
+    const AbstractFunctionDecl *onDecl) const {
+  return evaluateOrDefault(onDecl->getASTContext().evaluator,
+                           SerializeAttrGenericSignatureRequest{
+                               onDecl, const_cast<SpecializeAttr *>(this)},
+                           nullptr);
+}
+
 SPIAccessControlAttr::SPIAccessControlAttr(SourceLoc atLoc, SourceRange range,
                                            ArrayRef<Identifier> spiGroups)
       : DeclAttribute(DAK_SPIAccessControl, atLoc, range,
@@ -2373,36 +2474,27 @@ TransposeAttr *TransposeAttr::create(ASTContext &context, bool implicit,
                                  std::move(originalName), parameterIndices);
 }
 
-InitializesAttr::InitializesAttr(SourceLoc atLoc, SourceRange range,
-                                 ArrayRef<Identifier> properties)
-    : DeclAttribute(DAK_Initializes, atLoc, range, /*implicit*/false),
-      numProperties(properties.size()) {
-  std::uninitialized_copy(properties.begin(), properties.end(),
+StorageRestrictionsAttr::StorageRestrictionsAttr(
+    SourceLoc AtLoc, SourceRange Range, ArrayRef<Identifier> initializes,
+    ArrayRef<Identifier> accesses, bool Implicit)
+    : DeclAttribute(DAK_StorageRestrictions, AtLoc, Range, Implicit),
+      NumInitializes(initializes.size()),
+      NumAccesses(accesses.size()) {
+  std::uninitialized_copy(initializes.begin(), initializes.end(),
                           getTrailingObjects<Identifier>());
+  std::uninitialized_copy(accesses.begin(), accesses.end(),
+                          getTrailingObjects<Identifier>() + NumInitializes);
 }
 
-InitializesAttr *
-InitializesAttr::create(ASTContext &ctx, SourceLoc atLoc, SourceRange range,
-                        ArrayRef<Identifier> properties) {
-  unsigned size = totalSizeToAlloc<Identifier>(properties.size());
-  void *mem = ctx.Allocate(size, alignof(InitializesAttr));
-  return new (mem) InitializesAttr(atLoc, range, properties);
-}
-
-AccessesAttr::AccessesAttr(SourceLoc atLoc, SourceRange range,
-                           ArrayRef<Identifier> properties)
-    : DeclAttribute(DAK_Accesses, atLoc, range, /*implicit*/false),
-      numProperties(properties.size()) {
-  std::uninitialized_copy(properties.begin(), properties.end(),
-                          getTrailingObjects<Identifier>());
-}
-
-AccessesAttr *
-AccessesAttr::create(ASTContext &ctx, SourceLoc atLoc, SourceRange range,
-                     ArrayRef<Identifier> properties) {
-  unsigned size = totalSizeToAlloc<Identifier>(properties.size());
-  void *mem = ctx.Allocate(size, alignof(AccessesAttr));
-  return new (mem) AccessesAttr(atLoc, range, properties);
+StorageRestrictionsAttr *
+StorageRestrictionsAttr::create(
+    ASTContext &ctx, SourceLoc atLoc, SourceRange range,
+    ArrayRef<Identifier> initializes, ArrayRef<Identifier> accesses) {
+  unsigned size =
+      totalSizeToAlloc<Identifier>(initializes.size() + accesses.size());
+  void *mem = ctx.Allocate(size, alignof(StorageRestrictionsAttr));
+  return new (mem) StorageRestrictionsAttr(atLoc, range, initializes, accesses,
+                                           /*implicit=*/false);
 }
 
 ImplementsAttr::ImplementsAttr(SourceLoc atLoc, SourceRange range,
@@ -2563,24 +2655,24 @@ DeclAttributes::getEffectiveSendableAttr() const {
   return assumedAttr;
 }
 
-ArrayRef<VarDecl *>
-InitializesAttr::getPropertyDecls(AccessorDecl *attachedTo) const {
+ArrayRef<VarDecl *> StorageRestrictionsAttr::getInitializesProperties(
+    AccessorDecl *attachedTo) const {
   auto &ctx = attachedTo->getASTContext();
-  return evaluateOrDefault(
-      ctx.evaluator,
-      InitAccessorReferencedVariablesRequest{
-          const_cast<InitializesAttr *>(this), attachedTo, getProperties()},
-      {});
+  return evaluateOrDefault(ctx.evaluator,
+                           InitAccessorReferencedVariablesRequest{
+                               const_cast<StorageRestrictionsAttr *>(this),
+                               attachedTo, getInitializesNames()},
+                           {});
 }
 
 ArrayRef<VarDecl *>
-AccessesAttr::getPropertyDecls(AccessorDecl *attachedTo) const {
+StorageRestrictionsAttr::getAccessesProperties(AccessorDecl *attachedTo) const {
   auto &ctx = attachedTo->getASTContext();
-  return evaluateOrDefault(
-      ctx.evaluator,
-      InitAccessorReferencedVariablesRequest{const_cast<AccessesAttr *>(this),
-                                             attachedTo, getProperties()},
-      {});
+  return evaluateOrDefault(ctx.evaluator,
+                           InitAccessorReferencedVariablesRequest{
+                               const_cast<StorageRestrictionsAttr *>(this),
+                               attachedTo, getAccessesNames()},
+                           {});
 }
 
 void swift::simple_display(llvm::raw_ostream &out, const DeclAttribute *attr) {

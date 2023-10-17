@@ -19,8 +19,7 @@ final public class GlobalVariable : CustomStringConvertible, HasShortDescription
   }
 
   public var description: String {
-    let stdString = bridged.getDebugDescription()
-    return String(_cxxString: stdString)
+    return String(taking: bridged.getDebugDescription())
   }
 
   public var shortDescription: String { name.string }
@@ -43,14 +42,28 @@ final public class GlobalVariable : CustomStringConvertible, HasShortDescription
     return bridged.isAvailableExternally()
   }
 
+  public var staticInitializerInstructions: InstructionList? {
+    if let firstStaticInitInst = bridged.getFirstStaticInitInst().instruction {
+      return InstructionList(first: firstStaticInitInst)
+    }
+    return nil
+  }
+
   public var staticInitValue: SingleValueInstruction? {
-    bridged.getStaticInitializerValue().instruction as? SingleValueInstruction
+    if let staticInitInsts = staticInitializerInstructions {
+      return staticInitInsts.reversed().first! as? SingleValueInstruction
+    }
+    return nil
   }
 
   /// True if the global's linkage and resilience expansion allow the global
   /// to be initialized statically.
   public var canBeInitializedStatically: Bool {
     return bridged.canBeInitializedStatically()
+  }
+
+  public var mustBeInitializedStatically: Bool {
+    return bridged.mustBeInitializedStatically()
   }
 
   public static func ==(lhs: GlobalVariable, rhs: GlobalVariable) -> Bool {
@@ -78,6 +91,8 @@ extension Instruction {
         return type.isBuiltinInteger || type.isBuiltinFloat
       case .PtrToInt:
         return bi.operands[0].value is StringLiteralInst
+      case .IntToPtr:
+        return bi.operands[0].value is IntegerLiteralInst
       case .StringObjectOr:
         // The first operand can be a string literal (i.e. a pointer), but the
         // second operand must be a constant. This enables creating a
@@ -129,7 +144,9 @@ extension Instruction {
          is ObjectInst,
          is ValueToBridgeObjectInst,
          is ConvertFunctionInst,
-         is ThinToThickFunctionInst:
+         is ThinToThickFunctionInst,
+         is AddressToPointerInst,
+         is GlobalAddrInst:
       return true
     default:
       return false
@@ -145,8 +162,10 @@ private extension TupleExtractInst {
        let bi = tuple as? BuiltinInst,
        bi.id == .USubOver,
        bi.operands[1].value is IntegerLiteralInst,
-       let overFlowFlag = bi.operands[2].value as? IntegerLiteralInst,
-       overFlowFlag.value.isNullValue() {
+       let overflowLiteral = bi.operands[2].value as? IntegerLiteralInst,
+       let overflowValue = overflowLiteral.value,
+       overflowValue == 0
+    {
       return true
     }
     return false

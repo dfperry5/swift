@@ -22,6 +22,7 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILInstruction.h"
+#include "swift/SIL/Test.h"
 
 using namespace swift;
 
@@ -94,47 +95,53 @@ bool swift::findPointerEscape(SILValue original) {
   return false;
 }
 
+namespace swift::test {
+// Arguments:
+// - value: the value to check for escaping
+// Dumps:
+// - the value
+// - whether it has a pointer escape
+static FunctionTest OwnershipUtilsHasPointerEscape(
+    "has-pointer-escape", [](auto &function, auto &arguments, auto &test) {
+      auto value = arguments.takeValue();
+      auto has = findPointerEscape(value);
+      value->print(llvm::outs());
+      auto *boolString = has ? "true" : "false";
+      llvm::outs() << boolString << "\n";
+    });
+} // end namespace swift::test
+
 bool swift::canOpcodeForwardInnerGuaranteedValues(SILValue value) {
-  // If we have an argument from a transforming terminator, we can forward
-  // guaranteed.
-  if (auto *arg = dyn_cast<SILArgument>(value))
-    if (auto *ti = arg->getSingleTerminator())
-      if (ti->mayHaveTerminatorResult())
-        return ForwardingInstruction::get(ti)->preservesOwnership();
-
-  if (auto *inst = value->getDefiningInstruction())
-    if (auto *mixin = ForwardingInstruction::get(inst))
-      return mixin->preservesOwnership() &&
-             !ForwardingInstruction::canForwardOwnedCompatibleValuesOnly(inst);
-
+  if (auto *inst = value->getDefiningInstructionOrTerminator()) {
+    if (auto fwdOp = ForwardingOperation(inst)) {
+      return fwdOp.preservesOwnership() &&
+             !fwdOp.canForwardOwnedCompatibleValuesOnly();
+    }
+  }
   return false;
 }
 
 bool swift::canOpcodeForwardInnerGuaranteedValues(Operand *use) {
-  if (auto *fwi = ForwardingInstruction::get(use->getUser()))
-    return fwi->preservesOwnership() &&
-           !ForwardingInstruction::canForwardOwnedCompatibleValuesOnly(
-               use->getUser());
+  if (auto fwdOp = ForwardingOperation(use->getUser()))
+    return fwdOp.preservesOwnership() &&
+           !fwdOp.canForwardOwnedCompatibleValuesOnly();
   return false;
 }
 
 bool swift::canOpcodeForwardOwnedValues(SILValue value) {
   if (auto *inst = value->getDefiningInstructionOrTerminator()) {
-    if (auto *fwi = ForwardingInstruction::get(inst)) {
-      return fwi->preservesOwnership() &&
-             !ForwardingInstruction::canForwardGuaranteedCompatibleValuesOnly(
-                 inst);
+    if (auto fwdOp = ForwardingOperation(inst)) {
+      return fwdOp.preservesOwnership() &&
+             !fwdOp.canForwardGuaranteedCompatibleValuesOnly();
     }
   }
   return false;
 }
 
 bool swift::canOpcodeForwardOwnedValues(Operand *use) {
-  auto *user = use->getUser();
-  if (auto *fwi = ForwardingInstruction::get(user))
-    return fwi->preservesOwnership() &&
-           !ForwardingInstruction::canForwardGuaranteedCompatibleValuesOnly(
-               user);
+  if (auto fwdOp = ForwardingOperation(use->getUser()))
+    return fwdOp.preservesOwnership() &&
+           !fwdOp.canForwardGuaranteedCompatibleValuesOnly();
   return false;
 }
 
@@ -593,6 +600,9 @@ void BorrowingOperandKind::print(llvm::raw_ostream &os) const {
   case Kind::BeginBorrow:
     os << "BeginBorrow";
     return;
+  case Kind::StoreBorrow:
+    os << "StoreBorrow";
+    return;
   case Kind::BeginApply:
     os << "BeginApply";
     return;
@@ -642,6 +652,7 @@ bool BorrowingOperand::hasEmptyRequiredEndingUses() const {
   case BorrowingOperandKind::Invalid:
     llvm_unreachable("Using invalid case");
   case BorrowingOperandKind::BeginBorrow:
+  case BorrowingOperandKind::StoreBorrow:
   case BorrowingOperandKind::BeginApply:
   case BorrowingOperandKind::BeginAsyncLet:
   case BorrowingOperandKind::PartialApplyStack: {
@@ -670,6 +681,20 @@ bool BorrowingOperand::visitScopeEndingUses(
     bool deadBorrow = true;
     for (auto *use : cast<BeginBorrowInst>(op->getUser())->getUses()) {
       if (use->isLifetimeEnding()) {
+        deadBorrow = false;
+        if (!func(use))
+          return false;
+      }
+    }
+    // FIXME: special case for dead borrows. This is dangerous because clients
+    // only expect visitScopeEndingUses to return false if the visitor returned
+    // false.
+    return !deadBorrow;
+  }
+  case BorrowingOperandKind::StoreBorrow: {
+    bool deadBorrow = true;
+    for (auto *use : cast<StoreBorrowInst>(op->getUser())->getUses()) {
+      if (isa<EndBorrowInst>(use->getUser())) {
         deadBorrow = false;
         if (!func(use))
           return false;
@@ -756,6 +781,7 @@ BorrowedValue BorrowingOperand::getBorrowIntroducingUserResult() const {
   case BorrowingOperandKind::Yield:
   case BorrowingOperandKind::PartialApplyStack:
   case BorrowingOperandKind::BeginAsyncLet:
+  case BorrowingOperandKind::StoreBorrow:
     return BorrowedValue();
 
   case BorrowingOperandKind::BeginBorrow: {
@@ -785,6 +811,7 @@ SILValue BorrowingOperand::getScopeIntroducingUserResult() {
   case BorrowingOperandKind::BeginAsyncLet:
   case BorrowingOperandKind::PartialApplyStack:
   case BorrowingOperandKind::BeginBorrow:
+  case BorrowingOperandKind::StoreBorrow:
     return cast<SingleValueInstruction>(op->getUser());
 
   case BorrowingOperandKind::BeginApply:
@@ -843,24 +870,10 @@ void BorrowedValue::print(llvm::raw_ostream &os) const {
 
 void BorrowedValue::getLocalScopeEndingInstructions(
     SmallVectorImpl<SILInstruction *> &scopeEndingInsts) const {
-  assert(isLocalScope() && "Should only call this given a local scope");
-
-  switch (kind) {
-  case BorrowedValueKind::Invalid:
-    llvm_unreachable("Using invalid case?!");
-  case BorrowedValueKind::SILFunctionArgument:
-    llvm_unreachable("Should only call this with a local scope");
-  case BorrowedValueKind::BeginBorrow:
-  case BorrowedValueKind::LoadBorrow:
-  case BorrowedValueKind::Phi:
-    for (auto *use : value->getUses()) {
-      if (use->isLifetimeEnding()) {
-        scopeEndingInsts.push_back(use->getUser());
-      }
-    }
-    return;
-  }
-  llvm_unreachable("Covered switch isn't covered?!");
+  visitLocalScopeEndingUses([&](auto *use) {
+    scopeEndingInsts.push_back(use->getUser());
+    return true;
+  });
 }
 
 // Note: BorrowedLifetimeExtender assumes no intermediate values between a
@@ -1690,20 +1703,16 @@ bool swift::visitForwardedGuaranteedOperands(
   if (inst->getNumRealOperands() == 0) {
     return false;
   }
-  if (ForwardingInstruction::canForwardFirstOperandOnly(inst)) {
-    visitOperand(&inst->getOperandRef(0));
-    return true;
+
+  auto fwdOp = ForwardingOperation(inst);
+  if (!fwdOp) {
+    return false;
   }
-  if (ForwardingInstruction::canForwardAllOperands(inst)) {
-    assert(inst->getNumOperands() > 0 && "checked above");
-    assert(inst->getNumOperands() == inst->getNumRealOperands() &&
-           "mixin expects all readl operands");
-    for (auto &operand : inst->getAllOperands()) {
-      visitOperand(&operand);
-    }
-    return true;
+
+  for (auto &operand : fwdOp.getForwardedOperands()) {
+    visitOperand(&operand);
   }
-  return false;
+  return true;
 }
 
 namespace {
@@ -2060,6 +2069,23 @@ bool swift::visitEnclosingDefs(SILValue value,
     .visitEnclosingDefs(value, visitor);
 }
 
+namespace swift::test {
+// Arguments:
+// - SILValue: value
+// Dumps:
+// - function
+// - the enclosing defs
+static FunctionTest FindEnclosingDefsTest(
+    "find-enclosing-defs", [](auto &function, auto &arguments, auto &test) {
+      function.print(llvm::outs());
+      llvm::outs() << "Enclosing Defs:\n";
+      visitEnclosingDefs(arguments.takeValue(), [](SILValue def) {
+        def->print(llvm::outs());
+        return true;
+      });
+    });
+} // end namespace swift::test
+
 bool swift::visitBorrowIntroducers(SILValue value,
                                    function_ref<bool(SILValue)> visitor) {
   if (isa<SILUndef>(value))
@@ -2067,6 +2093,23 @@ bool swift::visitBorrowIntroducers(SILValue value,
   return FindEnclosingDefs(value->getFunction())
     .visitBorrowIntroducers(value, visitor);
 }
+
+namespace swift::test {
+// Arguments:
+// - SILValue: value
+// Dumps:
+// - function
+// - the borrow introducers
+static FunctionTest FindBorrowIntroducers(
+    "find-borrow-introducers", [](auto &function, auto &arguments, auto &test) {
+      function.print(llvm::outs());
+      llvm::outs() << "Introducers:\n";
+      visitBorrowIntroducers(arguments.takeValue(), [](SILValue def) {
+        def->print(llvm::outs());
+        return true;
+      });
+    });
+} // end namespace swift::test
 
 /// Return true of the lifetime of \p innerPhiVal depends on \p outerPhiVal.
 ///
@@ -2169,6 +2212,24 @@ bool swift::visitInnerAdjacentPhis(SILArgument *phi,
   }
   return true;
 }
+
+namespace swift::test {
+// Arguments:
+// - SILValue: phi
+// Dumps:
+// - function
+// - the adjacent phis
+static FunctionTest VisitInnerAdjacentPhisTest(
+    "visit-inner-adjacent-phis",
+    [](auto &function, auto &arguments, auto &test) {
+      function.print(llvm::outs());
+      visitInnerAdjacentPhis(cast<SILPhiArgument>(arguments.takeValue()),
+                             [](auto *argument) -> bool {
+                               argument->print(llvm::outs());
+                               return true;
+                             });
+    });
+} // end namespace swift::test
 
 void swift::visitTransitiveEndBorrows(
     SILValue value,

@@ -1259,12 +1259,13 @@ AssignByWrapperInst::AssignByWrapperInst(SILDebugLocation Loc,
   sharedUInt8().AssignByWrapperInst.mode = uint8_t(mode);
 }
 
-AssignOrInitInst::AssignOrInitInst(SILDebugLocation Loc, SILValue Self,
-                                   SILValue Src, SILValue Initializer,
-                                   SILValue Setter, AssignOrInitInst::Mode Mode)
+AssignOrInitInst::AssignOrInitInst(SILDebugLocation Loc, VarDecl *P,
+                                   SILValue Self, SILValue Src,
+                                   SILValue Initializer, SILValue Setter,
+                                   AssignOrInitInst::Mode Mode)
     : InstructionBase<SILInstructionKind::AssignOrInitInst,
                       NonValueInstruction>(Loc),
-      Operands(this, Self, Src, Initializer, Setter) {
+      Operands(this, Self, Src, Initializer, Setter), Property(P) {
   assert(Initializer->getType().is<SILFunctionType>());
   sharedUInt8().AssignOrInitInst.mode = uint8_t(Mode);
   Assignments.resize(getNumInitializedProperties());
@@ -1290,41 +1291,27 @@ bool AssignOrInitInst::isPropertyAlreadyInitialized(unsigned propertyIdx) {
   return Assignments.test(propertyIdx);
 }
 
+StringRef AssignOrInitInst::getPropertyName() const {
+  return Property->getNameStr();
+}
+
 AccessorDecl *AssignOrInitInst::getReferencedInitAccessor() const {
-  SILValue initRef = getInitializer();
-  SILFunction *accessorFn = nullptr;
-
-  if (auto *PAI = dyn_cast<PartialApplyInst>(initRef)) {
-    accessorFn = PAI->getReferencedFunctionOrNull();
-  } else {
-    accessorFn = cast<FunctionRefInst>(initRef)->getReferencedFunctionOrNull();
-  }
-
-  assert(accessorFn);
-  return dyn_cast_or_null<AccessorDecl>(accessorFn->getDeclContext());
+  return Property->getOpaqueAccessor(AccessorKind::Init);
 }
 
 unsigned AssignOrInitInst::getNumInitializedProperties() const {
-  if (auto *accessor = getReferencedInitAccessor()) {
-    auto *initAttr = accessor->getAttrs().getAttribute<InitializesAttr>();
-    return initAttr ? initAttr->getNumProperties() : 0;
-  }
-  return 0;
+  return getInitializedProperties().size();
 }
 
 ArrayRef<VarDecl *> AssignOrInitInst::getInitializedProperties() const {
-  if (auto *accessor = getReferencedInitAccessor()) {
-    if (auto *initAttr = accessor->getAttrs().getAttribute<InitializesAttr>())
-      return initAttr->getPropertyDecls(accessor);
-  }
+  if (auto *accessor = getReferencedInitAccessor())
+    return accessor->getInitializedProperties();
   return {};
 }
 
 ArrayRef<VarDecl *> AssignOrInitInst::getAccessedProperties() const {
-  if (auto *accessor = getReferencedInitAccessor()) {
-    if (auto *accessAttr = accessor->getAttrs().getAttribute<AccessesAttr>())
-      return accessAttr->getPropertyDecls(accessor);
-  }
+  if (auto *accessor = getReferencedInitAccessor())
+    return accessor->getAccessedProperties();
   return {};
 }
 
@@ -2021,9 +2008,9 @@ SelectEnumInst *SelectEnumInst::create(
     SILDebugLocation Loc, SILValue Operand, SILType Type, SILValue DefaultValue,
     ArrayRef<std::pair<EnumElementDecl *, SILValue>> CaseValues, SILModule &M,
     llvm::Optional<ArrayRef<ProfileCounter>> CaseCounts,
-    ProfileCounter DefaultCount, ValueOwnershipKind forwardingOwnership) {
+    ProfileCounter DefaultCount) {
   return createSelectEnum(Loc, Operand, Type, DefaultValue, CaseValues, M,
-                          CaseCounts, DefaultCount, forwardingOwnership);
+                          CaseCounts, DefaultCount);
 }
 
 SelectEnumAddrInst *SelectEnumAddrInst::create(
@@ -2436,6 +2423,26 @@ TuplePackElementAddrInst::create(SILFunction &F,
                                                  elementType);
 }
 
+TuplePackExtractInst *
+TuplePackExtractInst::create(SILFunction &F, SILDebugLocation debugLoc,
+                             SILValue indexOperand, SILValue tupleOperand,
+                             SILType elementType,
+                             ValueOwnershipKind forwardingOwnershipKind) {
+  assert(indexOperand->getType().is<BuiltinPackIndexType>());
+  assert(tupleOperand->getType().isObject() &&
+         tupleOperand->getType().is<TupleType>());
+
+  SmallVector<SILValue, 8> allOperands;
+  allOperands.push_back(indexOperand);
+  allOperands.push_back(tupleOperand);
+  collectTypeDependentOperands(allOperands, F, elementType);
+
+  auto size = totalSizeToAlloc<swift::Operand>(allOperands.size());
+  auto buffer = F.getModule().allocateInst(size, alignof(TuplePackExtractInst));
+  return ::new (buffer) TuplePackExtractInst(debugLoc, allOperands, elementType,
+                                             forwardingOwnershipKind);
+}
+
 BeginCOWMutationInst::BeginCOWMutationInst(SILDebugLocation loc,
                                SILValue operand,
                                ArrayRef<SILType> resultTypes,
@@ -2553,8 +2560,8 @@ UnconditionalCheckedCastInst *UnconditionalCheckedCastInst::create(
 
 CheckedCastBranchInst *CheckedCastBranchInst::create(
     SILDebugLocation DebugLoc, bool IsExact, SILValue Operand,
-    SILType DestLoweredTy, CanType DestFormalTy, SILBasicBlock *SuccessBB,
-    SILBasicBlock *FailureBB, SILFunction &F,
+    CanType SrcFormalTy, SILType DestLoweredTy, CanType DestFormalTy,
+    SILBasicBlock *SuccessBB, SILBasicBlock *FailureBB, SILFunction &F,
     ProfileCounter Target1Count, ProfileCounter Target2Count,
     ValueOwnershipKind forwardingOwnershipKind) {
   SILModule &module = F.getModule();
@@ -2563,12 +2570,12 @@ CheckedCastBranchInst *CheckedCastBranchInst::create(
   SmallVector<SILValue, 8> TypeDependentOperands;
   collectTypeDependentOperands(TypeDependentOperands, F, DestFormalTy);
   unsigned size =
-      totalSizeToAlloc<swift::Operand>(1 + TypeDependentOperands.size());
+      totalSizeToAlloc<swift::Operand>(3 + TypeDependentOperands.size());
   void *Buffer = module.allocateInst(size, alignof(CheckedCastBranchInst));
   return ::new (Buffer) CheckedCastBranchInst(
-      DebugLoc, IsExact, Operand, TypeDependentOperands, DestLoweredTy,
-      DestFormalTy, SuccessBB, FailureBB, Target1Count, Target2Count,
-      forwardingOwnershipKind, preservesOwnership);
+      DebugLoc, IsExact, Operand, SrcFormalTy, TypeDependentOperands,
+      DestLoweredTy, DestFormalTy, SuccessBB, FailureBB, Target1Count,
+      Target2Count, forwardingOwnershipKind, preservesOwnership);
 }
 
 MetatypeInst *MetatypeInst::create(SILDebugLocation Loc, SILType Ty,
@@ -3147,47 +3154,6 @@ ReturnInst::ReturnInst(SILFunction &func, SILDebugLocation debugLoc,
   assert(ownershipKind &&
          "Conflicting ownership kinds when creating term inst from function "
          "result info?!");
-}
-
-bool ForwardingInstruction::hasSameRepresentation(SILInstruction *inst) {
-  switch (inst->getKind()) {
-  // Explicitly list instructions which definitely involve a representation
-  // change.
-  case SILInstructionKind::SwitchEnumInst:
-  default:
-    // Conservatively assume that a conversion changes representation.
-    // Operations can be added as needed to participate in SIL opaque values.
-    assert(ForwardingInstruction::isa(inst));
-    return false;
-
-  case SILInstructionKind::ConvertFunctionInst:
-  case SILInstructionKind::DestructureTupleInst:
-  case SILInstructionKind::DestructureStructInst:
-  case SILInstructionKind::InitExistentialRefInst:
-  case SILInstructionKind::ObjectInst:
-  case SILInstructionKind::OpenExistentialBoxValueInst:
-  case SILInstructionKind::OpenExistentialRefInst:
-  case SILInstructionKind::OpenExistentialValueInst:
-  case SILInstructionKind::MarkMustCheckInst:
-  case SILInstructionKind::MarkUninitializedInst:
-  case SILInstructionKind::SelectEnumInst:
-  case SILInstructionKind::StructExtractInst:
-  case SILInstructionKind::TupleExtractInst:
-    return true;
-  }
-}
-
-bool ForwardingInstruction::isAddressOnly(SILInstruction *inst) {
-  if (canForwardAllOperands(inst)) {
-    // All ForwardingInstructions that forward all operands are currently a
-    // single value instruction.
-    auto *aggregate = cast<OwnershipForwardingSingleValueInstruction>(inst);
-    // If any of the operands are address-only, then the aggregate must be.
-    return aggregate->getType().isAddressOnly(*inst->getFunction());
-  }
-  // All other forwarding instructions must forward their first operand.
-  assert(canForwardFirstOperandOnly(inst));
-  return inst->getOperand(0)->getType().isAddressOnly(*inst->getFunction());
 }
 
 // This may be called in an invalid SIL state. SILCombine creates new

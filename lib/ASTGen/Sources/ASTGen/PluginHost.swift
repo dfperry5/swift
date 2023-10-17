@@ -14,7 +14,7 @@ import CASTBridging
 import CBasicBridging
 import SwiftSyntax
 import swiftLLVMJSON
-@_spi(PluginMessage) import SwiftCompilerPluginMessageHandling
+import SwiftCompilerPluginMessageHandling
 
 enum PluginError: String, Error, CustomStringConvertible {
   case stalePlugin = "plugin is stale"
@@ -28,7 +28,7 @@ enum PluginError: String, Error, CustomStringConvertible {
 @_cdecl("swift_ASTGen_initializePlugin")
 public func _initializePlugin(
   opaqueHandle: UnsafeMutableRawPointer,
-  cxxDiagnosticEngine: UnsafeMutablePointer<UInt8>?
+  cxxDiagnosticEngine: UnsafeMutableRawPointer?
 ) -> Bool {
   let plugin = CompilerPlugin(opaqueHandle: opaqueHandle)
   let diagEngine = PluginDiagnosticsEngine(cxxDiagnosticEngine: cxxDiagnosticEngine)
@@ -37,9 +37,8 @@ public func _initializePlugin(
     try plugin.initialize()
     return true
   } catch {
-    diagEngine?.diagnose(
-      message: "compiler plugin not loaded: '\(plugin.executableFilePath); failed to initialize",
-      severity: .warning)
+    // Don't care the actual error. Probably the plugin is completely broken.
+    // The failure is diagnosed in the caller.
     return false
   }
 }
@@ -57,18 +56,14 @@ public func _deinitializePlugin(
 @_cdecl("swift_ASTGen_pluginServerLoadLibraryPlugin")
 func swift_ASTGen_pluginServerLoadLibraryPlugin(
   opaqueHandle: UnsafeMutableRawPointer,
-  libraryPath: UnsafePointer<Int8>,
-  moduleName: UnsafePointer<Int8>,
-  cxxDiagnosticEngine: UnsafeMutablePointer<UInt8>?
+  libraryPath: UnsafePointer<CChar>,
+  moduleName: UnsafePointer<CChar>,
+  errorOut: UnsafeMutablePointer<BridgedString>?
 ) -> Bool {
   let plugin =  CompilerPlugin(opaqueHandle: opaqueHandle)
-  let diagEngine = PluginDiagnosticsEngine(cxxDiagnosticEngine: cxxDiagnosticEngine)
 
   if plugin.capability?.features.contains(.loadPluginLibrary) != true {
-    // This happens only if invalid plugin server was passed to `-external-plugin-path`.
-    diagEngine?.diagnose(
-      message: "compiler plugin not loaded: '\(libraryPath); invalid plugin server",
-      severity: .warning)
+    errorOut?.pointee = allocateBridgedString("compiler plugin not loaded: '\(libraryPath); invalid plugin server")
     return false
   }
   assert(plugin.capability?.features.contains(.loadPluginLibrary) == true)
@@ -82,12 +77,15 @@ func swift_ASTGen_pluginServerLoadLibraryPlugin(
     guard case .loadPluginLibraryResult(let loaded, let diagnostics) = result else {
       throw PluginError.invalidReponseKind
     }
-    diagEngine?.emit(diagnostics);
-    return loaded
+    if loaded {
+      assert(diagnostics.isEmpty)
+      return true
+    }
+    var errorMsgs = diagnostics.map({$0.message}).joined(separator: ", ");
+    errorOut?.pointee = allocateBridgedString(errorMsgs);
+    return false
   } catch {
-    diagEngine?.diagnose(
-      message: "compiler plugin not loaded: '\(libraryPath); \(error)",
-      severity: .warning)
+    errorOut?.pointee = allocateBridgedString("\(error)")
     return false
   }
 }
@@ -121,7 +119,7 @@ struct CompilerPlugin {
 
   private func sendMessage(_ message: HostToPluginMessage) throws {
     let hadError = try LLVMJSON.encoding(message) { (data) -> Bool in
-      return Plugin_sendMessage(opaqueHandle, BridgedData(baseAddress: data.baseAddress, size: UInt(data.count)))
+      return Plugin_sendMessage(opaqueHandle, BridgedData(baseAddress: data.baseAddress, size: data.count))
     }
     if hadError {
       throw PluginError.failedToSendMessage
@@ -206,12 +204,12 @@ class PluginDiagnosticsEngine {
   private let bridgedDiagEngine: BridgedDiagnosticEngine
   private var exportedSourceFileByName: [String: UnsafePointer<ExportedSourceFile>] = [:]
 
-  init(cxxDiagnosticEngine: UnsafeMutablePointer<UInt8>) {
+  init(cxxDiagnosticEngine: UnsafeMutableRawPointer) {
     self.bridgedDiagEngine = BridgedDiagnosticEngine(raw: cxxDiagnosticEngine)
   }
 
   /// Failable convenience initializer for optional cxx engine pointer.
-  convenience init?(cxxDiagnosticEngine: UnsafeMutablePointer<UInt8>?) {
+  convenience init?(cxxDiagnosticEngine: UnsafeMutableRawPointer?) {
     guard let cxxDiagnosticEngine = cxxDiagnosticEngine else {
       return nil
     }
@@ -269,6 +267,8 @@ class PluginDiagnosticsEngine {
     case .error: bridgedSeverity = .error
     case .note: bridgedSeverity = .note
     case .warning: bridgedSeverity = .warning
+    case .remark: bridgedSeverity = .remark
+    @unknown default: bridgedSeverity = .error
     }
 
     // Emit the diagnostic

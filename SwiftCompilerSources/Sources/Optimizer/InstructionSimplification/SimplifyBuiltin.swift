@@ -28,6 +28,26 @@ extension BuiltinInst : OnoneSimplifyable {
         optimizeCanBeClass(context)
       case .AssertConf:
         optimizeAssertConfig(context)
+      case .Sizeof,
+           .Strideof,
+           .Alignof:
+        optimizeTargetTypeConst(context)
+      case .DestroyArray,
+           .CopyArray,
+           .TakeArrayNoAlias,
+           .TakeArrayFrontToBack,
+           .TakeArrayBackToFront,
+           .AssignCopyArrayNoAlias,
+           .AssignCopyArrayFrontToBack,
+           .AssignCopyArrayBackToFront,
+           .AssignTakeArray,
+           .IsPOD:
+        optimizeArgumentToThinMetatype(argument: 0, context)
+      case .CreateAsyncTask:
+        // In embedded Swift, CreateAsyncTask needs a thin metatype
+        if context.options.enableEmbeddedSwift {
+          optimizeArgumentToThinMetatype(argument: 1, context)
+        }
       default:
         if let literal = constantFold(context) {
           uses.replaceAll(with: literal, context)
@@ -81,7 +101,7 @@ private extension BuiltinInst {
     // because memory effects are not computed in the Onone pipeline, yet.
     // This is no problem because the callee (usually a global init function )is mostly very small,
     // or contains the side-effect instruction `alloc_global` right at the beginning.
-    if callee.instructions.contains(where: { $0.mayReadOrWriteMemory || $0.hasUnspecifiedSideEffects }) {
+    if callee.instructions.contains(where: hasSideEffectForBuiltinOnce) {
       return
     }
     context.erase(instruction: self)
@@ -130,6 +150,64 @@ private extension BuiltinInst {
     }
     uses.replaceAll(with: literal, context)
     context.erase(instruction: self)
+  }
+  
+  func optimizeTargetTypeConst(_ context: SimplifyContext) {
+    guard let ty = substitutionMap.replacementTypes[0] else {
+      return
+    }
+    
+    let value: Int?
+    switch id {
+    case .Sizeof:
+      value = ty.getStaticSize(context: context)
+    case .Strideof:
+      value = ty.getStaticStride(context: context)
+    case .Alignof:
+      value = ty.getStaticAlignment(context: context)
+    default:
+      fatalError()
+    }
+    
+    guard let value else {
+      return
+    }
+    
+    let builder = Builder(before: self, context)
+    let literal = builder.createIntegerLiteral(value, type: type)
+    uses.replaceAll(with: literal, context)
+    context.erase(instruction: self)
+  }
+  
+  func optimizeArgumentToThinMetatype(argument: Int, _ context: SimplifyContext) {
+    let type: Type
+
+    if let metatypeInst = operands[argument].value as? MetatypeInst {
+      type = metatypeInst.type
+    } else if let initExistentialInst = operands[argument].value as? InitExistentialMetatypeInst {
+      type = initExistentialInst.metatype.type
+    } else {
+      return
+    }
+
+    guard type.representationOfMetatype(in: parentFunction) == .Thick else {
+      return
+    }
+    
+    let instanceType = type.instanceTypeOfMetatype(in: parentFunction)
+    let builder = Builder(before: self, context)
+    let newMetatype = builder.createMetatype(of: instanceType, representation: .Thin)
+    operands[argument].set(to: newMetatype, context)
+  }
+}
+
+private func hasSideEffectForBuiltinOnce(_ instruction: Instruction) -> Bool {
+  switch instruction {
+  case is DebugStepInst, is DebugValueInst:
+    return false
+  default:
+    return instruction.mayReadOrWriteMemory ||
+           instruction.hasUnspecifiedSideEffects
   }
 }
 

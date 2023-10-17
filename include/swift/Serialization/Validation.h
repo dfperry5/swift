@@ -13,7 +13,9 @@
 #ifndef SWIFT_SERIALIZATION_VALIDATION_H
 #define SWIFT_SERIALIZATION_VALIDATION_H
 
+#include "swift/AST/Identifier.h"
 #include "swift/Basic/LLVM.h"
+#include "swift/Basic/Version.h"
 #include "swift/Serialization/SerializationOptions.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
@@ -83,6 +85,9 @@ enum class Status {
   SDKMismatch
 };
 
+/// Returns the string for the Status enum.
+std::string StatusToString(Status S);
+
 /// Returns true if the data looks like it contains a serialized AST.
 bool isSerializedAST(StringRef data);
 
@@ -123,6 +128,7 @@ class ExtendedValidationInfo {
     unsigned IsSIB : 1;
     unsigned IsStaticLibrary : 1;
     unsigned HasHermeticSealAtLink : 1;
+    unsigned IsEmbeddedSwiftModule : 1;
     unsigned IsTestable : 1;
     unsigned ResilienceStrategy : 2;
     unsigned IsImplicitDynamicEnabled : 1;
@@ -175,6 +181,10 @@ public:
   bool hasHermeticSealAtLink() const { return Bits.HasHermeticSealAtLink; }
   void setHasHermeticSealAtLink(bool val) {
     Bits.HasHermeticSealAtLink = val;
+  }
+  bool isEmbeddedSwiftModule() const { return Bits.IsEmbeddedSwiftModule; }
+  void setIsEmbeddedSwiftModule(bool val) {
+    Bits.IsEmbeddedSwiftModule = val;
   }
   bool isTestable() const { return Bits.IsTestable; }
   void setIsTestable(bool val) {

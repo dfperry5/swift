@@ -228,7 +228,7 @@ func testNoComponents() {
   let _: KeyPath<A, A> = \A // expected-error{{must have at least one component}}
   let _: KeyPath<C, A> = \C // expected-error{{must have at least one component}}
   // expected-error@-1 {{generic parameter 'T' could not be inferred}}
-  let _: KeyPath<A, C> = \A // expected-error{{must have at least one component}} 
+  let _: KeyPath<A, C> = \A // expected-error{{must have at least one component}}
   // expected-error@-1 {{generic parameter 'T' could not be inferred}}
   _ = \A // expected-error {{key path must have at least one component}}
 }
@@ -794,8 +794,11 @@ func test_keypath_with_method_refs() {
   }
 
   let _: KeyPath<S, Int> = \.foo // expected-error {{key path cannot refer to instance method 'foo()'}}
-  // expected-error@-1 {{key path value type '() -> Int' cannot be converted to contextual type 'Int'}}
-  let _: KeyPath<S, Int> = \.bar // expected-error {{key path cannot refer to static member 'bar()'}}
+  // expected-error@-1 {{cannot assign value of type 'KeyPath<S, () -> Int>' to type 'KeyPath<S, Int>'}}
+  // expected-note@-2 {{arguments to generic parameter 'Value' ('() -> Int' and 'Int') are expected to be equal}}
+  let _: KeyPath<S, Int> = \.bar // expected-error {{key path cannot refer to static method 'bar()'}}
+  // expected-error@-1 {{cannot assign value of type 'KeyPath<S, () -> Int>' to type 'KeyPath<S, Int>'}}
+  // expected-note@-2 {{arguments to generic parameter 'Value' ('() -> Int' and 'Int') are expected to be equal}}
   let _ = \S.Type.bar // expected-error {{key path cannot refer to static method 'bar()'}}
 
   struct A {
@@ -808,7 +811,7 @@ func test_keypath_with_method_refs() {
   }
 
   let _: KeyPath<A, Int> = \.foo.bar // expected-error {{key path cannot refer to instance method 'foo()'}}
-  let _: KeyPath<A, Int> = \.faz.bar // expected-error {{key path cannot refer to static member 'faz()'}}
+  let _: KeyPath<A, Int> = \.faz.bar // expected-error {{key path cannot refer to static method 'faz()'}}
   let _ = \A.foo.bar // expected-error {{key path cannot refer to instance method 'foo()'}}
   let _ = \A.Type.faz.bar // expected-error {{key path cannot refer to static method 'faz()'}}
 }
@@ -918,13 +921,12 @@ func testKeyPathHole() {
   provideValueButNotRoot(\.x.y) // expected-error {{cannot infer key path type from context; consider explicitly specifying a root type}}
   provideValueButNotRoot(\String.foo) // expected-error {{value of type 'String' has no member 'foo'}}
 
-  func provideKPValueButNotRoot<T>(_ kp: KeyPath<T, String>) {} // expected-note {{in call to function 'provideKPValueButNotRoot'}}
+  func provideKPValueButNotRoot<T>(_ kp: KeyPath<T, String>) {} 
   provideKPValueButNotRoot(\.x) // expected-error {{cannot infer key path type from context; consider explicitly specifying a root type}}
   provideKPValueButNotRoot(\.x.y) // expected-error {{cannot infer key path type from context; consider explicitly specifying a root type}}
 
   provideKPValueButNotRoot(\String.foo)
   // expected-error@-1 {{value of type 'String' has no member 'foo'}}
-  // expected-error@-2 {{generic parameter 'T' could not be inferred}}
 }
 
 func testMissingMember() {
@@ -1008,16 +1010,10 @@ func testMemberAccessOnOptionalKeyPathComponent() {
   func kp(_: KeyPath<String?, Int>) {}
 
   kp(\.count) // expected-error {{key path root inferred as optional type 'String?' must be unwrapped to refer to member 'count' of unwrapped type 'String'}}
-  // expected-note@-1 {{chain the optional using '?.' to access unwrapped type member 'count'}} {{8-8=?.}}
-  // expected-note@-2 {{unwrap the optional using '!.' to access unwrapped type member 'count'}} {{8-8=!.}}
   let _ : KeyPath<String?, Int> = \.count // expected-error {{key path root inferred as optional type 'String?' must be unwrapped to refer to member 'count' of unwrapped type 'String'}}
-  // expected-note@-1 {{chain the optional using '?.' to access unwrapped type member 'count'}} {{37-37=?.}}
-  // expected-note@-2 {{unwrap the optional using '!.' to access unwrapped type member 'count'}} {{37-37=!.}}
 
   let _ : KeyPath<String?, Int> = \.utf8.count 
   // expected-error@-1 {{key path root inferred as optional type 'String?' must be unwrapped to refer to member 'utf8' of unwrapped type 'String'}}
-  // expected-note@-2 {{chain the optional using '?.' to access unwrapped type member 'utf8'}} {{37-37=?.}}
-  // expected-note@-3 {{unwrap the optional using '!.' to access unwrapped type member 'utf8'}} {{37-37=!.}}
 }
 
 func testSyntaxErrors() {
@@ -1067,8 +1063,9 @@ func f_56996() {
 // https://github.com/apple/swift/issues/55805
 // Key-path missing optional crashes compiler: Inactive constraints left over?
 func f_55805() {
-  let _: KeyPath<String?, Int?> = \.utf8.count // expected-error {{value of optional type 'String.UTF8View?' must be unwrapped to refer to member 'count' of wrapped base type 'String.UTF8View'}}
-  // expected-note@-1 {{chain the optional using '?' to access member 'count' only for non-'nil' base values}}
+  let _: KeyPath<String?, Int?> = \.utf8.count
+  // expected-error@-1 {{key path root inferred as optional type 'String?' must be unwrapped to refer to member 'utf8' of unwrapped type 'String'}}
+  // expected-error@-2 {{key path value type 'Int' cannot be converted to contextual type 'Int?'}}
 }
 
 // rdar://74711236 - crash due to incorrect member access in key path
@@ -1180,4 +1177,50 @@ func f_56854() {
     .map { ($0.1, $0.2) } // expected-error {{value of type 'Any' has no member '1'}} expected-error{{value of type 'Any' has no member '2'}}
     // expected-note@-1 2 {{cast 'Any' to 'AnyObject' or use 'as!' to force downcast to a more specific type to access members}}
   }
+}
+
+// rdar://93103421 - Key path type inference doesn't work when the context is an existential type with a key-path superclass
+extension KeyPath : P {
+  var member: String { "" }
+}
+
+func test_keypath_inference_from_existentials() {
+  struct A<T> : P {
+    var member: String { "a" }
+    var other: T { fatalError() }
+  }
+
+  func test<T, U>(_: any P & KeyPath<A<T>, U>, _: T) {
+  }
+
+  let _: any P & KeyPath<A<Int>, String> = \.member   // Ok
+  let _: (any P & KeyPath<A<Int>, String>) = \.member // Ok
+
+  test(\.other, 42)  // Ok
+  test(\.member, "") // Ok
+}
+
+// rdar://116376651 - key path type is bound before context is fully resolved.
+func keypath_to_func_conversion_as_arg_to_overloaded_func() {
+  struct Data {
+    var value: Int = 42
+  }
+
+  func test<S: Sequence>(_: S, _: (S.Element) -> Int) {}
+  func test<C: Collection>(_: C, _: (C.Element) -> Int) {}
+
+  func test(arr: [Data]) {
+    test(arr, \Data.value) // Ok
+  }
+}
+
+// https://github.com/apple/swift/issues/55436
+func test_keypath_coercion_to_function() {
+  struct User {
+    let email: String
+  }
+
+  let users = [User]()
+  let fn = \User.email as (User) -> String // Ok
+  _ = users.map(fn) // Ok
 }

@@ -658,18 +658,36 @@ bool LifetimeChecker::shouldEmitError(const SILInstruction *Inst) {
       }))
     return false;
 
-  // Ignore loads used only by an assign_by_wrapper setter. This
-  // is safe to ignore because assign_by_wrapper will only be
-  // re-written to use the setter if the value is fully initialized.
+  // Ignore loads used only by an assign_by_wrapper or assign_or_init setter.
+  // This is safe to ignore because assign_by_wrapper/assign_or_init will
+  // only be re-written to use the setter if the value is fully initialized.
   if (auto *load = dyn_cast<SingleValueInstruction>(Inst)) {
-    if (auto Op = load->getSingleUse()) {
-      if (auto PAI = dyn_cast<PartialApplyInst>(Op->getUser())) {
-        if (std::find_if(PAI->use_begin(), PAI->use_end(),
-                         [](auto PAIUse) {
-                           return isa<AssignByWrapperInst>(PAIUse->getUser());
-                         }) != PAI->use_end()) {
-          return false;
-        }
+    auto isOnlyUsedByPartialApply =
+        [&](const SingleValueInstruction *inst) -> PartialApplyInst * {
+      Operand *result = nullptr;
+      for (auto *op : inst->getUses()) {
+        auto *user = op->getUser();
+
+        // Ignore copies, destroys and borrows because they'd be
+        // erased together with the setter.
+        if (isa<DestroyValueInst>(user) || isa<CopyValueInst>(user) ||
+            isa<BeginBorrowInst>(user) || isa<EndBorrowInst>(user))
+          continue;
+
+        if (result)
+          return nullptr;
+
+        result = op;
+      }
+      return result ? dyn_cast<PartialApplyInst>(result->getUser()) : nullptr;
+    };
+
+    if (auto *PAI = isOnlyUsedByPartialApply(load)) {
+      if (std::find_if(PAI->use_begin(), PAI->use_end(), [](auto PAIUse) {
+            return isa<AssignByWrapperInst>(PAIUse->getUser()) ||
+                   isa<AssignOrInitInst>(PAIUse->getUser());
+          }) != PAI->use_end()) {
+        return false;
       }
     }
   }
@@ -1027,7 +1045,7 @@ void LifetimeChecker::injectActorHops() {
     break;
 
   case ActorIsolation::Unspecified:
-  case ActorIsolation::Independent:
+  case ActorIsolation::Nonisolated:
   case ActorIsolation::GlobalActorUnsafe:
   case ActorIsolation::GlobalActor:
     return;
@@ -1181,6 +1199,12 @@ void LifetimeChecker::doIt() {
 
     while (returnBB != F.end()) {
       auto *terminator = returnBB->getTerminator();
+
+      // If this is an unreachable block, let's ignore it.
+      if (isa<UnreachableInst>(terminator)) {
+        ++returnBB;
+        continue;
+      }
 
       if (!isInitializedAtUse(DIMemoryUse(terminator, DIUseKind::Load, 0, 1)))
         diagnoseMissingInit();
@@ -1454,7 +1478,7 @@ void LifetimeChecker::handleStoreUse(unsigned UseID) {
     Type selfTy;
     SILLocation fnLoc = TheMemory.getFunction().getLocation();
     if (auto *ctor = fnLoc.getAsASTNode<ConstructorDecl>())
-      selfTy = ctor->getImplicitSelfDecl()->getType();
+      selfTy = ctor->getImplicitSelfDecl()->getTypeInContext();
     else
       selfTy = TheMemory.getASTType();
 
@@ -1501,6 +1525,16 @@ void LifetimeChecker::handleStoreUse(unsigned UseID) {
     auto allFieldsInitialized =
         getAnyUninitializedMemberAtInst(Use.Inst, 0,
                                         TheMemory.getNumElements()) == -1;
+
+    auto *AOI = cast<AssignOrInitInst>(Use.Inst);
+    // init accessor properties without setters behave like `let` properties
+    // and don't support re-initialization.
+    if (isa<SILUndef>(AOI->getSetter())) {
+      diagnose(Module, AOI->getLoc(),
+               diag::immutable_property_already_initialized,
+               AOI->getPropertyName());
+    }
+
     Use.Kind = allFieldsInitialized ? DIUseKind::Set : DIUseKind::Assign;
   } else if (isFullyInitialized) {
     Use.Kind = DIUseKind::Assign;
@@ -2381,6 +2415,21 @@ void LifetimeChecker::updateInstructionForInitState(unsigned UseID) {
     CA->setIsInitializationOfDest(InitKind);
     if (InitKind == IsInitialization)
       setStaticInitAccess(CA->getDest());
+
+    // If we had an initialization and had an assignable_but_not_consumable
+    // noncopyable type, convert it to be an initable_but_not_consumable so that
+    // we do not consume an uninitialized value.
+    if (InitKind == IsInitialization) {
+      if (auto *mmci = dyn_cast<MarkUnresolvedNonCopyableValueInst>(
+              stripAccessMarkers(CA->getDest()))) {
+        if (mmci->getCheckKind() == MarkUnresolvedNonCopyableValueInst::
+                                        CheckKind::AssignableButNotConsumable) {
+          mmci->setCheckKind(MarkUnresolvedNonCopyableValueInst::CheckKind::
+                                 InitableButNotConsumable);
+        }
+      }
+    }
+
     return;
   }
 
@@ -2412,19 +2461,19 @@ void LifetimeChecker::updateInstructionForInitState(unsigned UseID) {
                                 : AssignOwnershipQualifier::Reassign));
     }
 
-    // Look and see if we are assigning a moveonly type into a mark_must_check
-    // [assignable_but_not_consumable]. If we are, then we need to transition
-    // its flag to initable_but_not_assignable.
+    // Look and see if we are assigning a moveonly type into a
+    // mark_unresolved_non_copyable_value [assignable_but_not_consumable]. If we
+    // are, then we need to transition its flag to initable_but_not_assignable.
     //
     // NOTE: We should only ever have to do this for a single level since SILGen
     // always initializes values completely and we enforce that invariant.
     if (InitKind == IsInitialization) {
-      if (auto *mmci =
-              dyn_cast<MarkMustCheckInst>(stripAccessMarkers(AI->getDest()))) {
-        if (mmci->getCheckKind() ==
-                MarkMustCheckInst::CheckKind::AssignableButNotConsumable) {
-          mmci->setCheckKind(
-              MarkMustCheckInst::CheckKind::InitableButNotConsumable);
+      if (auto *mmci = dyn_cast<MarkUnresolvedNonCopyableValueInst>(
+              stripAccessMarkers(AI->getDest()))) {
+        if (mmci->getCheckKind() == MarkUnresolvedNonCopyableValueInst::
+                                        CheckKind::AssignableButNotConsumable) {
+          mmci->setCheckKind(MarkUnresolvedNonCopyableValueInst::CheckKind::
+                                 InitableButNotConsumable);
         }
       }
       setStaticInitAccess(AI->getDest());
@@ -3671,25 +3720,14 @@ static bool checkDefiniteInitialization(SILFunction &Fn) {
   BlockStates blockStates(&Fn);
 
   for (auto &BB : Fn) {
-    for (auto I = BB.begin(), E = BB.end(); I != E;) {
-      SILInstruction *Inst = &*I;
-
-      auto *MUI = dyn_cast<MarkUninitializedInst>(Inst);
-      if (!MUI) {
-        ++I;
-        continue;
+    for (SILInstruction &inst : BB) {
+      if (auto *MUI = dyn_cast<MarkUninitializedInst>(&inst)) {
+        processMemoryObject(MUI, blockStates);
+        Changed = true;
+        // mark_uninitialized needs to remain in SIL for mandatory passes which
+        // follow DI, like LetPropertyLowering.
+        // It will be eventually removed by RawSILInstLowering.
       }
-
-      // Then process the memory object.
-      processMemoryObject(MUI, blockStates);
-
-      // Move off of the MUI only after we have processed memory objects. The
-      // lifetime checker may rewrite instructions, so it is important to not
-      // move onto the next element until after it runs.
-      ++I;
-      MUI->replaceAllUsesWith(MUI->getOperand());
-      MUI->eraseFromParent();
-      Changed = true;
     }
   }
 

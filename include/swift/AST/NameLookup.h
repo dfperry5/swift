@@ -18,6 +18,7 @@
 #define SWIFT_AST_NAME_LOOKUP_H
 
 #include "swift/AST/ASTVisitor.h"
+#include "swift/AST/CatchNode.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/Module.h"
@@ -242,6 +243,8 @@ enum class UnqualifiedLookupFlags {
   IncludeUsableFromInline = 1 << 5,
   /// This lookup should exclude any names introduced by macro expansions.
   ExcludeMacroExpansions = 1 << 6,
+  /// This lookup should only return macros.
+  MacroLookup            = 1 << 7,
 };
 
 using UnqualifiedLookupOptions = OptionSet<UnqualifiedLookupFlags>;
@@ -618,17 +621,6 @@ SelfBounds getSelfBoundsFromWhereClause(
 /// given protocol or protocol extension.
 SelfBounds getSelfBoundsFromGenericSignature(const ExtensionDecl *extDecl);
 
-/// Retrieve the TypeLoc at the given \c index from among the set of
-/// type declarations that are directly "inherited" by the given declaration.
-inline const TypeLoc &getInheritedTypeLocAtIndex(
-    llvm::PointerUnion<const TypeDecl *, const ExtensionDecl *> decl,
-    unsigned index) {
-  if (auto typeDecl = decl.dyn_cast<const TypeDecl *>())
-    return typeDecl->getInherited()[index];
-
-  return decl.get<const ExtensionDecl *>()->getInherited()[index];
-}
-
 namespace namelookup {
 
 /// Searches through statements and patterns for local variable declarations.
@@ -665,6 +657,7 @@ private:
   void visitFailStmt(FailStmt *) {}
   void visitReturnStmt(ReturnStmt *) {}
   void visitYieldStmt(YieldStmt *) {}
+  void visitThenStmt(ThenStmt *) {}
   void visitThrowStmt(ThrowStmt *) {}
   void visitDiscardStmt(DiscardStmt *) {}
   void visitPoundAssertStmt(PoundAssertStmt *) {}
@@ -840,6 +833,25 @@ public:
   static void lookupEnclosingMacroScope(
       SourceFile *sourceFile, SourceLoc loc,
       llvm::function_ref<bool(PotentialMacro macro)> consume);
+
+  /// Look up the scope tree for the nearest point at which an error thrown from
+  /// this location can be caught or rethrown.
+  ///
+  /// For example, given this code:
+  ///
+  /// \code
+  /// func f() throws {
+  ///   do {
+  ///     try g() // A
+  ///   } catch {
+  ///     throw ErrorWrapper(error) // B
+  ///   }
+  /// }
+  /// \endcode
+  ///
+  /// At the point marked A, the catch node is the enclosing do...catch
+  /// statement. At the point marked B, the catch node is the function itself.
+  static CatchNode lookupCatchNode(ModuleDecl *module, SourceLoc loc);
 
   SWIFT_DEBUG_DUMP;
   void print(llvm::raw_ostream &) const;

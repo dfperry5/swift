@@ -217,6 +217,10 @@ namespace irgen {
 
   void emitTaskCancel(IRGenFunction &IGF, llvm::Value *task);
 
+  llvm::Value *addEmbeddedSwiftResultTypeInfo(IRGenFunction &IGF,
+                                              llvm::Value *taskOptions,
+                                              SubstitutionMap subs);
+
   /// Emit a call to swift_task_create[_f] with the given flags, options, and
   /// task function.
   llvm::Value *emitTaskCreate(
@@ -261,12 +265,15 @@ namespace irgen {
                        CanSILFunctionType fnType, Explosion &result,
                        Explosion &error);
 
-  Address emitAutoDiffCreateLinearMapContext(
-      IRGenFunction &IGF, llvm::Value *topLevelSubcontextSize);
+  Address emitAutoDiffCreateLinearMapContextWithType(
+      IRGenFunction &IGF, llvm::Value *topLevelSubcontextMetatype);
+
   Address emitAutoDiffProjectTopLevelSubcontext(
       IRGenFunction &IGF, Address context);
-  Address emitAutoDiffAllocateSubcontext(
-      IRGenFunction &IGF, Address context, llvm::Value *size);
+
+  Address
+  emitAutoDiffAllocateSubcontextWithType(IRGenFunction &IGF, Address context,
+                                         llvm::Value *subcontextMetatype);
 
   FunctionPointer getFunctionPointerForDispatchCall(IRGenModule &IGM,
                                                     const FunctionPointer &fn);

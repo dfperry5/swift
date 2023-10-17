@@ -50,6 +50,10 @@ class SILModuleConventions {
   friend SILResultInfo;
   friend SILFunctionConventions;
 
+  static inline bool
+  isTypeIndirectForIndirectParamConvention(CanType paramTy,
+                                           bool loweredAddresses);
+
   static bool isIndirectSILParam(SILParameterInfo param,
                                  bool loweredAddresses);
 
@@ -96,6 +100,10 @@ public:
   SILModule &getModule() const { return *M; }
 
   bool useLoweredAddresses() const { return loweredAddresses; }
+
+  bool isTypeIndirectForIndirectParamConvention(CanType paramTy) {
+    return isTypeIndirectForIndirectParamConvention(paramTy, loweredAddresses);
+  }
 
   bool isSILIndirect(SILParameterInfo param) const {
     return isIndirectSILParam(param, loweredAddresses);
@@ -206,6 +214,11 @@ public:
     return getSILType(funcTy->getErrorResult(), context);
   }
 
+  bool isTypedError() const {
+    return !funcTy->getErrorResult()
+        .getInterfaceType()->isExistentialWithError();
+  }
+
   /// Returns an array of result info.
   /// Provides convenient access to the underlying SILFunctionType.
   ArrayRef<SILResultInfo> getResults() const {
@@ -219,8 +232,20 @@ public:
                                     : funcTy->getNumPackResults();
   }
 
+  /// Get the number of SIL error results passed as address-typed arguments.
+  unsigned getNumIndirectSILErrorResults() const {
+    if (!silConv.loweredAddresses)
+      return 0;
+    if (auto errorResultInfo = funcTy->getOptionalErrorResult()) {
+      return errorResultInfo->getConvention() == ResultConvention::Indirect ? 1 : 0;
+    }
+
+    return 0;
+  }
+
   /// Are any SIL results passed as address-typed arguments?
   bool hasIndirectSILResults() const { return getNumIndirectSILResults() != 0; }
+  bool hasIndirectSILErrorResults() const { return getNumIndirectSILErrorResults() != 0; }
 
   struct IndirectSILResultFilter {
     bool loweredAddresses;
@@ -368,7 +393,7 @@ public:
   unsigned getSILArgIndexOfFirstIndirectResult() const { return 0; }
 
   unsigned getSILArgIndexOfFirstParam() const {
-    return getNumIndirectSILResults();
+    return getNumIndirectSILResults() + getNumIndirectSILErrorResults();
   }
 
   /// Returns the index of self.
@@ -397,13 +422,15 @@ public:
   /// this function type. This is also the total number of SILArguments
   /// in the entry block.
   unsigned getNumSILArguments() const {
-    return getNumIndirectSILResults() + funcTy->getNumParameters();
+    return getNumIndirectSILResults() + getNumIndirectSILErrorResults() +
+      funcTy->getNumParameters();
   }
 
   SILParameterInfo getParamInfoForSILArg(unsigned index) const {
-    assert(index >= getNumIndirectSILResults()
+    assert(index >= (getNumIndirectSILResults() + getNumIndirectSILErrorResults())
            && index <= getNumSILArguments());
-    return funcTy->getParameters()[index - getNumIndirectSILResults()];
+    return funcTy->getParameters()[index - getNumIndirectSILResults()
+                                         - getNumIndirectSILErrorResults()];
   }
 
   /// Return the SIL argument convention of apply/entry argument at
@@ -505,11 +532,20 @@ inline SILType
 SILFunctionConventions::getSILArgumentType(unsigned index,
                                            TypeExpansionContext context) const {
   assert(index <= getNumSILArguments());
-  if (index < getNumIndirectSILResults()) {
+  auto numIndirectSILResults = getNumIndirectSILResults();
+  if (index < numIndirectSILResults) {
     return *std::next(getIndirectSILResultTypes(context).begin(), index);
   }
+
+  auto numIndirectSILErrorResults = getNumIndirectSILErrorResults();
+  if (numIndirectSILErrorResults &&
+      (index < (numIndirectSILResults + numIndirectSILErrorResults))) {
+    return getSILType(funcTy->getErrorResult(), context);
+  }
+
   return getSILType(
-      funcTy->getParameters()[index - getNumIndirectSILResults()], context);
+      funcTy->getParameters()[index - numIndirectSILResults -
+                              numIndirectSILErrorResults], context);
 }
 
 inline bool
@@ -520,6 +556,12 @@ SILFunctionConventions::isNoReturn(TypeExpansionContext context) const {
 inline SILFunctionConventions
 SILModuleConventions::getFunctionConventions(CanSILFunctionType funcTy) {
   return SILFunctionConventions(funcTy, *this);
+}
+
+inline bool SILModuleConventions::isTypeIndirectForIndirectParamConvention(
+    CanType paramTy, bool loweredAddresses) {
+  return (loweredAddresses || paramTy->isOpenedExistentialWithError() ||
+          paramTy->hasAnyPack());
 }
 
 inline bool SILModuleConventions::isIndirectSILParam(SILParameterInfo param,
@@ -537,8 +579,8 @@ inline bool SILModuleConventions::isIndirectSILParam(SILParameterInfo param,
 
   case ParameterConvention::Indirect_In:
   case ParameterConvention::Indirect_In_Guaranteed:
-    return (loweredAddresses ||
-            param.getInterfaceType()->isOpenedExistentialWithError());
+    return isTypeIndirectForIndirectParamConvention(param.getInterfaceType(),
+                                                    loweredAddresses);
   case ParameterConvention::Indirect_Inout:
   case ParameterConvention::Indirect_InoutAliasable:
     return true;

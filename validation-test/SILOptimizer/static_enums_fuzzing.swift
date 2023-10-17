@@ -12,7 +12,7 @@
 createTestfile()
 
 func createTestfile() {
-  let globals = createGlobals(count: 500)
+  let globals = createGlobals(count: 1000)
 
   print(typeDefinitions)
 
@@ -73,10 +73,28 @@ var typeDefinitions: String {
       case X, Y, Z
     }
 
+    public enum SPSCE<T> {
+      case A(T)
+    }
+
+    public enum SCEWP {
+      case A
+    }
+
+    public enum SPE<T> {
+      case A(T)
+      case B
+    }
+
     public enum MPE<T, V> {
       case A(T)
       case B(V)
       case C
+    }
+
+    public enum E24 {
+      case A
+      case B(UInt8, UInt8, UInt8)
     }
 
     public func fn() {}
@@ -280,6 +298,99 @@ struct Enum : Value {
   }
 }
 
+struct SinglePayloadSingleCaseEnum : Value {
+  let payload: any Value
+  
+  init(generator: inout RandomGenerator, depth: Int) {
+    self.payload = generator.createValue(depth: depth)
+  }
+  
+  func getType() -> String {
+    "SPSCE<\(payload.getType())>"
+  }
+
+  func getInitValue() -> String  {
+    return "SPSCE.A(\(payload.getInitValue()))"
+  }
+
+  func getExpectedOutput(topLevel: Bool) -> String  {
+    let prefix = topLevel ? "" : "\(getRuntimeTypeName(topLevel: topLevel))."
+    return "\(prefix)A(\(payload.getExpectedOutput(topLevel: false)))"
+  }
+
+  func getRuntimeTypeName(topLevel: Bool) -> String {
+    let prefix = topLevel ? "" : "test."
+    return "\(prefix)SPSCE<\(payload.getRuntimeTypeName(topLevel: topLevel))>"
+  }
+
+  var containsEnum: Bool { true }
+}
+
+struct SingleCaseEnumWithoutPayload : Value {
+  
+  init(generator: inout RandomGenerator, depth: Int) {
+  }
+  
+  func getType() -> String {
+    "SCEWP"
+  }
+
+  func getInitValue() -> String  {
+    return "SCEWP.A"
+  }
+
+  func getExpectedOutput(topLevel: Bool) -> String  {
+    let prefix = topLevel ? "" : "\(getRuntimeTypeName(topLevel: topLevel))."
+    return "\(prefix)A"
+  }
+
+  func getRuntimeTypeName(topLevel: Bool) -> String {
+    let prefix = topLevel ? "" : "test."
+    return "\(prefix)SCEWP"
+  }
+
+  var containsEnum: Bool { true }
+}
+
+
+struct SinglePayloadEnum : Value {
+  let payload: any Value
+  let caseIdx: Int
+  
+  init(generator: inout RandomGenerator, depth: Int) {
+    self.caseIdx = Int.random(in: 0..<2, using: &generator)
+    self.payload = generator.createValue(depth: depth)
+  }
+  
+  func getType() -> String {
+    "SPE<\(payload.getType())>"
+  }
+
+  func getInitValue() -> String  {
+    switch caseIdx {
+      case 0: return "SPE.A(\(payload.getInitValue()))"
+      case 1: return "SPE.B"
+      default: fatalError()
+    }
+  }
+
+  func getExpectedOutput(topLevel: Bool) -> String  {
+    let prefix = topLevel ? "" : "\(getRuntimeTypeName(topLevel: topLevel))."
+    switch caseIdx {
+      case 0: return "\(prefix)A(\(payload.getExpectedOutput(topLevel: false)))"
+      case 1: return "\(prefix)B"
+      default: fatalError()
+    }
+  }
+
+  func getRuntimeTypeName(topLevel: Bool) -> String {
+    let prefix = topLevel ? "" : "test."
+    return "\(prefix)SPE<\(payload.getRuntimeTypeName(topLevel: topLevel))>"
+  }
+
+  var containsEnum: Bool { true }
+}
+
 struct MultiPayloadEnum : Value {
   let payloadA: any Value
   let payloadB: any Value
@@ -317,6 +428,42 @@ struct MultiPayloadEnum : Value {
   func getRuntimeTypeName(topLevel: Bool) -> String {
     let prefix = topLevel ? "" : "test."
     return "\(prefix)MPE<\(payloadA.getRuntimeTypeName(topLevel: topLevel)), \(payloadB.getRuntimeTypeName(topLevel: topLevel))>"
+  }
+
+  var containsEnum: Bool { true }
+}
+
+struct Size24Enum : Value {
+  let caseIdx: Int
+  
+  init(generator: inout RandomGenerator, depth: Int) {
+    self.caseIdx = Int.random(in: 0..<2, using: &generator)
+  }
+  
+  func getType() -> String {
+    "E24"
+  }
+
+  func getInitValue() -> String  {
+    switch caseIdx {
+      case 0: return "E24.A"
+      case 1: return "E24.B(250, 128, 114)"
+      default: fatalError()
+    }
+  }
+
+  func getExpectedOutput(topLevel: Bool) -> String  {
+    let prefix = topLevel ? "" : "\(getRuntimeTypeName(topLevel: topLevel))."
+    switch caseIdx {
+      case 0: return "\(prefix)A"
+      case 1: return "\(prefix)B(250, 128, 114)"
+      default: fatalError()
+    }
+  }
+
+  func getRuntimeTypeName(topLevel: Bool) -> String {
+    let prefix = topLevel ? "" : "test."
+    return "\(prefix)E24"
   }
 
   var containsEnum: Bool { true }
@@ -360,11 +507,15 @@ struct RandomGenerator : RandomNumberGenerator {
     SmallString.self,
     LargeString.self,
     Function.self,
-    Enum.self
+    Enum.self,
+    Size24Enum.self,
+    SingleCaseEnumWithoutPayload.self
   ]
   private static let allValueTypes: [any Value.Type] = allTerminalTypes + [
     OptionalValue.self,
     Struct.self,
+    SinglePayloadSingleCaseEnum.self,
+    SinglePayloadEnum.self,
     MultiPayloadEnum.self
   ]
 

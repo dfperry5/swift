@@ -172,6 +172,10 @@ protected:
       kind : 1
     );
 
+    SWIFT_INLINE_BITFIELD(ExposeAttr, DeclAttribute, NumExposureKindBits,
+      kind : NumExposureKindBits
+    );
+
     SWIFT_INLINE_BITFIELD(SynthesizedProtocolAttr, DeclAttribute, 1,
       isUnchecked : 1
     );
@@ -1427,6 +1431,7 @@ class SpecializeAttr final
       private llvm::TrailingObjects<SpecializeAttr, Identifier,
                                     AvailableAttr *, Type> {
   friend class SpecializeAttrTargetDeclRequest;
+  friend class SerializeAttrGenericSignatureRequest;
   friend TrailingObjects;
 
 public:
@@ -1519,14 +1524,6 @@ public:
 
   TrailingWhereClause *getTrailingWhereClause() const;
 
-  GenericSignature getSpecializedSignature() const {
-    return specializedSignature;
-  }
-
-  void setSpecializedSignature(GenericSignature newSig) {
-    specializedSignature = newSig;
-  }
-
   bool isExported() const {
     return Bits.SpecializeAttr.exported;
   }
@@ -1550,70 +1547,54 @@ public:
   /// \p forDecl is the value decl that the attribute belongs to.
   ValueDecl *getTargetFunctionDecl(const ValueDecl *forDecl) const;
 
+  /// \p forDecl is the value decl that the attribute belongs to.
+  GenericSignature
+  getSpecializedSignature(const AbstractFunctionDecl *forDecl) const;
+
   static bool classof(const DeclAttribute *DA) {
     return DA->getKind() == DAK_Specialize;
   }
 };
 
-class InitializesAttr final
+class StorageRestrictionsAttr final
     : public DeclAttribute,
-      private llvm::TrailingObjects<InitializesAttr, Identifier> {
+      private llvm::TrailingObjects<StorageRestrictionsAttr, Identifier> {
   friend TrailingObjects;
 
-  size_t numProperties;
-
-  InitializesAttr(SourceLoc atLoc, SourceRange range,
-                  ArrayRef<Identifier> properties);
-
-public:
-  static InitializesAttr *create(ASTContext &ctx,
-                                 SourceLoc atLoc, SourceRange range,
-                                 ArrayRef<Identifier> properties);
+  size_t NumInitializes;
+  size_t NumAccesses;
 
   size_t numTrailingObjects(OverloadToken<Identifier>) const {
-    return numProperties;
+    return NumInitializes + NumAccesses;
   }
-
-  unsigned getNumProperties() const { return numProperties; }
-
-  ArrayRef<Identifier> getProperties() const {
-    return {getTrailingObjects<Identifier>(), numProperties};
-  }
-
-  ArrayRef<VarDecl *> getPropertyDecls(AccessorDecl *attachedTo) const;
-
-  static bool classof(const DeclAttribute *DA) {
-    return DA->getKind() == DAK_Initializes;
-  }
-};
-
-class AccessesAttr final
-    : public DeclAttribute,
-      private llvm::TrailingObjects<AccessesAttr, Identifier> {
-  friend TrailingObjects;
-
-  size_t numProperties;
-
-  AccessesAttr(SourceLoc atLoc, SourceRange range,
-               ArrayRef<Identifier> properties);
 
 public:
-  static AccessesAttr *create(ASTContext &ctx,
-                              SourceLoc atLoc, SourceRange range,
-                              ArrayRef<Identifier> properties);
+  StorageRestrictionsAttr(SourceLoc AtLoc, SourceRange Range,
+                          ArrayRef<Identifier> initializes,
+                          ArrayRef<Identifier> accesses, bool Implicit);
 
-  size_t numTrailingObjects(OverloadToken<Identifier>) const {
-    return numProperties;
+  unsigned getNumInitializesProperties() const { return NumInitializes; }
+
+  unsigned getNumAccessesProperties() const { return NumAccesses; }
+
+  ArrayRef<Identifier> getInitializesNames() const {
+    return {getTrailingObjects<Identifier>(), NumInitializes};
   }
 
-  ArrayRef<Identifier> getProperties() const {
-    return {getTrailingObjects<Identifier>(), numProperties};
+  ArrayRef<Identifier> getAccessesNames() const {
+    return {getTrailingObjects<Identifier>() + NumInitializes, NumAccesses};
   }
 
-  ArrayRef<VarDecl *> getPropertyDecls(AccessorDecl *attachedTo) const;
+  ArrayRef<VarDecl *> getInitializesProperties(AccessorDecl *attachedTo) const;
+  ArrayRef<VarDecl *> getAccessesProperties(AccessorDecl *attachedTo) const;
+
+  static StorageRestrictionsAttr *create(ASTContext &ctx, SourceLoc atLoc,
+                                         SourceRange range,
+                                         ArrayRef<Identifier> initializes,
+                                         ArrayRef<Identifier> accesses);
 
   static bool classof(const DeclAttribute *DA) {
-    return DA->getKind() == DAK_Accesses;
+    return DA->getKind() == DAK_StorageRestrictions;
   }
 };
 
@@ -2332,17 +2313,47 @@ public:
 /// header used by C/C++ to interoperate with Swift.
 class ExposeAttr : public DeclAttribute {
 public:
-  ExposeAttr(StringRef Name, SourceLoc AtLoc, SourceRange Range, bool Implicit)
-      : DeclAttribute(DAK_Expose, AtLoc, Range, Implicit), Name(Name) {}
+  ExposeAttr(StringRef Name, SourceLoc AtLoc, SourceRange Range,
+             ExposureKind Kind, bool Implicit)
+      : DeclAttribute(DAK_Expose, AtLoc, Range, Implicit), Name(Name) {
+    Bits.ExposeAttr.kind = static_cast<unsigned>(Kind);
+  }
 
-  ExposeAttr(StringRef Name, bool Implicit)
-      : ExposeAttr(Name, SourceLoc(), SourceRange(), Implicit) {}
+  ExposeAttr(StringRef Name, ExposureKind Kind, bool Implicit)
+      : ExposeAttr(Name, SourceLoc(), SourceRange(), Kind, Implicit) {}
 
   /// The exposed declaration name.
   const StringRef Name;
 
+  /// Returns the kind of exposure.
+  ExposureKind getExposureKind() const {
+    return static_cast<ExposureKind>(Bits.ExposeAttr.kind);
+  }
+
   static bool classof(const DeclAttribute *DA) {
     return DA->getKind() == DAK_Expose;
+  }
+};
+
+/// Define the `@_extern` attribute, used to import external declarations in
+/// the specified way to interoperate with Swift.
+class ExternAttr : public DeclAttribute {
+public:
+  ExternAttr(StringRef ModuleName, StringRef Name, SourceLoc AtLoc, SourceRange Range, bool Implicit)
+    : DeclAttribute(DAK_Extern, AtLoc, Range, Implicit),
+      ModuleName(ModuleName), Name(Name) {}
+
+  ExternAttr(StringRef ModuleName, StringRef Name, bool Implicit)
+    : ExternAttr(ModuleName, Name, SourceLoc(), SourceRange(), Implicit) {}
+
+  /// The module name to import the named declaration in it
+  const StringRef ModuleName;
+
+  /// The declaration name to import
+  const StringRef Name;
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_Extern;
   }
 };
 
@@ -2440,6 +2451,106 @@ public:
 
   static bool classof(const DeclAttribute *DA) {
     return DA->getKind() == DAK_MacroRole;
+  }
+};
+
+/// Specifies the raw storage used by a type.
+class RawLayoutAttr final : public DeclAttribute {
+  /// The element type to share size and alignment with, if any.
+  TypeRepr *LikeType;
+  /// The number of elements in an array to share stride and alignment with,
+  /// or zero if no such size was specified. If `LikeType` is null, this is
+  /// the size in bytes of the raw storage.
+  unsigned SizeOrCount;
+  /// If `LikeType` is null, the alignment in bytes to use for the raw storage.
+  unsigned Alignment;
+  /// The resolved like type.
+  mutable Type CachedResolvedLikeType = Type();
+
+  friend class ResolveRawLayoutLikeTypeRequest;
+
+public:
+  /// Construct a `@_rawLayout(like: T)` attribute.
+  RawLayoutAttr(TypeRepr *LikeType,
+                SourceLoc AtLoc,
+                SourceRange Range)
+    : DeclAttribute(DAK_RawLayout, AtLoc, Range, /*implicit*/false),
+      LikeType(LikeType), SizeOrCount(0), Alignment(~0u)
+  {}
+  
+  /// Construct a `@_rawLayout(likeArrayOf: T, count: N)` attribute.
+  RawLayoutAttr(TypeRepr *LikeType, unsigned Count,
+                SourceLoc AtLoc,
+                SourceRange Range)
+    : DeclAttribute(DAK_RawLayout, AtLoc, Range, /*implicit*/false),
+      LikeType(LikeType), SizeOrCount(Count), Alignment(0)
+  {}
+  
+  /// Construct a `@_rawLayout(size: N, alignment: M)` attribute.
+  RawLayoutAttr(unsigned Size, unsigned Alignment,
+                SourceLoc AtLoc,
+                SourceRange Range)
+    : DeclAttribute(DAK_RawLayout, AtLoc, Range, /*implicit*/false),
+      LikeType(nullptr), SizeOrCount(Size), Alignment(Alignment)
+  {}
+  
+  /// Return the type whose single-element layout the attribute type should get
+  /// its layout from. Returns null if the attribute specifies an array or manual
+  /// layout.
+  TypeRepr *getScalarLikeType() const {
+    if (!LikeType)
+      return nullptr;
+    if (Alignment != ~0u)
+      return nullptr;
+    return LikeType;
+  }
+  
+  /// Return the type whose array layout the attribute type should get its
+  /// layout from, along with the size of that array. Returns None if the
+  /// attribute specifies scalar or manual layout.
+  llvm::Optional<std::pair<TypeRepr *, unsigned>> getArrayLikeTypeAndCount() const {
+    if (!LikeType)
+      return llvm::None;
+    if (Alignment == ~0u)
+      return llvm::None;
+    return std::make_pair(LikeType, SizeOrCount);
+  }
+  
+  /// Return the size and alignment of the attributed type. Returns
+  /// None if the attribute specifies layout like some other type.
+  llvm::Optional<std::pair<unsigned, unsigned>> getSizeAndAlignment() const {
+    if (LikeType)
+      return llvm::None;
+    return std::make_pair(SizeOrCount, Alignment);
+  }
+  
+  Type getResolvedLikeType(StructDecl *sd) const;
+
+  /// Return the type whose single-element layout the attribute type should get
+  /// its layout from. Returns None if the attribute specifies an array or manual
+  /// layout.
+  llvm::Optional<Type> getResolvedScalarLikeType(StructDecl *sd) const {
+    if (!LikeType)
+      return llvm::None;
+    if (Alignment != ~0u)
+      return llvm::None;
+    return getResolvedLikeType(sd);
+  }
+  
+  /// Return the type whose array layout the attribute type should get its
+  /// layout from, along with the size of that array. Returns None if the
+  /// attribute specifies scalar or manual layout.
+  llvm::Optional<std::pair<Type, unsigned>>
+  getResolvedArrayLikeTypeAndCount(StructDecl *sd) const {
+    if (!LikeType)
+      return llvm::None;
+    if (Alignment == ~0u)
+      return llvm::None;
+    return std::make_pair(getResolvedLikeType(sd), SizeOrCount);
+  }
+  
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_RawLayout;
   }
 };
 

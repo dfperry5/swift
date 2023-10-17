@@ -788,7 +788,7 @@ void CompletionLookup::analyzeActorIsolation(
     break;
   }
   case ActorIsolation::Unspecified:
-  case ActorIsolation::Independent:
+  case ActorIsolation::Nonisolated:
     return;
   }
 
@@ -1305,6 +1305,7 @@ bool CompletionLookup::isImplicitlyCurriedInstanceMethod(
 
   switch (Kind) {
   case LookupKind::ValueExpr:
+  case LookupKind::StoredProperty:
     return ExprType->is<AnyMetatypeType>();
   case LookupKind::ValueInDeclContext:
     if (InsideStaticMethod)
@@ -1669,6 +1670,27 @@ void CompletionLookup::addSubscriptCall(const SubscriptDecl *SD,
   addTypeAnnotation(Builder, resultTy, SD->getGenericSignatureOfContext());
 }
 
+static StringRef getTypeAnnotationString(const NominalTypeDecl *NTD,
+                                         SmallVectorImpl<char> &stash) {
+  SmallVector<StringRef, 1> attrRoleStrs;
+  if (NTD->getAttrs().hasAttribute<PropertyWrapperAttr>())
+    attrRoleStrs.push_back("Property Wrapper");
+  if (NTD->getAttrs().hasAttribute<ResultBuilderAttr>())
+    attrRoleStrs.push_back("Result Builder");
+  if (NTD->isGlobalActor())
+    attrRoleStrs.push_back("Global Actor");
+
+  if (attrRoleStrs.empty())
+    return StringRef();
+  if (attrRoleStrs.size() == 1)
+    return attrRoleStrs[0];
+
+  assert(stash.empty());
+  llvm::raw_svector_ostream OS(stash);
+  llvm::interleave(attrRoleStrs, OS, ", ");
+  return {stash.data(), stash.size()};
+}
+
 void CompletionLookup::addNominalTypeRef(const NominalTypeDecl *NTD,
                                          DeclVisibilityKind Reason,
                                          DynamicLookupInfo dynamicLookupInfo) {
@@ -1679,7 +1701,14 @@ void CompletionLookup::addNominalTypeRef(const NominalTypeDecl *NTD,
   addLeadingDot(Builder);
   Builder.addBaseName(NTD->getName().str());
 
-  addTypeAnnotation(Builder, NTD->getDeclaredType());
+  // "Fake" annotation for custom attribute types.
+  SmallVector<char, 0> stash;
+  StringRef customAttributeAnnotation = getTypeAnnotationString(NTD, stash);
+  if (!customAttributeAnnotation.empty()) {
+    Builder.addTypeAnnotation(customAttributeAnnotation);
+  } else {
+    addTypeAnnotation(Builder, NTD->getDeclaredType());
+  }
 
   // Override the type relation for NominalTypes. Use the better relation
   // for the metatypes and the instance type. For example,
@@ -1790,6 +1819,56 @@ void CompletionLookup::addEnumElementRef(const EnumElementDecl *EED,
     Builder.addFlair(CodeCompletionFlairBit::ExpressionSpecific);
 }
 
+static StringRef getTypeAnnotationString(const MacroDecl *MD,
+                                         SmallVectorImpl<char> &stash) {
+  auto roles = MD->getMacroRoles();
+  SmallVector<StringRef, 1> roleStrs;
+  for (auto role : getAllMacroRoles()) {
+    if (!roles.contains(role))
+      continue;
+
+    switch (role) {
+    case MacroRole::Accessor:
+      roleStrs.push_back("Accessor Macro");
+      break;
+    case MacroRole::CodeItem:
+      roleStrs.push_back("Code Item Macro");
+      break;
+    case MacroRole::Conformance:
+      roleStrs.push_back("Conformance Macro");
+      break;
+    case MacroRole::Declaration:
+      roleStrs.push_back("Declaration Macro");
+      break;
+    case MacroRole::Expression:
+      roleStrs.push_back("Expression Macro");
+      break;
+    case MacroRole::Extension:
+      roleStrs.push_back("Extension Macro");
+      break;
+    case MacroRole::Member:
+      roleStrs.push_back("Member Macro");
+      break;
+    case MacroRole::MemberAttribute:
+      roleStrs.push_back("Member Attribute Macro");
+      break;
+    case MacroRole::Peer:
+      roleStrs.push_back("Peer Macro");
+      break;
+    }
+  }
+
+  if (roleStrs.empty())
+    return "Macro";
+  if (roleStrs.size() == 1)
+    return roleStrs[0];
+
+  assert(stash.empty());
+  llvm::raw_svector_ostream OS(stash);
+  llvm::interleave(roleStrs, OS, ", ");
+  return {stash.data(), stash.size()};
+}
+
 void CompletionLookup::addMacroExpansion(const MacroDecl *MD,
                                          DeclVisibilityKind Reason) {
   if (!MD->hasName() || !MD->isAccessibleFrom(CurrDeclContext) ||
@@ -1822,9 +1901,13 @@ void CompletionLookup::addMacroExpansion(const MacroDecl *MD,
     Builder.addRightParen();
   }
 
-  if (!MD->getResultInterfaceType()->isVoid()) {
+  auto roles = MD->getMacroRoles();
+  if (roles.containsOnly(MacroRole::Expression)) {
     addTypeAnnotation(Builder, MD->getResultInterfaceType(),
                       MD->getGenericSignature());
+  } else {
+    llvm::SmallVector<char, 0> stash;
+    Builder.addTypeAnnotation(getTypeAnnotationString(MD, stash));
   }
 }
 
@@ -2166,6 +2249,13 @@ void CompletionLookup::foundDecl(ValueDecl *D, DeclVisibilityKind Reason,
     }
 
     return;
+  case LookupKind::StoredProperty:
+    if (auto *VD = dyn_cast<VarDecl>(D)) {
+      if (VD->hasStorage()) {
+        addVarDeclRef(VD, Reason, dynamicLookupInfo);
+      }
+      return;
+    }
   }
 }
 
@@ -2307,6 +2397,8 @@ void CompletionLookup::getPostfixKeywordCompletions(Type ExprType,
   if (IsSuperRefExpr)
     return;
 
+  NeedLeadingDot = !HaveDot;
+
   if (!ExprType->getAs<ModuleType>()) {
     addKeyword(getTokenText(tok::kw_self), ExprType->getRValueType(),
                SemanticContextKind::CurrentNominal,
@@ -2329,7 +2421,8 @@ void CompletionLookup::getPostfixKeywordCompletions(Type ExprType,
   }
 }
 
-void CompletionLookup::getValueExprCompletions(Type ExprType, ValueDecl *VD) {
+void CompletionLookup::getValueExprCompletions(Type ExprType, ValueDecl *VD,
+                                               bool IsDeclUnapplied) {
   Kind = LookupKind::ValueExpr;
   NeedLeadingDot = !HaveDot;
 
@@ -2362,7 +2455,7 @@ void CompletionLookup::getValueExprCompletions(Type ExprType, ValueDecl *VD) {
 
   // Handle special cases
   bool isIUO = VD && VD->isImplicitlyUnwrappedOptional();
-  if (tryFunctionCallCompletions(ExprType, VD))
+  if (tryFunctionCallCompletions(ExprType, IsDeclUnapplied ? VD : nullptr))
     return;
   if (tryModuleCompletions(ExprType, {CodeCompletionFilterFlag::Expr,
                                       CodeCompletionFilterFlag::Type}))
@@ -2376,6 +2469,17 @@ void CompletionLookup::getValueExprCompletions(Type ExprType, ValueDecl *VD) {
                            IncludeInstanceMembers,
                            /*includeDerivedRequirements*/ false,
                            /*includeProtocolExtensionMembers*/ true);
+}
+
+void CompletionLookup::getStoredPropertyCompletions(const NominalTypeDecl *D) {
+  Kind = LookupKind::StoredProperty;
+  NeedLeadingDot = false;
+
+  lookupVisibleMemberDecls(*this, D->getDeclaredInterfaceType(),
+                           /*DotLoc=*/SourceLoc(), CurrDeclContext,
+                           /*IncludeInstanceMembers*/ true,
+                           /*includeDerivedRequirements*/ false,
+                           /*includeProtocolExtensionMembers*/ false);
 }
 
 void CompletionLookup::collectOperators(
@@ -2413,19 +2517,7 @@ void CompletionLookup::addPostfixOperatorCompletion(OperatorDecl *op,
   addTypeAnnotation(builder, resultType);
 }
 
-void CompletionLookup::tryPostfixOperator(Expr *expr, PostfixOperatorDecl *op) {
-  ConcreteDeclRef referencedDecl;
-  FunctionType *funcTy = getTypeOfCompletionOperator(
-      const_cast<DeclContext *>(CurrDeclContext), expr, op->getName(),
-      DeclRefKind::PostfixOperator, referencedDecl);
-  if (!funcTy)
-    return;
-
-  // TODO: Use referencedDecl (FuncDecl) instead of 'op' (OperatorDecl).
-  addPostfixOperatorCompletion(op, funcTy->getResult());
-}
-
-void CompletionLookup::addAssignmentOperator(Type RHSType, Type resultType) {
+void CompletionLookup::addAssignmentOperator(Type RHSType) {
   CodeCompletionResultBuilder builder = makeResultBuilder(
       CodeCompletionResultKind::BuiltinOperator, SemanticContextKind::None);
 
@@ -2435,12 +2527,11 @@ void CompletionLookup::addAssignmentOperator(Type RHSType, Type resultType) {
     builder.addWhitespace(" ");
   builder.addEqual();
   builder.addWhitespace(" ");
-  assert(RHSType && resultType);
+  assert(RHSType);
   Type contextTy;
   if (auto typeContext = CurrDeclContext->getInnermostTypeContext())
     contextTy = typeContext->getDeclaredTypeInContext();
   builder.addCallArgument(Identifier(), RHSType, contextTy);
-  addTypeAnnotation(builder, resultType);
 }
 
 void CompletionLookup::addInfixOperatorCompletion(OperatorDecl *op,
@@ -2468,105 +2559,6 @@ void CompletionLookup::addInfixOperatorCompletion(OperatorDecl *op,
   }
   if (resultType)
     addTypeAnnotation(builder, resultType);
-}
-
-void CompletionLookup::tryInfixOperatorCompletion(Expr *foldedExpr,
-                                                  InfixOperatorDecl *op) {
-  ConcreteDeclRef referencedDecl;
-  FunctionType *funcTy = getTypeOfCompletionOperator(
-      const_cast<DeclContext *>(CurrDeclContext), foldedExpr, op->getName(),
-      DeclRefKind::BinaryOperator, referencedDecl);
-  if (!funcTy)
-    return;
-
-  Type lhsTy = funcTy->getParams()[0].getPlainType();
-  Type rhsTy = funcTy->getParams()[1].getPlainType();
-  Type resultTy = funcTy->getResult();
-
-  // Don't complete optional operators on non-optional types.
-  if (!lhsTy->getRValueType()->getOptionalObjectType()) {
-    // 'T ?? T'
-    if (op->getName().str() == "??")
-      return;
-    // 'T == nil'
-    if (auto NT = rhsTy->getNominalOrBoundGenericNominal())
-      if (NT->getName() ==
-          CurrDeclContext->getASTContext().Id_OptionalNilComparisonType)
-        return;
-  }
-
-  // If the right-hand side and result type are both type parameters, we're
-  // not providing a useful completion.
-  if (resultTy->isTypeParameter() && rhsTy->isTypeParameter())
-    return;
-
-  // TODO: Use referencedDecl (FuncDecl) instead of 'op' (OperatorDecl).
-  addInfixOperatorCompletion(op, funcTy->getResult(),
-                             funcTy->getParams()[1].getPlainType());
-}
-
-Expr *
-CompletionLookup::typeCheckLeadingSequence(Expr *LHS,
-                                           ArrayRef<Expr *> leadingSequence) {
-  if (leadingSequence.empty())
-    return LHS;
-
-  SourceRange sequenceRange(leadingSequence.front()->getStartLoc(),
-                            LHS->getEndLoc());
-  auto *expr = findParsedExpr(CurrDeclContext, sequenceRange);
-  if (!expr)
-    return LHS;
-
-  if (expr->getType() && !expr->getType()->hasError())
-    return expr;
-
-  if (!typeCheckExpression(const_cast<DeclContext *>(CurrDeclContext), expr))
-    return expr;
-  return LHS;
-}
-
-void CompletionLookup::getOperatorCompletions(
-    Expr *LHS, ArrayRef<Expr *> leadingSequence) {
-  if (IsSuperRefExpr)
-    return;
-
-  Expr *foldedExpr = typeCheckLeadingSequence(LHS, leadingSequence);
-
-  SmallVector<OperatorDecl *, 16> operators;
-  collectOperators(operators);
-  // FIXME: this always chooses the first operator with the given name.
-  llvm::DenseSet<Identifier> seenPostfixOperators;
-  llvm::DenseSet<Identifier> seenInfixOperators;
-
-  for (auto op : operators) {
-    switch (op->getKind()) {
-    case DeclKind::PrefixOperator:
-      // Don't insert prefix operators in postfix position.
-      // FIXME: where should these get completed?
-      break;
-    case DeclKind::PostfixOperator:
-      if (seenPostfixOperators.insert(op->getName()).second)
-        tryPostfixOperator(LHS, cast<PostfixOperatorDecl>(op));
-      break;
-    case DeclKind::InfixOperator:
-      if (seenInfixOperators.insert(op->getName()).second)
-        tryInfixOperatorCompletion(foldedExpr, cast<InfixOperatorDecl>(op));
-      break;
-    default:
-      llvm_unreachable("unexpected operator kind");
-    }
-  }
-
-  if (leadingSequence.empty() && LHS->getType() &&
-      LHS->getType()->hasLValueType()) {
-    addAssignmentOperator(LHS->getType()->getRValueType(),
-                          CurrDeclContext->getASTContext().TheEmptyTupleType);
-  }
-
-  // FIXME: unify this with the ?.member completions.
-  if (auto T = LHS->getType())
-    if (auto ValueT = T->getRValueType()->getOptionalObjectType())
-      addPostfixBang(ValueT);
 }
 
 void CompletionLookup::addTypeRelationFromProtocol(
@@ -3078,6 +3070,43 @@ void CompletionLookup::getAttributeDeclParamCompletions(
       break;
     }
     break;
+  case CustomSyntaxAttributeKind::StorageRestrictions: {
+    bool suggestInitializesLabel = false;
+    bool suggestAccessesLabel = false;
+    bool suggestArgument = false;
+    switch (static_cast<StorageRestrictionsCompletionKind>(ParamIndex)) {
+    case StorageRestrictionsCompletionKind::Label:
+      suggestAccessesLabel = true;
+      suggestInitializesLabel = true;
+      break;
+    case StorageRestrictionsCompletionKind::Argument:
+      suggestArgument = true;
+      break;
+    case StorageRestrictionsCompletionKind::ArgumentOrInitializesLabel:
+      suggestArgument = true;
+      suggestInitializesLabel = true;
+      break;
+    case StorageRestrictionsCompletionKind::ArgumentOrAccessesLabel:
+      suggestArgument = true;
+      suggestAccessesLabel = true;
+      break;
+    }
+    if (suggestInitializesLabel) {
+      addDeclAttrParamKeyword(
+          "initializes", /*Parameters=*/{},
+          "Specify stored properties initialized by the accessor", true);
+    }
+    if (suggestAccessesLabel) {
+      addDeclAttrParamKeyword(
+          "accesses", /*Parameters=*/{},
+          "Specify stored properties accessed by the accessor", true);
+    }
+    if (suggestArgument) {
+      if (auto NT = dyn_cast<NominalTypeDecl>(CurrDeclContext)) {
+        getStoredPropertyCompletions(NT);
+      }
+    }
+  }
   }
 }
 

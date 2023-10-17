@@ -85,6 +85,9 @@ using namespace metadataimpl;
 // types, so we explicitly define this symbol to be zero for now. Binaries
 // weak-import this symbol so they will resolve it to a zero address on older
 // runtimes as well.
+//
+// Note: If this symbol's value ever gets updated, the corresponding condition
+// handled by IRGen MUST be updated in tandem.
 __asm__("  .globl _swift_runtimeSupportsNoncopyableTypes\n");
 __asm__(".set _swift_runtimeSupportsNoncopyableTypes, 0\n");
 #endif
@@ -510,9 +513,11 @@ static void swift_objc_classCopyFixupHandler(Class oldClass, Class newClass) {
   if (!oldClassMetadata->isTypeMetadata())
    return;
 
-  // Copy the value witness table pointer for pointer authentication.
+  // Copy the value witness table and pointer and heap object destroyer for
+  // pointer authentication.
   auto newClassMetadata = reinterpret_cast<ClassMetadata *>(newClass);
   newClassMetadata->setValueWitnesses(oldClassMetadata->getValueWitnesses());
+  newClassMetadata->setHeapObjectDestroyer(oldClassMetadata->getHeapObjectDestroyer());
 
  // Otherwise, re-sign v-table entries using the extra discriminators stored
  // in the v-table descriptor.
@@ -1072,7 +1077,7 @@ namespace {
 
         // Otherwise, use the new entry and destroy the one we allocated.
         assert(existingEntry && "spurious failure of strong compare-exchange?");
-        delete allocatedEntry;
+        swift_cxx_deleteObject(allocatedEntry);
       }
 
       return { static_cast<SingletonMetadataCacheEntry*>(existingEntry), false };
@@ -2706,8 +2711,8 @@ void swift::swift_initStructMetadataWithLayoutString(
     refCountBytes += _swift_refCountBytesForMetatype(fieldType);
   }
 
-  const size_t fixedLayoutStringSize = layoutStringHeaderSize +
-                                       sizeof(uint64_t) * 2;
+  const size_t fixedLayoutStringSize =
+      layoutStringHeaderSize + sizeof(uint64_t);
 
   uint8_t *layoutStr =
       (uint8_t *)MetadataAllocator(LayoutStringTag)
@@ -2741,7 +2746,7 @@ void swift::swift_initStructMetadataWithLayoutString(
       }
 
       fullOffset += fieldType->size;
-      previousFieldOffset = fieldType->size;
+      previousFieldOffset = fieldType->size - sizeof(uintptr_t);
 
       continue;
     }
@@ -2753,7 +2758,6 @@ void swift::swift_initStructMetadataWithLayoutString(
   }
 
   writer.writeBytes((uint64_t)previousFieldOffset);
-  writer.writeBytes((uint64_t)0);
 
   // we mask out HasRelativePointers, because at this point they have all been
   // resolved to metadata pointers
@@ -2779,21 +2783,32 @@ void swift::swift_initStructMetadataWithLayoutString(
 }
 
 size_t swift::_swift_refCountBytesForMetatype(const Metadata *type) {
-  if (type->vw_size() == 0 || type->getValueWitnesses()->isPOD()) {
+  auto *vwt = type->getValueWitnesses();
+  if (type->vw_size() == 0 || vwt->isPOD()) {
     return 0;
-  } else if (type->hasLayoutString()) {
-    size_t offset = sizeof(uint64_t);
-    return LayoutStringReader{type->getLayoutString(), offset}
-        .readBytes<size_t>();
-  } else if (type->isClassObject() || type->isAnyExistentialType()) {
-    return sizeof(uint64_t);
   } else if (auto *tuple = dyn_cast<TupleTypeMetadata>(type)) {
     size_t res = 0;
     for (InProcess::StoredSize i = 0; i < tuple->NumElements; i++) {
       res += _swift_refCountBytesForMetatype(tuple->getElement(i).Type);
     }
     return res;
+  } else if (vwt == &VALUE_WITNESS_SYM(Bo) ||
+             vwt == &VALUE_WITNESS_SYM(BO) ||
+             vwt == &VALUE_WITNESS_SYM(Bb)) {
+    return sizeof(uint64_t);
+  } else if (auto *cls = type->getClassObject()) {
+    if (cls->isTypeMetadata()) {
+      goto metadata;
+    }
+    return sizeof(uint64_t);
+  } else if (type->hasLayoutString()) {
+    size_t offset = sizeof(uint64_t);
+    return LayoutStringReader{type->getLayoutString(), offset}
+        .readBytes<size_t>();
+  } else if (type->isAnyExistentialType()) {
+    return sizeof(uint64_t);
   } else {
+  metadata:
     return sizeof(uint64_t) + sizeof(uintptr_t);
   }
 }
@@ -2806,11 +2821,52 @@ void swift::_swift_addRefCountStringForMetatype(LayoutStringWriter &writer,
   size_t unalignedOffset = fullOffset;
   fullOffset = roundUpToAlignMask(fullOffset, fieldType->vw_alignment() - 1);
   size_t offset = fullOffset - unalignedOffset + previousFieldOffset;
+  auto *vwt = fieldType->getValueWitnesses();
   if (fieldType->vw_size() == 0) {
     return;
-  } else if (fieldType->getValueWitnesses()->isPOD()) {
+  } else if (vwt->isPOD()) {
     // No need to handle PODs
     previousFieldOffset = offset + fieldType->vw_size();
+    fullOffset += fieldType->vw_size();
+  } else if (auto *tuple = dyn_cast<TupleTypeMetadata>(fieldType)) {
+    for (InProcess::StoredSize i = 0; i < tuple->NumElements; i++) {
+      _swift_addRefCountStringForMetatype(writer, flags,
+                                          tuple->getElement(i).Type, fullOffset,
+                                          previousFieldOffset);
+    }
+  } else if (vwt == &VALUE_WITNESS_SYM(Bo)) {
+    auto tag = RefCountingKind::NativeStrong;
+    writer.writeBytes(((uint64_t)tag << 56) | offset);
+    previousFieldOffset = 0;
+    fullOffset += fieldType->vw_size();
+  } else if (vwt == &VALUE_WITNESS_SYM(BO)) {
+  #if SWIFT_OBJC_INTEROP
+    auto tag = RefCountingKind::ObjC;
+  #else
+    auto tag = RefCountingKind::Unknown;
+  #endif
+    writer.writeBytes(((uint64_t)tag << 56) | offset);
+    previousFieldOffset = 0;
+    fullOffset += fieldType->vw_size();
+  } else if (vwt == &VALUE_WITNESS_SYM(Bb)) {
+    auto tag = RefCountingKind::Bridge;
+    writer.writeBytes(((uint64_t)tag << 56) | offset);
+    previousFieldOffset = 0;
+    fullOffset += fieldType->vw_size();
+  } else if (auto *cls = fieldType->getClassObject()) {
+    RefCountingKind tag;
+    if (!cls->isTypeMetadata()) {
+    #if SWIFT_OBJC_INTEROP
+      tag = RefCountingKind::ObjC;
+    #else
+      tag = RefCountingKind::Unknown;
+    #endif
+    } else {
+      goto metadata;
+    }
+
+    writer.writeBytes(((uint64_t)tag << 56) | offset);
+    previousFieldOffset = 0;
     fullOffset += fieldType->vw_size();
   } else if (fieldType->hasLayoutString()) {
     LayoutStringReader reader{fieldType->getLayoutString(), 0};
@@ -2823,13 +2879,13 @@ void swift::_swift_addRefCountStringForMetatype(LayoutStringWriter &writer,
 
       if (fieldFlags & LayoutStringFlags::HasRelativePointers) {
         swift_resolve_resilientAccessors(writer.layoutStr, writer.offset,
-                                         reader.layoutStr, fieldType);
+                                         reader.layoutStr + layoutStringHeaderSize, fieldType);
       }
 
       if (offset) {
+        LayoutStringReader tagReader {writer.layoutStr, writer.offset};
         auto writerOffsetCopy = writer.offset;
-        reader.offset = layoutStringHeaderSize;
-        auto firstTagAndOffset = reader.readBytes<uint64_t>();
+        auto firstTagAndOffset = tagReader.readBytes<uint64_t>();
         firstTagAndOffset += offset;
         writer.writeBytes(firstTagAndOffset);
         writer.offset = writerOffsetCopy;
@@ -2842,55 +2898,50 @@ void swift::_swift_addRefCountStringForMetatype(LayoutStringWriter &writer,
       previousFieldOffset += fieldType->vw_size();
     }
     fullOffset += fieldType->vw_size();
-  } else if (auto *tuple = dyn_cast<TupleTypeMetadata>(fieldType)) {
-    for (InProcess::StoredSize i = 0; i < tuple->NumElements; i++) {
-      _swift_addRefCountStringForMetatype(writer, flags,
-                                          tuple->getElement(i).Type, fullOffset,
-                                          previousFieldOffset);
-    }
-  } else if (auto *cls = fieldType->getClassObject()) {
-    RefCountingKind tag;
-    if (!cls->isTypeMetadata()) {
-    #if SWIFT_OBJC_INTEROP
-      tag = RefCountingKind::ObjC;
-    #else
-      tag = RefCountingKind::Unknown;
-    #endif
-    } else {
-      auto *vwt = cls->getValueWitnesses();
-      if (vwt == &VALUE_WITNESS_SYM(Bo)) {
-        tag = RefCountingKind::NativeStrong;
-      } else if (vwt == &VALUE_WITNESS_SYM(BO)) {
-      #if SWIFT_OBJC_INTEROP
-        tag = RefCountingKind::ObjC;
-      #else
-        tag = RefCountingKind::Unknown;
-      #endif
-      } else if (vwt == &VALUE_WITNESS_SYM(Bb)) {
-        tag = RefCountingKind::Bridge;
-      } else {
-        goto metadata;
-      };
-    }
-
-    writer.writeBytes(((uint64_t)tag << 56) | offset);
-    previousFieldOffset = fieldType->vw_size();
-    fullOffset += previousFieldOffset;
   } else if (fieldType->isAnyExistentialType()) {
     auto *existential = dyn_cast<ExistentialTypeMetadata>(fieldType);
     assert(existential);
     auto tag = existential->isClassBounded() ? RefCountingKind::Unknown
                                              : RefCountingKind::Existential;
     writer.writeBytes(((uint64_t)tag << 56) | offset);
-    previousFieldOffset = fieldType->vw_size();
-    fullOffset += previousFieldOffset;
+    previousFieldOffset = fieldType->vw_size() - (existential->isClassBounded() ? sizeof(uintptr_t) : (NumWords_ValueBuffer * sizeof(uintptr_t)));
+    fullOffset += fieldType->vw_size();
   } else {
 metadata:
   writer.writeBytes(((uint64_t)RefCountingKind::Metatype << 56) | offset);
   writer.writeBytes(fieldType);
-  previousFieldOffset = fieldType->vw_size();
-  fullOffset += previousFieldOffset;
+  previousFieldOffset = 0;
+  fullOffset += fieldType->vw_size();
   }
+}
+
+/// Initialize the value witness table for a @_rawLayout struct.
+SWIFT_RUNTIME_EXPORT
+void swift::swift_initRawStructMetadata(StructMetadata *structType,
+                                        StructLayoutFlags layoutFlags,
+                                        const TypeLayout *likeTypeLayout,
+                                        int32_t count) {
+  auto vwtable = getMutableVWTableForInit(structType, layoutFlags);
+
+  // The existing vwt function entries are all fine to preserve, the only thing
+  // we need to initialize is the actual type layout.
+  auto size = likeTypeLayout->size;
+  auto stride = likeTypeLayout->stride;
+  auto alignMask = likeTypeLayout->flags.getAlignmentMask();
+  auto extraInhabitantCount = likeTypeLayout->extraInhabitantCount;
+
+  // If our count is greater than or equal 0, we're dealing an array like layout.
+  if (count >= 0) {
+    stride *= count;
+    size = stride;
+  }
+
+  vwtable->size = size;
+  vwtable->stride = stride;
+  vwtable->flags = ValueWitnessFlags()
+                    .withAlignmentMask(alignMask)
+                    .withCopyable(false);
+  vwtable->extraInhabitantCount = extraInhabitantCount;
 }
 
 /***************************************************************************/
@@ -3390,38 +3441,48 @@ static void initObjCClass(ClassMetadata *self,
                           size_t *fieldOffsets) {
   ClassROData *rodata = getROData(self);
 
-  // Always clone the ivar descriptors.
-  if (numFields) {
-    const ClassIvarList *dependentIvars = rodata->IvarList;
-    assert(dependentIvars->Count == numFields);
-    assert(dependentIvars->EntrySize == sizeof(ClassIvarEntry));
+  ClassIvarList *ivars = rodata->IvarList;
+  if (!ivars) {
+    assert(numFields == 0);
+    return;
+  }
 
-    auto ivarListSize = sizeof(ClassIvarList) +
-                        numFields * sizeof(ClassIvarEntry);
-    auto ivars = (ClassIvarList*) getResilientMetadataAllocator()
-      .Allocate(ivarListSize, alignof(ClassIvarList));
-    memcpy(ivars, dependentIvars, ivarListSize);
-    rodata->IvarList = ivars;
+  assert(ivars->Count == numFields);
+  assert(ivars->EntrySize == sizeof(ClassIvarEntry));
 
-    for (unsigned i = 0; i != numFields; ++i) {
-      auto *eltLayout = fieldTypes[i];
+  bool copiedIvarList = false;
 
-      ClassIvarEntry &ivar = ivars->getIvars()[i];
+  for (unsigned i = 0; i != numFields; ++i) {
+    auto *eltLayout = fieldTypes[i];
 
-      // Fill in the field offset global, if this ivar has one.
-      if (ivar.Offset) {
-        if (*ivar.Offset != fieldOffsets[i])
-          *ivar.Offset = fieldOffsets[i];
+    ClassIvarEntry *ivar = &ivars->getIvars()[i];
+
+    // Fill in the field offset global, if this ivar has one.
+    if (ivar->Offset) {
+      if (*ivar->Offset != fieldOffsets[i])
+        *ivar->Offset = fieldOffsets[i];
+    }
+
+    // If the ivar's size doesn't match the field layout we
+    // computed, overwrite it and give it better type information.
+    if (ivar->Size != eltLayout->size) {
+      // If we're going to modify the ivar list, we need to copy it first.
+      if (!copiedIvarList) {
+        auto ivarListSize = sizeof(ClassIvarList) +
+                            numFields * sizeof(ClassIvarEntry);
+        ivars = (ClassIvarList*) getResilientMetadataAllocator()
+          .Allocate(ivarListSize, alignof(ClassIvarList));
+        memcpy(ivars, rodata->IvarList, ivarListSize);
+        rodata->IvarList = ivars;
+        copiedIvarList = true;
+
+        // Update ivar to point to the newly copied list.
+        ivar = &ivars->getIvars()[i];
       }
-
-      // If the ivar's size doesn't match the field layout we
-      // computed, overwrite it and give it better type information.
-      if (ivar.Size != eltLayout->size) {
-        ivar.Size = eltLayout->size;
-        ivar.Type = nullptr;
-        ivar.Log2Alignment =
-          getLog2AlignmentFromMask(eltLayout->flags.getAlignmentMask());
-      }
+      ivar->Size = eltLayout->size;
+      ivar->Type = nullptr;
+      ivar->Log2Alignment =
+        getLog2AlignmentFromMask(eltLayout->flags.getAlignmentMask());
     }
   }
 }
@@ -3556,8 +3617,7 @@ getSuperclassMetadata(MetadataRequest request, const ClassMetadata *self) {
     auto result = swift_getTypeByMangledName(
         request, superclassName, substitutions.getGenericArgs(),
         [&substitutions](unsigned depth, unsigned index) {
-          // FIXME: Variadic generics
-          return substitutions.getMetadata(depth, index).getMetadata();
+          return substitutions.getMetadata(depth, index).Ptr;
         },
         [&substitutions](const Metadata *type, unsigned index) {
           return substitutions.getWitnessTable(type, index);
@@ -4785,7 +4845,7 @@ public:
                                 key.Arguments.hash());
     }
 
-    bool operator==(const Key &other) {
+    bool operator==(const Key &other) const {
       return Shape == other.Shape && Arguments == other.Arguments;
     }
   };
@@ -6291,8 +6351,7 @@ swift_getAssociatedTypeWitnessSlowImpl(
     result = swift_getTypeByMangledName(
         request, mangledName, substitutions.getGenericArgs(),
         [&substitutions](unsigned depth, unsigned index) {
-          // FIXME: Variadic generics
-          return substitutions.getMetadata(depth, index).getMetadata();
+          return substitutions.getMetadata(depth, index).Ptr;
         },
         [&substitutions](const Metadata *type, unsigned index) {
           return substitutions.getWitnessTable(type, index);
@@ -6438,8 +6497,7 @@ swift_getAssociatedTypeWitnessRelativeSlowImpl(
   auto result = swift_getTypeByMangledName(
       request, mangledName, substitutions.getGenericArgs(),
       [&substitutions](unsigned depth, unsigned index) {
-        // FIXME: Variadic generics
-        return substitutions.getMetadata(depth, index).getMetadata();
+        return substitutions.getMetadata(depth, index).Ptr;
       },
       [&substitutions](const Metadata *type, unsigned index) {
         return substitutions.getWitnessTable(type, index);

@@ -69,7 +69,8 @@ enum class DestroyHoistingOption : uint8_t {
 enum class CrossModuleOptimizationMode : uint8_t {
   Off = 0,
   Default = 1,
-  Aggressive = 2
+  Aggressive = 2,
+  Everything = 3,
 };
 
 class SILModule;
@@ -116,6 +117,9 @@ public:
 
   /// Controls whether to emit actor data-race checks.
   bool EnableActorDataRaceChecks = false;
+
+  /// Controls whether to run async demotion pass.
+  bool EnableAsyncDemotion = false;
 
   /// Should we run any SIL performance optimizations
   ///
@@ -179,8 +183,11 @@ public:
   /// when possible.
   bool EnablePackMetadataStackPromotion = true;
 
-  // The kind of function bodies to skip emitting.
+  /// The kind of function bodies to skip emitting.
   FunctionBodySkipping SkipFunctionBodies = FunctionBodySkipping::None;
+
+  /// Whether to skip declarations that are internal to the module.
+  bool SkipNonExportableDecls = false;
 
   /// Optimization mode being used.
   OptimizationMode OptMode = OptimizationMode::NotSet;
@@ -271,6 +278,9 @@ public:
   /// Warning: this is not thread safe. It can only be enabled in case there
   /// is a single SILModule in a single thread.
   bool checkSILModuleLeaks = false;
+
+  /// Are we building in embedded Swift mode?
+  bool EmbeddedSwift = false;
 
   /// The name of the file to which the backend should save optimization
   /// records.

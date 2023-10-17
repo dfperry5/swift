@@ -91,6 +91,10 @@ public:
   /// binary module has already been built for use by the compiler.
   std::string PrebuiltModuleCachePath;
 
+  /// The path to output explicit module dependencies. Only relevant during
+  /// dependency scanning.
+  std::string ExplicitModulesOutputPath;
+
   /// The path to look in to find backup .swiftinterface files if those found
   /// from SDKs are failing.
   std::string BackupModuleInterfaceDir;
@@ -140,6 +144,12 @@ public:
 
   /// Clang Include Trees.
   std::vector<std::string> ClangIncludeTrees;
+
+  /// CacheKey for input file.
+  std::string InputFileKey;
+
+  /// CacheReplay PrefixMap.
+  std::vector<std::string> CacheReplayPrefixMap;
 
   /// Number of retry opening an input file if the previous opening returns
   /// bad file descriptor error.
@@ -260,7 +270,6 @@ public:
   /// \see ModuleDecl::arePrivateImportsEnabled
   bool EnablePrivateImports = false;
 
-
   /// Indicates whether we add implicit dynamic.
   ///
   /// \see ModuleDecl::isImplicitDynamicEnabled
@@ -315,6 +324,9 @@ public:
   /// times) when compiling a module interface?
   bool SerializeModuleInterfaceDependencyHashes = false;
 
+  /// Should we skip decls that cannot be referenced externally?
+  bool SkipNonExportableDecls = false;
+
   /// Should we warn if an imported module needed to be rebuilt from a
   /// module interface file?
   bool RemarkOnRebuildFromModuleInterface = false;
@@ -353,8 +365,12 @@ public:
   /// The path at which to either serialize or deserialize the dependency scanner cache.
   std::string SerializedDependencyScannerCachePath;
 
-  /// Emit remarks indicating use of the serialized module dependency scanning cache
+  /// Emit remarks indicating use of the serialized module dependency scanning cache.
   bool EmitDependencyScannerCacheRemarks = false;
+
+  /// Whether the dependency scanner invocation should resolve imports
+  /// to filesystem modules in parallel.
+  bool ParallelDependencyScan = false;
 
   /// When performing an incremental build, ensure that cross-module incremental
   /// build metadata is available in any swift modules emitted by this frontend
@@ -497,6 +513,9 @@ public:
   /// Whether we're configured to track system intermodule dependencies.
   bool shouldTrackSystemDependencies() const;
   
+  /// Whether we are configured with -typecheck or -typecheck-module-from-interface actuin
+  bool isTypeCheckAction() const;
+
   /// Whether to emit symbol graphs for the output module.
   bool EmitSymbolGraph = false;
 
@@ -549,6 +568,7 @@ private:
   static bool canActionEmitModuleSummary(ActionType);
   static bool canActionEmitInterface(ActionType);
   static bool canActionEmitABIDescriptor(ActionType);
+  static bool canActionEmitAPIDescriptor(ActionType);
   static bool canActionEmitConstValues(ActionType);
   static bool canActionEmitModuleSemanticInfo(ActionType);
 

@@ -12,10 +12,10 @@
 
 #define DEBUG_TYPE "libsil"
 
-#include "swift/AST/AnyFunctionRef.h"
+#include "swift/SIL/TypeLowering.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/AnyFunctionRef.h"
 #include "swift/AST/CanTypeVisitor.h"
-#include "swift/SIL/SILInstruction.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSIL.h"
@@ -34,8 +34,9 @@
 #include "swift/SIL/PrettyStackTrace.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
+#include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILModule.h"
-#include "swift/SIL/TypeLowering.h"
+#include "swift/SIL/Test.h"
 #include "clang/AST/Type.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
@@ -116,16 +117,18 @@ CaptureKind TypeConverter::getDeclCaptureKind(CapturedValue capture,
          "should not have attempted to directly capture this variable");
 
   auto &lowering = getTypeLowering(
-      var->getType(), TypeExpansionContext::noOpaqueTypeArchetypesSubstitution(
+      var->getTypeInContext(), TypeExpansionContext::noOpaqueTypeArchetypesSubstitution(
                           expansion.getResilienceExpansion()));
 
   // If this is a noncopyable 'let' constant that is not a shared paramdecl or
   // used by a noescape capture, then we know it is boxed and want to pass it in
   // its boxed form so we can obey Swift's capture reference semantics.
-  if (!var->supportsMutation() && lowering.getLoweredType().isPureMoveOnly() &&
-      !capture.isNoEscape()) {
+  if (!var->supportsMutation()
+      && lowering.getLoweredType().getASTType()->isNoncopyable()
+      && !capture.isNoEscape()) {
       auto *param = dyn_cast<ParamDecl>(var);
-      if (!param || param->getValueOwnership() != ValueOwnership::Shared) {
+      if (!param || (param->getValueOwnership() != ValueOwnership::Shared &&
+                     !param->isSelfParameter())) {
         return CaptureKind::ImmutableBox;
       }
   }
@@ -147,14 +150,14 @@ CaptureKind TypeConverter::getDeclCaptureKind(CapturedValue capture,
   // have the same lifetime as the closure itself, so we must capture
   // the box itself and not the payload, even if the closure is noescape,
   // otherwise they will be destroyed when the closure is formed.
-  if (var->getType()->is<ReferenceStorageType>()) {
+  if (var->getInterfaceType()->is<ReferenceStorageType>()) {
     return CaptureKind::Box;
   }
 
   // For 'let' constants
   if (!var->supportsMutation()) {
     assert(getTypeLowering(
-               var->getType(),
+               var->getTypeInContext(),
                TypeExpansionContext::noOpaqueTypeArchetypesSubstitution(
                    expansion.getResilienceExpansion()))
                .isAddressOnly());
@@ -2358,6 +2361,14 @@ namespace {
         properties.setNonTrivial();
         properties.setLexical(IsLexical);
       }
+      
+      // If the type has raw storage, it is move-only and address-only.
+      if (D->getAttrs().hasAttribute<RawLayoutAttr>()) {
+        properties.setAddressOnly();
+        properties.setNonTrivial();
+        properties.setLexical(IsLexical);
+        return handleMoveOnlyAddressOnly(structType, properties);
+      }
 
       auto subMap = structType->getContextSubstitutionMap(&TC.M, D);
 
@@ -2608,14 +2619,13 @@ static CanSILPackType computeLoweredPackType(TypeConverter &tc,
   SmallVector<CanType, 4> loweredElts;
   loweredElts.reserve(substType->getNumElements());
 
-  for (auto i : indices(substType->getElementTypes())) {
-    auto origEltType = origType.getPackElementType(i);
-    auto substEltType = substType.getElementType(i);
-
-    CanType loweredTy =
+  origType.forEachExpandedPackElement(substType,
+                                      [&](AbstractionPattern origEltType,
+                                          CanType substEltType) {
+    auto loweredTy =
         tc.getLoweredRValueType(context, origEltType, substEltType);
     loweredElts.push_back(loweredTy);
-  }
+  });
 
   bool elementIsAddress = true; // TODO
   SILPackType::ExtInfo extInfo(elementIsAddress);
@@ -2737,6 +2747,20 @@ TypeConverter::getTypeLowering(AbstractionPattern origType,
 
   return *lowering;
 }
+
+namespace swift::test {
+// Arguments:
+// - value: whose type will be printed
+// Dumps:
+// - the type lowering of the type
+static FunctionTest PrintTypeLowering("print-type-lowering", [](auto &function,
+                                                                auto &arguments,
+                                                                auto &test) {
+  auto value = arguments.takeValue();
+  auto ty = value->getType();
+  function.getModule().Types.getTypeLowering(ty, function).print(llvm::outs());
+});
+} // end namespace swift::test
 
 #ifndef NDEBUG
 bool TypeConverter::visitAggregateLeaves(
@@ -3352,30 +3376,6 @@ static CanAnyFunctionType getStoredPropertyInitializerInterfaceType(
                                  info);
 }
 
-/// Type of runtime discoverable attribute generator is () -> <#AttrType#>
-static CanAnyFunctionType
-getRuntimeAttributeGeneratorInterfaceType(TypeConverter &TC, SILDeclRef c) {
-  auto *attachedToDecl = c.getDecl();
-  auto *attr = c.pointer.get<CustomAttr *>();
-  auto *attrType = attachedToDecl->getRuntimeDiscoverableAttrTypeDecl(attr);
-  auto generator =
-      attachedToDecl->getRuntimeDiscoverableAttributeGenerator(attr);
-
-  auto resultTy = generator.second->getCanonicalType();
-
-  CanType canResultTy = resultTy->getReducedType(
-      attrType->getInnermostDeclContext()->getGenericSignatureOfContext());
-
-  // Remove @noescape from function return types. A @noescape
-  // function return type is a contradiction.
-  canResultTy = removeNoEscape(canResultTy);
-
-  // FIXME: Verify ExtInfo state is correct, not working by accident.
-  CanAnyFunctionType::ExtInfo info;
-  return CanAnyFunctionType::get(/*genericSignature=*/nullptr,
-                                 /*params=*/{}, canResultTy, info);
-}
-
 /// Get the type of a property wrapper backing initializer,
 /// (property-type) -> backing-type.
 static CanAnyFunctionType getPropertyWrapperBackingInitializerInterfaceType(
@@ -3415,7 +3415,7 @@ static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
          && "There are no foreign destroying destructors");
   auto extInfoBuilder =
       AnyFunctionType::ExtInfoBuilder(FunctionType::Representation::Thin,
-                                      /*throws*/ false);
+                                      /*throws*/ false, Type());
   if (isForeign)
     extInfoBuilder = extInfoBuilder.withSILRepresentation(
         SILFunctionTypeRepresentation::ObjCMethod);
@@ -3452,7 +3452,7 @@ static CanAnyFunctionType getIVarInitDestroyerInterfaceType(ClassDecl *cd,
                      : classType);
   auto extInfoBuilder =
       AnyFunctionType::ExtInfoBuilder(FunctionType::Representation::Thin,
-                                      /*throws*/ false);
+                                      /*throws*/ false, Type());
   auto extInfo = extInfoBuilder
                      .withSILRepresentation(
                          isObjC ? SILFunctionTypeRepresentation::ObjCMethod
@@ -3481,7 +3481,8 @@ getFunctionInterfaceTypeWithCaptures(TypeConverter &TC,
 
   auto innerExtInfo =
       AnyFunctionType::ExtInfoBuilder(FunctionType::Representation::Thin,
-                                      funcType->isThrowing())
+                                      funcType->isThrowing(),
+                                      funcType->getThrownError())
           .withConcurrent(funcType->isSendable())
           .withAsync(funcType->isAsync())
           .build();
@@ -3513,7 +3514,7 @@ static CanAnyFunctionType getAsyncEntryPoint(ASTContext &C) {
 
   CanType returnType = C.getVoidType()->getCanonicalType();
   FunctionType::ExtInfo extInfo =
-      FunctionType::ExtInfoBuilder().withAsync(true).withThrows(false).build();
+      FunctionType::ExtInfoBuilder().withAsync(true).build();
   return CanAnyFunctionType::get(/*genericSig*/ nullptr, {}, returnType,
                                  extInfo);
 }
@@ -3636,8 +3637,6 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
     return getAsyncEntryPoint(Context);
   case SILDeclRef::Kind::EntryPoint:
     return getEntryPointInterfaceType(Context);
-  case SILDeclRef::Kind::RuntimeAttributeGenerator:
-    return getRuntimeAttributeGeneratorInterfaceType(*this, c);
   }
 
   llvm_unreachable("Unhandled SILDeclRefKind in switch.");
@@ -3691,7 +3690,6 @@ TypeConverter::getConstantGenericSignature(SILDeclRef c) {
     return vd->getDeclContext()->getGenericSignatureOfContext();
   case SILDeclRef::Kind::EntryPoint:
   case SILDeclRef::Kind::AsyncEntryPoint:
-  case SILDeclRef::Kind::RuntimeAttributeGenerator:
     llvm_unreachable("Doesn't have generic signature");
   }
 
@@ -3916,7 +3914,7 @@ TypeConverter::getLoweredLocalCaptures(SILDeclRef fn) {
           continue;
 
         // We can always capture the storage in these cases.
-        Type captureType = capturedVar->getType()->getMetatypeInstanceType();
+        Type captureType = capturedVar->getTypeInContext()->getMetatypeInstanceType();
 
         if (auto *selfType = captureType->getAs<DynamicSelfType>()) {
           captureType = selfType->getSelfType();
@@ -4245,6 +4243,11 @@ TypeConverter::checkFunctionForABIDifferences(SILModule &M,
   // we might have pointer equality here.
   if (fnTy1 == fnTy2)
     return ABIDifference::CompatibleRepresentation;
+
+  // Force unimplementable functions into the thunk path so that we don't
+  // have to worry about diagnosing this in a ton of different places.
+  if (fnTy1->isUnimplementable() || fnTy2->isUnimplementable())
+    return ABIDifference::NeedsThunk;
 
   if (fnTy1->getParameters().size() != fnTy2->getParameters().size())
     return ABIDifference::NeedsThunk;

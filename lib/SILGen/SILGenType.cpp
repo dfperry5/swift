@@ -47,6 +47,9 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass, SILDeclRef derived,
   auto *baseDecl = cast<AbstractFunctionDecl>(base.getDecl());
   auto *derivedDecl = cast<AbstractFunctionDecl>(derived.getDecl());
 
+  if (shouldSkipDecl(baseDecl))
+    return llvm::None;
+
   // Note: We intentionally don't support extension members here.
   //
   // Once extensions can override or introduce new vtable entries, this will
@@ -1098,9 +1101,9 @@ public:
   void emitType() {
     SGM.emitLazyConformancesForType(theType);
 
-    forEachMemberToLower(theType, [&](Decl *member) {
+    for (Decl *member : theType->getABIMembers()) {
       visit(member);
-    });
+    }
 
     // Build a vtable if this is a class.
     if (auto theClass = dyn_cast<ClassDecl>(theType)) {
@@ -1141,6 +1144,13 @@ public:
   //===--------------------------------------------------------------------===//
   // Visitors for subdeclarations
   //===--------------------------------------------------------------------===//
+  void visit(Decl *D) {
+    if (SGM.shouldSkipDecl(D))
+      return;
+
+    TypeMemberVisitor::visit(D);
+  }
+
   void visitTypeAliasDecl(TypeAliasDecl *tad) {}
   void visitOpaqueTypeDecl(OpaqueTypeDecl *otd) {}
   void visitGenericTypeParamDecl(GenericTypeParamDecl *d) {}
@@ -1273,9 +1283,9 @@ public:
     // @_objcImplementation extension, but we don't actually need to do any of
     // the stuff that it currently does.
 
-    forEachMemberToLower(e, [&](Decl *member) {
+    for (Decl *member : e->getABIMembers()) {
       visit(member);
-    });
+    }
 
     // If this is a main-interface @_objcImplementation extension and the class
     // has a synthesized destructor, emit it now.
@@ -1300,6 +1310,13 @@ public:
   //===--------------------------------------------------------------------===//
   // Visitors for subdeclarations
   //===--------------------------------------------------------------------===//
+  void visit(Decl *D) {
+    if (SGM.shouldSkipDecl(D))
+      return;
+
+    TypeMemberVisitor::visit(D);
+  }
+
   void visitTypeAliasDecl(TypeAliasDecl *tad) {}
   void visitOpaqueTypeDecl(OpaqueTypeDecl *tad) {}
   void visitGenericTypeParamDecl(GenericTypeParamDecl *d) {}

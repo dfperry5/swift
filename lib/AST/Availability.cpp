@@ -23,6 +23,7 @@
 #include "swift/AST/TypeWalker.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/Platform.h"
+#include "swift/ClangImporter/ClangModule.h"
 #include <map>
 
 using namespace swift;
@@ -225,6 +226,8 @@ AvailabilityInference::attrForAnnotatedAvailableRange(const Decl *D,
                                                       ASTContext &Ctx) {
   const AvailableAttr *bestAvailAttr = nullptr;
 
+  D = abstractSyntaxDeclForAvailableAttribute(D);
+
   for (auto Attr : D->getAttrs()) {
     auto *AvailAttr = dyn_cast<AvailableAttr>(Attr);
     if (AvailAttr == nullptr || !AvailAttr->Introduced.has_value() ||
@@ -294,6 +297,39 @@ llvm::Optional<AvailableAttrDeclPair> Decl::getSemanticUnavailableAttr() const {
   auto &eval = getASTContext().evaluator;
   return evaluateOrDefault(eval, SemanticUnavailableAttrRequest{this},
                            llvm::None);
+}
+
+static bool isUnconditionallyUnavailable(const Decl *D) {
+  if (auto unavailableAttrAndDecl = D->getSemanticUnavailableAttr())
+    return unavailableAttrAndDecl->first->isUnconditionallyUnavailable();
+
+  return false;
+}
+
+bool Decl::isAvailableDuringLowering() const {
+  // Unconditionally unavailable declarations should be skipped during lowering
+  // when -unavailable-decl-optimization=complete is specified.
+  if (getASTContext().LangOpts.UnavailableDeclOptimizationMode !=
+      UnavailableDeclOptimization::Complete)
+    return true;
+
+  if (isa<ClangModuleUnit>(getDeclContext()->getModuleScopeContext()))
+    return true;
+
+  return !isUnconditionallyUnavailable(this);
+}
+
+bool Decl::requiresUnavailableDeclABICompatibilityStubs() const {
+  // Code associated with unavailable declarations should trap at runtime if
+  // -unavailable-decl-optimization=stub is specified.
+  if (getASTContext().LangOpts.UnavailableDeclOptimizationMode !=
+      UnavailableDeclOptimization::Stub)
+    return false;
+
+  if (isa<ClangModuleUnit>(getDeclContext()->getModuleScopeContext()))
+    return false;
+
+  return isUnconditionallyUnavailable(this);
 }
 
 bool UnavailabilityReason::requiresDeploymentTargetOrEarlier(
@@ -493,6 +529,10 @@ AvailabilityContext ASTContext::getConcurrencyAvailability() {
   return getSwift55Availability();
 }
 
+AvailabilityContext ASTContext::getConcurrencyDiscardingTaskGroupAvailability() {
+  return getSwift59Availability();
+}
+
 AvailabilityContext ASTContext::getBackDeployedConcurrencyAvailability() {
   return getSwift51Availability();
 }
@@ -528,6 +568,25 @@ ASTContext::getImmortalRefCountSymbolsAvailability() {
 AvailabilityContext
 ASTContext::getVariadicGenericTypeAvailability() {
   return getSwift59Availability();
+}
+
+AvailabilityContext
+ASTContext::getSignedConformsToProtocolAvailability() {
+  return getSwift59Availability();
+}
+
+AvailabilityContext
+ASTContext::getSignedDescriptorAvailability() {
+  return getSwift59Availability();
+}
+
+AvailabilityContext
+ASTContext::getInitRawStructMetadataAvailability() {
+  return getSwiftFutureAvailability();
+}
+
+AvailabilityContext ASTContext::getObjCSymbolicReferencesAvailability() {
+  return getSwiftFutureAvailability();
 }
 
 AvailabilityContext ASTContext::getSwift52Availability() {
@@ -677,8 +736,20 @@ AvailabilityContext ASTContext::getSwift58Availability() {
 }
 
 AvailabilityContext ASTContext::getSwift59Availability() {
-  // TODO: Update Availability impl when Swift 5.9 is released
-  return getSwiftFutureAvailability();
+  auto target = LangOpts.Target;
+
+  if (target.isMacOSX()) {
+    return AvailabilityContext(
+        VersionRange::allGTE(llvm::VersionTuple(14, 0, 0)));
+  } else if (target.isiOS()) {
+    return AvailabilityContext(
+        VersionRange::allGTE(llvm::VersionTuple(17, 0, 0)));
+  } else if (target.isWatchOS()) {
+    return AvailabilityContext(
+        VersionRange::allGTE(llvm::VersionTuple(10, 0, 0)));
+  } else {
+    return AvailabilityContext::alwaysAvailable();
+  }
 }
 
 AvailabilityContext ASTContext::getSwiftFutureAvailability() {
@@ -722,4 +793,34 @@ ASTContext::getSwift5PlusAvailability(llvm::VersionTuple swiftVersion) {
 
 bool ASTContext::supportsVersionedAvailability() const {
   return minimumAvailableOSVersionForTriple(LangOpts.Target).has_value();
+}
+
+// FIXME: Rename abstractSyntaxDeclForAvailableAttribute since it's useful
+// for more attributes than `@available`.
+const Decl *
+swift::abstractSyntaxDeclForAvailableAttribute(const Decl *ConcreteSyntaxDecl) {
+  // This function needs to be kept in sync with its counterpart,
+  // concreteSyntaxDeclForAvailableAttribute().
+
+  if (auto *PBD = dyn_cast<PatternBindingDecl>(ConcreteSyntaxDecl)) {
+    // Existing @available attributes in the AST are attached to VarDecls
+    // rather than PatternBindingDecls, so we return the first VarDecl for
+    // the pattern binding declaration.
+    // This is safe, even though there may be multiple VarDecls, because
+    // all parsed attribute that appear in the concrete syntax upon on the
+    // PatternBindingDecl are added to all of the VarDecls for the pattern
+    // binding.
+    for (auto index : range(PBD->getNumPatternEntries())) {
+      if (auto VD = PBD->getAnchoringVarDecl(index))
+        return VD;
+    }
+  } else if (auto *ECD = dyn_cast<EnumCaseDecl>(ConcreteSyntaxDecl)) {
+    // Similar to the PatternBindingDecl case above, we return the
+    // first EnumElementDecl.
+    if (auto *Elem = ECD->getFirstElement()) {
+      return Elem;
+    }
+  }
+
+  return ConcreteSyntaxDecl;
 }

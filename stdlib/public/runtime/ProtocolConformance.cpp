@@ -1147,8 +1147,8 @@ swift_conformsToProtocolMaybeInstantiateSuperclasses(
 }
 
 static const WitnessTable *
-swift_conformsToProtocolImpl(const Metadata *const type,
-                             const ProtocolDescriptor *protocol) {
+swift_conformsToProtocolCommonImpl(const Metadata *const type,
+                                   const ProtocolDescriptor *protocol) {
   const WitnessTable *table;
   bool hasUninstantiatedSuperclass;
 
@@ -1171,6 +1171,26 @@ swift_conformsToProtocolImpl(const Metadata *const type,
             type, protocol, true /*instantiateSuperclassMetadata*/);
 
   return table;
+}
+
+static const WitnessTable *
+swift_conformsToProtocol2Impl(const Metadata *const type,
+                              const ProtocolDescriptor *protocol) {
+  protocol = swift_auth_data_non_address(
+      protocol, SpecialPointerAuthDiscriminators::ProtocolDescriptor);
+  return swift_conformsToProtocolCommonImpl(type, protocol);
+}
+
+static const WitnessTable *
+swift_conformsToProtocolImpl(const Metadata *const type,
+                             const void *protocol) {
+  // This call takes `protocol` without a ptrauth signature. We declare
+  // it as `void *` to avoid the implicit ptrauth we get from the
+  // ptrauth_struct attribute. The static_cast implicitly signs the
+  // pointer when we call through to the implementation in
+  // swift_conformsToProtocolCommon.
+  return swift_conformsToProtocolCommonImpl(
+      type, static_cast<const ProtocolDescriptor *>(protocol));
 }
 
 const ContextDescriptor *
@@ -1454,7 +1474,7 @@ checkGenericPackRequirement(const GenericRequirementDescriptor &req,
         const char *protoName =
             req.getProtocol() ? req.getProtocol().getName() : "<null>";
         return TYPE_LOOKUP_ERROR_FMT(
-            "subject type %.*s does not conform to protocol %s at pack index %lu",
+            "subject type %.*s does not conform to protocol %s at pack index %zu",
             (int)req.getParam().size(), req.getParam().data(), protoName, i);
       }
 
@@ -1485,7 +1505,7 @@ checkGenericPackRequirement(const GenericRequirementDescriptor &req,
 
     if (subjectType.getNumElements() != constraintType.getNumElements()) {
       return TYPE_LOOKUP_ERROR_FMT(
-            "mismatched pack lengths in same-type pack requirement %.*s: %lu vs %lu",
+            "mismatched pack lengths in same-type pack requirement %.*s: %zu vs %zu",
             (int)req.getParam().size(), req.getParam().data(),
             subjectType.getNumElements(), constraintType.getNumElements());
     }
@@ -1496,7 +1516,7 @@ checkGenericPackRequirement(const GenericRequirementDescriptor &req,
 
       if (subjectElt != constraintElt) {
         return TYPE_LOOKUP_ERROR_FMT(
-            "subject type %.*s does not match %.*s at pack index %lu",
+            "subject type %.*s does not match %.*s at pack index %zu",
             (int)req.getParam().size(),
             req.getParam().data(), (int)req.getMangledTypeName().size(),
             req.getMangledTypeName().data(), i);
@@ -1531,7 +1551,7 @@ checkGenericPackRequirement(const GenericRequirementDescriptor &req,
 
       if (!isSubclassOrExistential(elt, baseType))
       return TYPE_LOOKUP_ERROR_FMT(
-          "%.*s is not subclass of %.*s at pack index %lu",
+          "%.*s is not subclass of %.*s at pack index %zu",
           (int)req.getParam().size(),
           req.getParam().data(), (int)req.getMangledTypeName().size(),
           req.getMangledTypeName().data(), i);
@@ -1556,7 +1576,7 @@ checkGenericPackRequirement(const GenericRequirementDescriptor &req,
 
     if (subjectType.getNumElements() != otherType.getNumElements()) {
       return TYPE_LOOKUP_ERROR_FMT("same-shape requirement unsatisfied; "
-                                   "%lu != %lu",
+                                   "%zu != %zu",
                                    subjectType.getNumElements(),
                                    otherType.getNumElements() );
     }

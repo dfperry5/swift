@@ -39,6 +39,15 @@ public struct Simple {
     }
 }
 
+public struct GenericStruct<T> {
+    let x: Int = 0
+    let y: T
+
+    public init(_ y: T) {
+        self.y = y
+    }
+}
+
 public class GenericClass<T> {
     let x: T
 
@@ -223,6 +232,32 @@ public struct Recursive<T> {
     }
 }
 
+public protocol A {}
+public protocol B {}
+public protocol C {}
+
+public struct MultiProtocolExistentialWrapper {
+    let x: Int = 0
+    let y: any (A&B&C)
+    let z: AnyObject
+
+    public init(y: any (A&B&C), z: AnyObject) {
+        self.y = y
+        self.z = z
+    }
+}
+
+public struct AnyWrapper {
+    let x: Int = 0
+    let y: Any
+    let z: AnyObject
+
+    public init(y: Any, z: AnyObject) {
+        self.y = y
+        self.z = z
+    }
+}
+
 #if os(macOS)
 import Foundation
 
@@ -276,9 +311,19 @@ public struct Wrapper<T> {
     }
 }
 
+public struct NestedWrapper<T> {
+    public let x: Wrapper<T>
+    public let y: Wrapper<T>
+
+    public init(x: Wrapper<T>, y: Wrapper<T>) {
+        self.x = x
+        self.y = y
+    }
+}
+
 struct InternalGeneric<T> {
-    let x: T
     let y: Int
+    let x: T
 }
 
 public enum SinglePayloadSimpleClassEnum {
@@ -432,6 +477,14 @@ public struct ComplexNesting<A, B, C, D> {
     }
 }
 
+public enum SinglePayloadAnyHashableEnum {
+    case empty0
+    case empty1
+    case empty2
+    case empty3
+    case nonEmpty(AnyHashable)
+}
+
 internal enum InternalEnum {
   case a(Int, AnyObject)
   case b(Int)
@@ -473,6 +526,23 @@ public struct PrespecializedStruct<T> {
     }
 }
 
+public enum PrespecializedSingletonEnum<T> {
+    case only(Int, T)
+}
+
+public enum PrespecializedSinglePayloadEnum<T> {
+    case empty0
+    case empty1
+    case nonEmpty(Int, T)
+}
+
+public enum PrespecializedMultiPayloadEnum<T> {
+    case empty0
+    case empty1
+    case nonEmpty0(Int, T)
+    case nonEmpty1(T, Int)
+}
+
 @inline(never)
 public func consume<T>(_ x: T.Type) {
     withExtendedLifetime(x) {}
@@ -481,11 +551,28 @@ public func preSpec() {
     consume(PrespecializedStruct<AnyObject>.self)
     consume(PrespecializedStruct<SimpleClass>.self)
     consume(PrespecializedStruct<Int>.self)
+
+    consume(PrespecializedSingletonEnum<AnyObject>.self)
+    consume(PrespecializedSingletonEnum<SimpleClass>.self)
+    consume(PrespecializedSingletonEnum<Int>.self)
+
+    consume(PrespecializedSinglePayloadEnum<AnyObject>.self)
+    consume(PrespecializedSinglePayloadEnum<SimpleClass>.self)
+    consume(PrespecializedSinglePayloadEnum<Int>.self)
+
+    consume(PrespecializedMultiPayloadEnum<AnyObject>.self)
+    consume(PrespecializedMultiPayloadEnum<SimpleClass>.self)
+    consume(PrespecializedMultiPayloadEnum<Int>.self)
 }
 
 @inline(never)
 public func testAssign<T>(_ ptr: UnsafeMutablePointer<T>, from x: T) {
     ptr.pointee = x
+}
+
+@inline(never)
+public func testAssign<T>(_ ptr: UnsafeMutablePointer<T>, from x: UnsafeMutablePointer<T>) {
+    ptr.assign(from: x, count: 1)
 }
 
 @inline(never)
@@ -507,19 +594,34 @@ public func allocateInternalGenericPtr<T>(of tpe: T.Type) -> UnsafeMutableRawPoi
 @inline(never)
 public func testGenericAssign<T>(_ ptr: __owned UnsafeMutableRawPointer, from x: T) {
     let ptr = ptr.assumingMemoryBound(to: InternalGeneric<T>.self)
-    let x = InternalGeneric(x: x, y: 23)
+    let x = InternalGeneric(y: 23, x: x)
     testAssign(ptr, from: x)
 }
 
 @inline(never)
 public func testGenericInit<T>(_ ptr: __owned UnsafeMutableRawPointer, to x: T) {
     let ptr = ptr.assumingMemoryBound(to: InternalGeneric<T>.self)
-    let x = InternalGeneric(x: x, y: 23)
+    let x = InternalGeneric(y: 23, x: x)
     testInit(ptr, to: x)
 }
 
 @inline(never)
 public func testGenericDestroy<T>(_ ptr: __owned UnsafeMutableRawPointer, of tpe: T.Type) {
-    let ptr = ptr.assumingMemoryBound(to: tpe)
+    let ptr = ptr.assumingMemoryBound(to: InternalGeneric<T>.self)
     testDestroy(ptr)
+}
+
+@inline(never)
+public func testGenericArrayDestroy<T>(_ buffer: UnsafeMutableBufferPointer<T>) {
+    buffer.deinitialize()
+}
+
+@inline(never)
+public func testGenericArrayInitWithCopy<T>(dest: UnsafeMutableBufferPointer<T>, src: UnsafeMutableBufferPointer<T>) {
+    dest.initialize(fromContentsOf: src)
+}
+
+@inline(never)
+public func testGenericArrayAssignWithCopy<T>(dest: UnsafeMutableBufferPointer<T>, src: UnsafeMutableBufferPointer<T>) {
+    dest.update(fromContentsOf: src)
 }

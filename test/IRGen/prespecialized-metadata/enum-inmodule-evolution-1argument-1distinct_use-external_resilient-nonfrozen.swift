@@ -6,6 +6,7 @@
 // UNSUPPORTED: CPU=i386 && OS=ios
 // UNSUPPORTED: CPU=armv7 && OS=ios
 // UNSUPPORTED: CPU=armv7s && OS=ios
+// UNSUPPORTED: CPU=wasm32
 
 import TestModule
 
@@ -25,7 +26,7 @@ enum Value<First> {
 // CHECK:      [[DEMANGLED_TYPE:%[0-9]+]] = call ptr @__swift_instantiateConcreteTypeFromMangledName(
 // CHECK-SAME:   $s4main5ValueOy10TestModule7IntegerVGMD
 // CHECK:   call swiftcc void @"$s4main7consumeyyxlF"(
-// CHECK-SAME:   ptr noalias nocapture %{{[0-9]+}}, 
+// CHECK-SAME:   ptr noalias %{{[0-9]+}}, 
 // CHECK-SAME:   ptr [[DEMANGLED_TYPE]]
 // CHECK-SAME: )
 // CHECK: }

@@ -380,7 +380,7 @@ public:
       return E;
     }
 
-    // ( 'os' | 'arch' | '_endian' | '_pointerBitWidth' | '_runtime' ) '(' identifier ')''
+    // ( 'os' | 'arch' | '_endian' | '_pointerBitWidth' | '_runtime' | '_hasAtomicBitWidth' ) '(' identifier ')''
     auto Kind = getPlatformConditionKind(*KindName);
     if (!Kind.has_value()) {
       D.diagnose(E->getLoc(), diag::unsupported_platform_condition_expression);
@@ -422,6 +422,8 @@ public:
         DiagName = "target environment"; break;
       case PlatformConditionKind::PtrAuth:
         DiagName = "pointer authentication scheme"; break;
+      case PlatformConditionKind::HasAtomicBitWidth:
+        DiagName = "has atomic bit width"; break;
       case PlatformConditionKind::Runtime:
         llvm_unreachable("handled above");
       }
@@ -557,7 +559,7 @@ public:
 
     // Check whether this is any one of the known compiler features.
     const auto &langOpts = Ctx.LangOpts;
-#if SWIFT_SWIFT_PARSER
+#if SWIFT_BUILD_SWIFT_SYNTAX
     const bool hasSwiftSwiftParser = true;
 #else
     const bool hasSwiftSwiftParser = false;

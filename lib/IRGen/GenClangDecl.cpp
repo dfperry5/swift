@@ -12,6 +12,7 @@
 
 #include "IRGenModule.h"
 #include "swift/AST/ASTContext.h"
+#include "swift/AST/ClangModuleLoader.h"
 #include "swift/AST/IRGenOptions.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
@@ -186,6 +187,9 @@ void IRGenModule::emitClangDecl(const clang::Decl *decl) {
         break;
       }
       if (isa<clang::TagDecl>(DC)) {
+        break;
+      }
+      if (isa<clang::LinkageSpecDecl>(DC)) {
         break;
       }
       D = cast<const clang::Decl>(DC);

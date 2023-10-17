@@ -1,5 +1,6 @@
 struct __attribute__((swift_attr("import_unsafe"))) NonTrivial {
   NonTrivial() {}
+  NonTrivial(const NonTrivial &) {}
   ~NonTrivial() {}
 
   inline const char *inNonTrivial() const
@@ -50,6 +51,14 @@ struct Base {
   }
 
   void pure() const __attribute__((pure)) {}
+
+  inline int sameMethodNameSameSignature() const {
+    return 42;
+  }
+
+  inline int sameMethodDifferentSignature() const {
+    return 18;
+  }
 };
 
 struct OtherBase {
@@ -64,6 +73,14 @@ struct Derived : Base, OtherBase {
   inline const char *inDerived() const
       __attribute__((swift_attr("import_unsafe"))) {
     return "Derived::inDerived";
+  }
+
+  inline int sameMethodNameSameSignature() const {
+    return 21;
+  }
+
+  inline int sameMethodDifferentSignature(int x) const {
+    return x + 1;
   }
 };
 
@@ -92,4 +109,49 @@ struct EmptyBaseClass {
 struct DerivedFromEmptyBaseClass : EmptyBaseClass {
   int a = 42;
   int b = 42;
+};
+
+int &getCopyCounter() {
+    static int copyCounter = 0;
+    return copyCounter;
+}
+
+class CopyTrackedBaseClass {
+public:
+    CopyTrackedBaseClass(int x) : x(x) {}
+    CopyTrackedBaseClass(const CopyTrackedBaseClass &other) : x(other.x) {
+        ++getCopyCounter();
+    }
+
+    int getX() const {
+        return x;
+    }
+    int getXMut() {
+        return x;
+    }
+private:
+    int x;
+};
+
+class CopyTrackedDerivedClass: public CopyTrackedBaseClass {
+public:
+    CopyTrackedDerivedClass(int x) : CopyTrackedBaseClass(x) {}
+
+    int getDerivedX() const {
+        return getX();
+    }
+};
+
+class NonEmptyBase {
+public:
+    int getY() const {
+        return y;
+    }
+private:
+    int y = 11;
+};
+
+class CopyTrackedDerivedDerivedClass: public NonEmptyBase, public CopyTrackedDerivedClass {
+public:
+    CopyTrackedDerivedDerivedClass(int x) : CopyTrackedDerivedClass(x) {}
 };

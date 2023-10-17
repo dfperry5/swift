@@ -629,6 +629,10 @@ const TypeInfo *TypeConverter::convertFunctionType(SILFunctionType *T) {
   case SILFunctionType::Representation::WitnessMethod:
   case SILFunctionType::Representation::CFunctionPointer:
   case SILFunctionType::Representation::Closure:
+  case SILFunctionType::Representation::KeyPathAccessorGetter:
+  case SILFunctionType::Representation::KeyPathAccessorSetter:
+  case SILFunctionType::Representation::KeyPathAccessorEquals:
+  case SILFunctionType::Representation::KeyPathAccessorHash:
     return ThinFuncTypeInfo::create(CanSILFunctionType(T),
                                     IGM.FunctionPtrTy,
                                     IGM.getPointerSize(),
@@ -702,6 +706,10 @@ getFuncSignatureInfoForLowered(IRGenModule &IGM, CanSILFunctionType type) {
   case SILFunctionType::Representation::CXXMethod:
   case SILFunctionType::Representation::WitnessMethod:
   case SILFunctionType::Representation::Closure:
+  case SILFunctionType::Representation::KeyPathAccessorGetter:
+  case SILFunctionType::Representation::KeyPathAccessorSetter:
+  case SILFunctionType::Representation::KeyPathAccessorEquals:
+  case SILFunctionType::Representation::KeyPathAccessorHash:
     return ti.as<ThinFuncTypeInfo>();
   case SILFunctionType::Representation::ObjCMethod:
     return static_cast<const FuncSignatureInfo &>(ti.as<ObjCFuncTypeInfo>());
@@ -1110,6 +1118,10 @@ public:
   void forwardErrorResult() override {
     llvm::Value *errorResultPtr = origParams.claimNext();
     args.add(errorResultPtr);
+    if (origConv.isTypedError()) {
+      auto *typedErrorResultPtr = origParams.claimNext();
+      args.add(typedErrorResultPtr);
+    }
   }
   llvm::CallInst *createCall(FunctionPointer &fnPtr) override {
     return subIGF.Builder.CreateCall(fnPtr, args.claimAll());
@@ -1281,8 +1293,12 @@ public:
   }
 
   void forwardErrorResult() override {
-    // Nothing to do here.  The error result pointer is already in the
-    // appropriate position.
+    // The error result pointer is already in the appropriate position but the
+    // type error address is not.
+    if (origConv.isTypedError()) {
+      auto *typedErrorResultPtr = origParams.claimNext();
+      args.add(typedErrorResultPtr);
+    }
   }
   llvm::CallInst *createCall(FunctionPointer &fnPtr) override {
     PointerAuthInfo newAuthInfo =

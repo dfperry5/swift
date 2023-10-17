@@ -685,6 +685,11 @@ struct CursorInfoData {
   /// \c CursorInfoData.
   llvm::BumpPtrAllocator Allocator;
 
+  bool isEmpty() const {
+    return InternalDiagnostic.empty() && Symbols.empty() &&
+           AvailableActions.empty();
+  }
+
   void print(llvm::raw_ostream &OS, std::string Indentation) const {
     OS << Indentation << "CursorInfoData" << '\n';
     OS << Indentation << "  Symbols:" << '\n';
@@ -873,10 +878,18 @@ struct RenameLocations {
   std::vector<RenameLocation> LineColumnLocs;
 };
 
+struct IndexStoreOptions {
+  std::string IndexStorePath;
+  std::string IndexUnitOutputPath;
+};
+
+struct IndexStoreInfo{};
+
 typedef std::function<void(RequestResult<ArrayRef<CategorizedEdits>> Result)>
     CategorizedEditsReceiver;
 typedef std::function<void(RequestResult<ArrayRef<CategorizedRenameRanges>> Result)>
     CategorizedRenameRangesReceiver;
+typedef std::function<void(RequestResult<IndexStoreInfo> Result)> IndexToStoreReceiver;
 
 class DocInfoConsumer {
   virtual void anchor();
@@ -986,6 +999,12 @@ public:
   virtual void indexSource(StringRef Filename,
                            IndexingConsumer &Consumer,
                            ArrayRef<const char *> Args) = 0;
+
+  virtual void indexToStore(StringRef InputFile,
+                            ArrayRef<const char *> Args,
+                            IndexStoreOptions Opts,
+                            SourceKitCancellationToken CancellationToken,
+                            IndexToStoreReceiver Receiver) = 0;
 
   virtual void codeComplete(llvm::MemoryBuffer *InputBuf, unsigned Offset,
                             OptionsDictionary *options,

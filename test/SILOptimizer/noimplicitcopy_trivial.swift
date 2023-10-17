@@ -1078,3 +1078,21 @@ public func noImplicitCopyReturnUse(_ x: Int) -> Int {
     let _ = z
     return y // expected-note {{consumed again here}}
 }
+
+func takeClosure(_ f: ()->Int) -> Int { f() }
+
+public func test1(i: consuming Int) -> Int {
+  takeClosure { [i = copy i] in i }
+}
+
+public func test2(i: borrowing Int) -> Int {
+  takeClosure { [i = copy i] in i }
+}
+
+public func test3(i: consuming Int) -> Int {
+  takeClosure { i }
+}
+
+public func test4(i: borrowing Int) -> Int {  // expected-error {{'i' cannot be captured by an escaping closure}}
+  takeClosure { i } // expected-note {{closure capturing 'i' here}}
+}

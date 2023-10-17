@@ -30,31 +30,6 @@
 
 using namespace swift;
 
-/// Determine the kind of a default argument given a parsed
-/// expression that has not yet been type-checked.
-static DefaultArgumentKind getDefaultArgKind(Expr *init) {
-  if (!init)
-    return DefaultArgumentKind::None;
-
-  // Parse an as-written 'nil' expression as the special NilLiteral kind,
-  // which is emitted by the caller and can participate in rethrows
-  // checking.
-  if (isa<NilLiteralExpr>(init))
-    return DefaultArgumentKind::NilLiteral;
-
-  auto magic = dyn_cast<MagicIdentifierLiteralExpr>(init);
-  if (!magic)
-    return DefaultArgumentKind::Normal;
-
-  switch (magic->getKind()) {
-#define MAGIC_IDENTIFIER(NAME, STRING, SYNTAX_KIND) \
-  case MagicIdentifierLiteralExpr::NAME: return DefaultArgumentKind::NAME;
-#include "swift/AST/MagicIdentifierKinds.def"
-  }
-
-  llvm_unreachable("Unhandled MagicIdentifierLiteralExpr in switch.");
-}
-
 void Parser::DefaultArgumentInfo::setFunctionContext(
     DeclContext *DC, ParameterList *paramList){
   for (auto context : ParsedContexts) {
@@ -827,6 +802,7 @@ Parser::parseFunctionSignature(DeclBaseName SimpleName,
                                bool &reasync,
                                SourceLoc &throwsLoc,
                                bool &rethrows,
+                               TypeRepr *&thrownType,
                                TypeRepr *&retType) {
   SmallVector<Identifier, 4> NamePieces;
   ParserStatus Status;
@@ -843,9 +819,10 @@ Parser::parseFunctionSignature(DeclBaseName SimpleName,
   // Check for the 'async' and 'throws' keywords.
   reasync = false;
   rethrows = false;
+  thrownType = nullptr;
   Status |= parseEffectsSpecifiers(SourceLoc(),
                                    asyncLoc, &reasync,
-                                   throwsLoc, &rethrows);
+                                   throwsLoc, &rethrows, thrownType);
 
   // If there's a trailing arrow, parse the rest as the result type.
   SourceLoc arrowLoc;
@@ -859,7 +836,8 @@ Parser::parseFunctionSignature(DeclBaseName SimpleName,
 
     // Check for effect specifiers after the arrow, but before the return type,
     // and correct it.
-    parseEffectsSpecifiers(arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows);
+    parseEffectsSpecifiers(arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows,
+                           thrownType);
 
     ParserResult<TypeRepr> ResultType =
         parseDeclResultType(diag::expected_type_function_result);
@@ -869,13 +847,19 @@ Parser::parseFunctionSignature(DeclBaseName SimpleName,
       return Status;
 
     // Check for effect specifiers after the type and correct it.
-    parseEffectsSpecifiers(arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows);
+    parseEffectsSpecifiers(
+        arrowLoc, asyncLoc, &reasync, throwsLoc, &rethrows, thrownType);
   } else {
     // Otherwise, we leave retType null.
     retType = nullptr;
   }
 
   return Status;
+}
+
+bool Parser::isThrowsEffectSpecifier(const Token &T) {
+  return T.isAny(tok::kw_throws, tok::kw_rethrows) ||
+    (T.isAny(tok::kw_throw, tok::kw_try) && !T.isAtStartOfLine());
 }
 
 bool Parser::isEffectsSpecifier(const Token &T) {
@@ -887,8 +871,7 @@ bool Parser::isEffectsSpecifier(const Token &T) {
       T.isContextualKeyword("reasync"))
     return true;
 
-  if (T.isAny(tok::kw_throws, tok::kw_rethrows) ||
-      (T.isAny(tok::kw_throw, tok::kw_try) && !T.isAtStartOfLine()))
+  if (isThrowsEffectSpecifier(T))
     return true;
 
   return false;
@@ -898,9 +881,9 @@ ParserStatus Parser::parseEffectsSpecifiers(SourceLoc existingArrowLoc,
                                             SourceLoc &asyncLoc,
                                             bool *reasync,
                                             SourceLoc &throwsLoc,
-                                            bool *rethrows) {
+                                            bool *rethrows,
+                                            TypeRepr *&thrownType) {
   ParserStatus status;
-
   while (true) {
     // 'async'
     bool isReasync = (shouldParseExperimentalConcurrency() &&
@@ -952,8 +935,7 @@ ParserStatus Parser::parseEffectsSpecifiers(SourceLoc existingArrowLoc,
     }
 
     // 'throws'/'rethrows', or diagnose 'throw'/'try'.
-    if (Tok.isAny(tok::kw_throws, tok::kw_rethrows) ||
-        (Tok.isAny(tok::kw_throw, tok::kw_try) && !Tok.isAtStartOfLine())) {
+    if (isThrowsEffectSpecifier(Tok)) {
       bool isRethrows = Tok.is(tok::kw_rethrows);
 
       if (throwsLoc.isValid()) {
@@ -980,6 +962,31 @@ ParserStatus Parser::parseEffectsSpecifiers(SourceLoc existingArrowLoc,
         throwsLoc = Tok.getLoc();
       }
       consumeToken();
+
+      // Parse the thrown error type.
+      SourceLoc lParenLoc;
+      if (consumeIf(tok::l_paren, lParenLoc)) {
+        ParserResult<TypeRepr> parsedThrownTy =
+            parseType(diag::expected_thrown_error_type);
+        thrownType = parsedThrownTy.getPtrOrNull();
+        status |= parsedThrownTy;
+
+        SourceLoc rParenLoc;
+        parseMatchingToken(
+            tok::r_paren, rParenLoc,
+            diag::expected_rparen_after_thrown_error_type, lParenLoc);
+
+        if (isRethrows) {
+          diagnose(throwsLoc, diag::rethrows_with_thrown_error)
+            .highlight(SourceRange(lParenLoc, rParenLoc));
+
+          isRethrows = false;
+
+          if (rethrows)
+            *rethrows = false;
+        }
+      }
+
       continue;
     }
 

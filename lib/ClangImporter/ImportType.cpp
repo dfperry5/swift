@@ -2076,15 +2076,6 @@ applyImportTypeAttrs(ImportTypeAttrs attrs, Type type,
 }
 
 ImportedType ClangImporter::Implementation::importFunctionReturnType(
-    const clang::FunctionDecl *clangDecl, DeclContext *dc) {
-  bool isInSystemModule =
-      cast<ClangModuleUnit>(dc->getModuleScopeContext())->isSystemModule();
-  bool allowNSUIntegerAsInt =
-      shouldAllowNSUIntegerAsInt(isInSystemModule, clangDecl);
-  return importFunctionReturnType(dc, clangDecl, allowNSUIntegerAsInt);
-}
-
-ImportedType ClangImporter::Implementation::importFunctionReturnType(
     DeclContext *dc, const clang::FunctionDecl *clangDecl,
     bool allowNSUIntegerAsInt) {
 
@@ -2188,6 +2179,10 @@ findGenericTypeInGenericDecls(ClangImporter::Implementation &impl,
       llvm::find_if(genericParams, [name](GenericTypeParamDecl *generic) {
         return generic->getName().str() == name;
       });
+  // We sometimes are unable compute the exact Swift type
+  // of symbolic declarations. Fallback to using `Any` in that case.
+  if (impl.importSymbolicCXXDecls && genericParamIter == genericParams.end())
+    return impl.SwiftContext.TheAnyType;
   // TODO: once we support generics in class types, replace this with
   // "return nullptr". Once support for template classes, this will need to
   // be updated, though. I'm leaving the assert here to make it easier to
@@ -2618,6 +2613,9 @@ ArgumentAttrs ClangImporter::Implementation::inferDefaultArgument(
   if (isFirstParameter && camel_case::getFirstWord(baseNameStr) == "set")
     return DefaultArgumentKind::None;
 
+  if (auto elaboratedTy = type->getAs<clang::ElaboratedType>())
+    type = elaboratedTy->desugar();
+
   // Some nullable parameters default to 'nil'.
   if (clangOptionality == OTK_Optional) {
     // Nullable trailing closure parameters default to 'nil'.
@@ -2669,6 +2667,8 @@ ArgumentAttrs ClangImporter::Implementation::inferDefaultArgument(
         if (camel_case::sameWordIgnoreFirstCase(word, "domain"))
           return argumentAttrs;
         if (camel_case::sameWordIgnoreFirstCase(word, "action"))
+          return argumentAttrs;
+        if (camel_case::sameWordIgnoreFirstCase(word, "event"))
           return argumentAttrs;
         if (camel_case::sameWordIgnoreFirstCase(word, "events") &&
             next != camelCaseWords.rend() &&
@@ -3224,6 +3224,9 @@ ImportedType ClangImporter::Implementation::importMethodParamsAndReturnType(
           importedType.isImplicitlyUnwrapped()};
 }
 
+ImportedType findOptionSetType(clang::QualType type,
+                               ClangImporter::Implementation &Impl);
+
 ImportedType ClangImporter::Implementation::importAccessorParamsAndReturnType(
     const DeclContext *dc, const clang::ObjCPropertyDecl *property,
     const clang::ObjCMethodDecl *clangDecl, bool isFromSystemModule,
@@ -3247,9 +3250,13 @@ ImportedType ClangImporter::Implementation::importAccessorParamsAndReturnType(
   DeclContext *origDC = importDeclContextOf(property,
                                             property->getDeclContext());
   assert(origDC);
+  auto fieldType = isGetter ? clangDecl->getReturnType()
+                            : clangDecl->getParamDecl(0)->getType();
 
   // Import the property type, independent of what kind of accessor this is.
-  auto importedType = importPropertyType(property, isFromSystemModule);
+  ImportedType importedType = findOptionSetType(fieldType, *this);
+  if (!importedType)
+    importedType = importPropertyType(property, isFromSystemModule);
   if (!importedType)
     return {Type(), false};
 
@@ -3430,7 +3437,7 @@ static Type getNamedProtocolType(ClangImporter::Implementation &impl,
   clang::LookupResult lookupResult(sema, clangName, clang::SourceLocation(),
                                    clang::Sema::LookupObjCProtocolName);
   lookupResult.setAllowHidden(true);
-  if (!sema.LookupName(lookupResult, /*Scope=*/nullptr))
+  if (!sema.LookupName(lookupResult, /*Scope=*/sema.TUScope))
     return Type();
 
   for (auto decl : lookupResult) {

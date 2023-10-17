@@ -727,8 +727,8 @@ static FuncDecl *createDistributedThunkFunction(FuncDecl *func) {
 
   FuncDecl *thunk = FuncDecl::createImplicit(
       C, swift::StaticSpellingKind::None, thunkName, SourceLoc(),
-      /*async=*/true, /*throws=*/true, genericParamList, params,
-      func->getResultInterfaceType(), DC);
+      /*async=*/true, /*throws=*/true, /*thrownType=*/Type(),
+      genericParamList, params, func->getResultInterfaceType(), DC);
 
   assert(thunk && "couldn't create a distributed thunk");
 
@@ -805,10 +805,11 @@ addDistributedActorCodableConformance(
     return nullptr;
   }
 
-  auto conformance = C.getConformance(actor->getDeclaredInterfaceType(), proto,
-                                      actor->getLoc(), /*dc=*/actor,
-                                      ProtocolConformanceState::Incomplete,
-                                      /*isUnchecked=*/false);
+  auto conformance = C.getNormalConformance(
+      actor->getDeclaredInterfaceType(), proto,
+      actor->getLoc(), /*dc=*/actor,
+      ProtocolConformanceState::Incomplete,
+      /*isUnchecked=*/false);
   conformance->setSourceKindAndImplyingConformance(
       ConformanceEntryKind::Synthesized, nullptr);
   actor->registerProtocolConformance(conformance, /*synthesized=*/true);

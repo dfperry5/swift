@@ -177,7 +177,7 @@ namespace swift {
     llvm::VersionTuple MinimumInliningTargetVersion;
 
     /// The alternate name to use for the entry point instead of main.
-    std::string entryPointFunctionName = "main";
+    std::optional<std::string> entryPointFunctionName;
 
     ///
     /// Language features
@@ -205,9 +205,6 @@ namespace swift {
 
     /// Should conformance availability violations be diagnosed as errors?
     bool EnableConformanceAvailabilityErrors = false;
-
-    /// Should potential unavailability on enum cases be downgraded to a warning?
-    bool WarnOnPotentiallyUnavailableEnumCase = false;
 
     /// Should the editor placeholder error be downgraded to a warning?
     bool WarnOnEditorPlaceholder = false;
@@ -249,6 +246,12 @@ namespace swift {
     /// Emit remarks about contextual inconsistencies in loaded modules.
     bool EnableModuleRecoveryRemarks = false;
 
+    /// Emit remarks about the source of each element exposed by the module API.
+    bool EnableModuleApiImportRemarks = false;
+
+     /// Emit a remark after loading a macro implementation.
+    bool EnableMacroLoadingRemarks = false;
+
     /// Emit a remark when indexing a system module.
     bool EnableIndexingSystemModuleRemarks = false;
     
@@ -271,6 +274,9 @@ namespace swift {
 
     /// Allow throwing call expressions without annotation with 'try'.
     bool EnableThrowWithoutTry = false;
+
+    /// Turn all throw sites into immediate traps.
+    bool ThrowsAsTraps = false;
 
     /// If set, inserts instrumentation useful for testing the debugger.
     bool DebuggerTestingTransform = false;
@@ -309,6 +315,10 @@ namespace swift {
     /// language mode of clang on a per-header or even per-module basis. Also
     /// disabled because it is not complete.
     bool EnableCXXInterop = false;
+
+    /// The C++ interoperability source compatibility version. Defaults
+    /// to the Swift language version.
+    version::Version cxxInteropCompatVersion;
 
     bool CForeignReferenceTypes = false;
 
@@ -384,6 +394,10 @@ namespace swift {
     /// Disable the implicit import of the _Backtracing module.
     bool DisableImplicitBacktracingModuleImport =
         !SWIFT_IMPLICIT_BACKTRACING_IMPORT;
+
+    // Whether to use checked continuations when making an async call from
+    // Swift into ObjC. If false, will use unchecked continuations instead.
+    bool UseCheckedAsyncObjCBridging = false;
 
     /// Should we check the target OSs of serialized modules to see that they're
     /// new enough?
@@ -576,6 +590,10 @@ namespace swift {
     /// All block list configuration files to be honored in this compilation.
     std::vector<std::string> BlocklistConfigFilePaths;
 
+    /// Whether to ignore checks that a module is resilient during
+    /// type-checking, SIL verification, and IR emission,
+    bool BypassResilienceChecks = false;
+
     bool isConcurrencyModelTaskToThread() const {
       return ActiveConcurrencyModel == ConcurrencyModel::TaskToThread;
     }
@@ -651,12 +669,50 @@ namespace swift {
       return EffectiveLanguageVersion.isVersionAtLeast(major, minor);
     }
 
+    /// Whether the C++ interoperability compatibility version is at least
+    /// 'major'.
+    bool isCxxInteropCompatVersionAtLeast(unsigned major,
+                                          unsigned minor = 0) const {
+      return cxxInteropCompatVersion.isVersionAtLeast(major, minor);
+    }
+
     /// Determine whether the given feature is enabled.
     bool hasFeature(Feature feature) const;
 
     /// Determine whether the given feature is enabled, looking up the feature
     /// by name.
     bool hasFeature(llvm::StringRef featureName) const;
+
+    /// Sets the "_hasAtomicBitWidth" conditional.
+    void setHasAtomicBitWidth(llvm::Triple triple);
+
+    /// Set the max atomic bit widths with the given bit width.
+    void setMaxAtomicBitWidth(unsigned maxWidth) {
+      switch (maxWidth) {
+      case 128:
+        AtomicBitWidths.emplace_back("_128");
+        LLVM_FALLTHROUGH;
+      case 64:
+        AtomicBitWidths.emplace_back("_64");
+        LLVM_FALLTHROUGH;
+      case 32:
+        AtomicBitWidths.emplace_back("_32");
+        LLVM_FALLTHROUGH;
+      case 16:
+        AtomicBitWidths.emplace_back("_16");
+        LLVM_FALLTHROUGH;
+      case 8:
+        AtomicBitWidths.emplace_back("_8");
+        break;
+      default:
+        return;
+      }
+    }
+
+    /// Removes all atomic bit widths.
+    void clearAtomicBitWidths() {
+      AtomicBitWidths.clear();
+    }
 
     /// Returns true if the given platform condition argument represents
     /// a supported target operating system.
@@ -695,7 +751,8 @@ namespace swift {
     }
 
   private:
-    llvm::SmallVector<std::pair<PlatformConditionKind, std::string>, 6>
+    llvm::SmallVector<std::string, 2> AtomicBitWidths;
+    llvm::SmallVector<std::pair<PlatformConditionKind, std::string>, 10>
         PlatformConditionValues;
     llvm::SmallVector<std::string, 2> CustomConditionalCompilationFlags;
   };
@@ -758,10 +815,10 @@ namespace swift {
     /// Should be stored sorted.
     llvm::SmallVector<unsigned, 4> DebugConstraintSolverOnLines;
 
-    /// Triggers llvm fatal_error if typechecker tries to typecheck a decl or an
-    /// identifier reference with the provided prefix name.
-    /// This is for testing purposes.
-    std::string DebugForbidTypecheckPrefix;
+    /// Triggers llvm fatal error if the typechecker tries to typecheck a decl
+    /// or an identifier reference with any of the provided prefix names. This
+    /// is for testing purposes.
+    std::vector<std::string> DebugForbidTypecheckPrefixes;
 
     /// The upper bound, in bytes, of temporary data that can be
     /// allocated by the constraint solver.
@@ -784,6 +841,13 @@ namespace swift {
 
     /// See \ref FrontendOptions.PrintFullConvention
     bool PrintFullConvention = false;
+
+    /// Defer typechecking of declarations to their use at runtime
+    bool DeferToRuntime = false;
+
+    /// Allow request evalutation to perform type checking lazily, instead of
+    /// eagerly typechecking source files after parsing.
+    bool EnableLazyTypecheck = false;
   };
 
   /// Options for controlling the behavior of the Clang importer.
@@ -795,6 +859,9 @@ namespace swift {
 
     /// The module cache path which the Clang importer should use.
     std::string ModuleCachePath;
+
+    /// The Scanning module cache path which the Clang Dependency Scanner should use.
+    std::string ClangScannerModuleCachePath;
 
     /// Extra arguments which should be passed to the Clang importer.
     std::vector<std::string> ExtraArgs;

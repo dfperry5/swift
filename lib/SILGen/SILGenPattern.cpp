@@ -1392,7 +1392,7 @@ getManagedSubobject(SILGenFunction &SGF, SILValue value,
   switch (consumption) {
   case CastConsumptionKind::BorrowAlways:
   case CastConsumptionKind::CopyOnSuccess:
-    return {ManagedValue::forUnmanaged(value), consumption};
+    return {ManagedValue::forBorrowedRValue(value), consumption};
   case CastConsumptionKind::TakeAlways:
   case CastConsumptionKind::TakeOnSuccess:
     return {SGF.emitManagedRValueWithCleanup(value, valueTL), consumption};
@@ -1553,7 +1553,7 @@ emitTupleDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
 
       // If we have a loadable type, then we have a loadable sub-type of the
       // underlying address only tuple.
-      auto memberMV = ManagedValue::forUnmanaged(member);
+      auto memberMV = ManagedValue::forBorrowedAddressRValue(member);
       switch (src.getFinalConsumption()) {
       case CastConsumptionKind::TakeAlways: {
         // If our original source value is take always, perform a load [take].
@@ -1577,7 +1577,7 @@ emitTupleDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
       }
       case CastConsumptionKind::CopyOnSuccess: {
         // We translate copy_on_success => borrow_always.
-        auto memberMV = ManagedValue::forUnmanaged(member);
+        auto memberMV = ManagedValue::forBorrowedAddressRValue(member);
         return {SGF.B.createLoadBorrow(loc, memberMV),
                 CastConsumptionKind::BorrowAlways};
       }
@@ -2079,8 +2079,9 @@ void PatternMatchEmission::emitEnumElementDispatch(
     if (!blocks.hasAnyRefutableCase())
       break;
 
-    src = ConsumableManagedValue(ManagedValue::forUnmanaged(src.getValue()),
-                                 CastConsumptionKind::CopyOnSuccess);
+    src = ConsumableManagedValue(
+        ManagedValue::forUnmanagedOwnedValue(src.getValue()),
+        CastConsumptionKind::CopyOnSuccess);
     break;
   }
 
@@ -2405,7 +2406,7 @@ void PatternMatchEmission::initSharedCaseBlockDest(CaseStmt *caseBlock,
       continue;
 
     // We don't pass address-only values in basic block arguments.
-    SILType ty = SGF.getLoweredType(vd->getType());
+    SILType ty = SGF.getLoweredType(vd->getTypeInContext());
     if (ty.isAddressOnly(SGF.F))
       continue;
     block->createPhiArgument(ty, OwnershipKind::Owned, vd);
@@ -2435,7 +2436,7 @@ void PatternMatchEmission::emitAddressOnlyAllocations() {
       if (!vd->hasName())
         continue;
 
-      SILType ty = SGF.getLoweredType(vd->getType());
+      SILType ty = SGF.getLoweredType(vd->getTypeInContext());
       if (!ty.isAddressOnly(SGF.F))
         continue;
       assert(!Temporaries[vd]);
@@ -2517,7 +2518,7 @@ void PatternMatchEmission::emitSharedCaseBlocks(
       if (!vd->hasName())
         continue;
 
-      SILType ty = SGF.getLoweredType(vd->getType());
+      SILType ty = SGF.getLoweredType(vd->getTypeInContext());
 
       // Initialize mv at +1. We always pass values in at +1 for today into
       // shared blocks.
@@ -2918,7 +2919,7 @@ void SILGenFunction::emitSwitchStmt(SwitchStmt *S) {
 
     if (auto *singleEnumDecl = canSubjectTy->getEnumOrBoundGenericEnum()) {
       if (singleEnumDecl->isObjC()) {
-        auto metatype = ManagedValue::forUnmanaged(
+        auto metatype = ManagedValue::forObjectRValueWithoutOwnership(
             B.createMetatype(loc, loweredMetatypeType));
 
         // Bitcast the enum value to its raw type. (This is only safe for @objc

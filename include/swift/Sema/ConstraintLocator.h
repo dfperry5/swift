@@ -103,8 +103,14 @@ enum class ConversionRestrictionKind;
 
 /// The kind of SingleValueStmtExpr branch the locator identifies.
 enum class SingleValueStmtBranchKind {
-  Regular,
-  InSingleExprClosure
+  /// Explicitly written 'then <expr>'.
+  Explicit,
+
+  /// Implicitly written '<expr>'.
+  Implicit,
+
+  /// Implicitly written '<expr>' in a single expr closure body.
+  ImplicitInSingleExprClosure
 };
 
 /// Locates a given constraint within the expression being
@@ -254,7 +260,7 @@ public:
 
   /// Determine whether given locator points to the keypath value
   bool isKeyPathValue() const;
-  
+
   /// Determine whether given locator points to the choice picked as
   /// as result of the key path dynamic member lookup operation.
   bool isResultOfKeyPathDynamicMemberLookup() const;
@@ -274,6 +280,9 @@ public:
   /// Determine whether this locator points to a result type of
   /// a key path component.
   bool isForKeyPathComponentResult() const;
+
+  /// Determine whether this locator points to a key path component.
+  bool isForKeyPathComponent() const;
 
   /// Determine whether this locator points to the generic parameter.
   bool isForGenericParameter() const;
@@ -309,6 +318,10 @@ public:
   /// Whether this locator identifies a conjunction for the branches of a
   /// SingleValueStmtExpr.
   bool isForSingleValueStmtConjunction() const;
+
+  /// Whether this locator identifies a conjunction for the branches of a
+  /// SingleValueStmtExpr, or a conjunction for one of the BraceStmts itself.
+  bool isForSingleValueStmtConjunctionOrBrace() const;
 
   /// Whether this locator identifies a conversion for a SingleValueStmtExpr
   /// branch, and if so, the kind of branch.
@@ -931,19 +944,19 @@ public:
   }
 };
 
-/// The branch of a SingleValueStmtExpr. Note the stored index corresponds to
-/// the expression branches, i.e it skips statement branch indices.
-class LocatorPathElt::SingleValueStmtBranch final
+/// A particular result of a ThenStmt at a given index in a SingleValueStmtExpr.
+/// The stored index corresponds to the \c getResultExprs array.
+class LocatorPathElt::SingleValueStmtResult final
     : public StoredIntegerElement<1> {
 public:
-  SingleValueStmtBranch(unsigned exprIdx)
-      : StoredIntegerElement(ConstraintLocator::SingleValueStmtBranch,
+  SingleValueStmtResult(unsigned exprIdx)
+      : StoredIntegerElement(ConstraintLocator::SingleValueStmtResult,
                              exprIdx) {}
 
-  unsigned getExprBranchIndex() const { return getValue(); }
+  unsigned getIndex() const { return getValue(); }
 
   static bool classof(const LocatorPathElt *elt) {
-    return elt->getKind() == ConstraintLocator::SingleValueStmtBranch;
+    return elt->getKind() == ConstraintLocator::SingleValueStmtResult;
   }
 };
 
@@ -1055,22 +1068,6 @@ public:
 
   static bool classof(const LocatorPathElt *elt) {
     return elt->getKind() == ConstraintLocator::ContextualType;
-  }
-};
-
-class LocatorPathElt::KeyPathType final
-    : public StoredPointerElement<TypeBase> {
-public:
-  KeyPathType(Type valueType)
-      : StoredPointerElement(PathElementKind::KeyPathType,
-                             valueType.getPointer()) {
-    assert(valueType);
-  }
-
-  Type getValueType() const { return getStoredPointer(); }
-
-  static bool classof(const LocatorPathElt *elt) {
-    return elt->getKind() == PathElementKind::KeyPathType;
   }
 };
 
@@ -1276,11 +1273,11 @@ public:
   template <typename E>
   bool directlyAt() const {
     if (auto *expr = getAnchor().dyn_cast<Expr *>())
-      return isa<E>(expr) && hasEmptyPath();
+      return isa<E>(expr) && !last();
     return false;
   }
 
-  /// Determine whether this builder has an empty path.
+  /// Determine whether this builder has an empty path (no new elements).
   bool hasEmptyPath() const {
     return !element;
   }

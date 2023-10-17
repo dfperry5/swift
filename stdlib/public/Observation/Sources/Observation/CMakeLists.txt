@@ -12,7 +12,7 @@
 
 list(APPEND swift_runtime_library_compile_flags -I${SWIFT_SOURCE_DIR}/stdlib/include -I${SWIFT_SOURCE_DIR}/include)
 
-add_swift_target_library(swift_Observation ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
+add_swift_target_library(swiftObservation ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
   Locking.cpp
   Locking.swift
   Observable.swift
@@ -24,6 +24,7 @@ add_swift_target_library(swift_Observation ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
   SWIFT_COMPILE_FLAGS
     ${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}
     "-enable-experimental-feature" "Macros"
+    "-enable-experimental-feature" "ExtensionMacros"
     -Xfrontend -disable-implicit-string-processing-module-import
 
   C_COMPILE_FLAGS

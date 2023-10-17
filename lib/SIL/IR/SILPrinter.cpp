@@ -391,9 +391,6 @@ void SILDeclRef::print(raw_ostream &OS) const {
   case SILDeclRef::Kind::PropertyWrapperInitFromProjectedValue:
     OS << "!projectedvalueinit";
     break;
-  case SILDeclRef::Kind::RuntimeAttributeGenerator:
-    OS << "!attrgenerator";
-    break;
   }
 
   if (isForeign)
@@ -856,8 +853,11 @@ public:
   }
 
 #ifndef NDEBUG
-  void printID(const SILBasicBlock *BB) {
-    *this << Ctx.getID(BB) << "\n";
+  void printID(const SILBasicBlock *BB, bool newline) {
+    *this << Ctx.getID(BB);
+    if (newline) {
+      *this << "\n";
+    }
   }
 #endif
 
@@ -1806,7 +1806,11 @@ public:
       }
     }
 
-    *this << "self " << getIDAndType(AI->getSelf());
+    *this << "#";
+    printFullContext(AI->getProperty()->getDeclContext(), PrintState.OS);
+    *this << AI->getPropertyName();
+
+    *this << ", self " << getIDAndType(AI->getSelf());
     *this << ", value " << getIDAndType(AI->getSrc());
     *this << ", init " << getIDAndType(AI->getInitializer())
           << ", set " << getIDAndType(AI->getSetter());
@@ -1914,6 +1918,7 @@ public:
   void visitCheckedCastBranchInst(CheckedCastBranchInst *CI) {
     if (CI->isExact())
       *this << "[exact] ";
+    *this << CI->getSourceFormalType() << " in ";
     *this << getIDAndType(CI->getOperand()) << " to " << CI->getTargetFormalType()
           << ", " << Ctx.getID(CI->getSuccessBB()) << ", "
           << Ctx.getID(CI->getFailureBB());
@@ -2076,8 +2081,9 @@ public:
     *this << getIDAndType(I->getOperand());
   }
 
-  void visitMarkMustCheckInst(MarkMustCheckInst *I) {
-    using CheckKind = MarkMustCheckInst::CheckKind;
+  void visitMarkUnresolvedNonCopyableValueInst(
+      MarkUnresolvedNonCopyableValueInst *I) {
+    using CheckKind = MarkUnresolvedNonCopyableValueInst::CheckKind;
     switch (I->getCheckKind()) {
     case CheckKind::Invalid:
       llvm_unreachable("Invalid?!");
@@ -2136,12 +2142,15 @@ public:
     *this << getIDAndType(I->getOperand());
   }
 
-#define UNCHECKED_REF_STORAGE(Name, ...)                                       \
-  void visitStrongCopy##Name##ValueInst(StrongCopy##Name##ValueInst *I) {      \
-    *this << getIDAndType(I->getOperand());                                    \
+  void visitUnownedCopyValueInst(UnownedCopyValueInst *I) {
+    *this << getIDAndType(I->getOperand());
   }
 
-#define ALWAYS_OR_SOMETIMES_LOADABLE_CHECKED_REF_STORAGE(Name, ...)            \
+  void visitWeakCopyValueInst(WeakCopyValueInst *I) {
+    *this << getIDAndType(I->getOperand());
+  }
+
+#define REF_STORAGE(Name, ...)                                                 \
   void visitStrongCopy##Name##ValueInst(StrongCopy##Name##ValueInst *I) {      \
     *this << getIDAndType(I->getOperand());                                    \
   }
@@ -2426,6 +2435,10 @@ public:
           << getIDAndType(I->getTuple()) << " as "
           << I->getElementType();
   }
+  void visitTuplePackExtractInst(TuplePackExtractInst *I) {
+    *this << Ctx.getID(I->getIndex()) << " of " << getIDAndType(I->getTuple())
+          << " as " << I->getElementType();
+  }
   void visitProjectBlockStorageInst(ProjectBlockStorageInst *PBSI) {
     *this << getIDAndType(PBSI->getOperand());
   }
@@ -2486,6 +2499,13 @@ public:
     if (ECMI->doKeepUnique())
       *this << "[keep_unique] ";
     *this << getIDAndType(ECMI->getOperand());
+  }
+  void visitEndInitLetRefInst(EndInitLetRefInst *I) {
+    *this << getIDAndType(I->getOperand());
+  }
+  void visitBeginDeallocRefInst(BeginDeallocRefInst *I) {
+    *this << getIDAndType(I->getReference()) << " of "
+          << getIDAndType(I->getOperand(1));
   }
   void visitIsEscapingClosureInst(IsEscapingClosureInst *CUI) {
     if (CUI->getVerificationType())
@@ -2717,7 +2737,6 @@ public:
 
   void visitSelectEnumInst(SelectEnumInst *SEI) {
     printSelectEnumInst(SEI);
-    printForwardingOwnershipKind(SEI, SEI->getOperand());
   }
   void visitSelectEnumAddrInst(SelectEnumAddrInst *SEI) {
     printSelectEnumInst(SEI);
@@ -3098,17 +3117,17 @@ void SILBasicBlock::print(SILPrintContext &Ctx) const {
 }
 
 #ifndef NDEBUG
-void SILBasicBlock::dumpID() const {
-  printID(llvm::errs());
+void SILBasicBlock::dumpID(bool newline) const {
+  printID(llvm::errs(), newline);
 }
 
-void SILBasicBlock::printID(llvm::raw_ostream &OS) const {
+void SILBasicBlock::printID(llvm::raw_ostream &OS, bool newline) const {
   SILPrintContext Ctx(OS);
-  printID(Ctx);
+  printID(Ctx, newline);
 }
 
-void SILBasicBlock::printID(SILPrintContext &Ctx) const {
-  SILPrinter(Ctx).printID(this);
+void SILBasicBlock::printID(SILPrintContext &Ctx, bool newline) const {
+  SILPrinter(Ctx).printID(this, newline);
 }
 #endif
 

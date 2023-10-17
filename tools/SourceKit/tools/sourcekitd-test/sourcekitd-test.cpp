@@ -427,7 +427,7 @@ static bool setSyntacticMacroExpansions(sourcekitd_object_t req,
   SmallVector<sourcekitd_object_t, 4> expansions;
   for (std::string &opt : opts.RequestOptions) {
     SmallVector<StringRef, 3> args;
-    StringRef(opt).split(args, ":");
+    StringRef(opt).split(args, ":", /*maxSplits=*/2);
     unsigned line, column;
 
     if (args.size() != 3 || args[0].getAsInteger(10, line) ||
@@ -1153,6 +1153,13 @@ static int handleTestInvocation(TestOptions Opts, TestOptions &InitOpts) {
                                           RequestSyntacticMacroExpansion);
     setSyntacticMacroExpansions(Req, Opts, SourceBuf.get());
     break;
+
+  case SourceKitRequest::IndexToStore:
+    sourcekitd_request_dictionary_set_string(Req, KeyName, SemaName.c_str());
+    sourcekitd_request_dictionary_set_string(Req, KeyIndexStorePath, Opts.IndexStorePath.c_str());
+    sourcekitd_request_dictionary_set_string(Req, KeyIndexUnitOutputPath, Opts.IndexUnitOutputPath.c_str());
+    sourcekitd_request_dictionary_set_uid(Req, KeyRequest, RequestIndexToStore);
+    break;
   }
 
   if (!Opts.SourceFile.empty()) {
@@ -1585,6 +1592,9 @@ static bool handleResponse(sourcekitd_response_t Resp, const TestOptions &Opts,
       case SourceKitRequest::Statistics:
         printStatistics(Info, llvm::outs());
         break;
+      case SourceKitRequest::IndexToStore:
+        printRawResponse(Resp);
+        break;
     }
   }
 
@@ -1945,7 +1955,8 @@ struct ResponseSymbolInfo {
     }
     OS << ")" << '\n';
 
-    OS << Name << '\n';
+    if (Name)
+      OS << Name << '\n';
     if (USR)
       OS << USR << '\n';
     if (Lang)

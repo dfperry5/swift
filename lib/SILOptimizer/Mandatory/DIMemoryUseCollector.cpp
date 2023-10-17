@@ -95,6 +95,11 @@ static unsigned getElementCountRec(TypeExpansionContext context,
       for (auto *VD : NTD->getStoredProperties())
         NumElements += getElementCountRec(
             context, Module, T.getFieldType(VD, Module, context), false);
+      for (auto *P : NTD->getInitAccessorProperties()) {
+        auto *init = P->getAccessor(AccessorKind::Init);
+        if (init->getInitializedProperties().empty())
+          ++NumElements;
+      }
       return NumElements;
     }
   }
@@ -451,6 +456,15 @@ DIMemoryObjectInfo::getPathStringToElement(unsigned Element,
         Element -= NumFieldElements;
       }
 
+      for (auto *property : NTD->getInitAccessorProperties()) {
+        auto *init = property->getAccessor(AccessorKind::Init);
+        if (init->getInitializedProperties().empty()) {
+          if (Element == 0)
+            return property;
+          --Element;
+        }
+      }
+
       // If we do not have any stored properties, we have nothing of interest.
       if (!HasStoredProperty)
         return nullptr;
@@ -495,6 +509,15 @@ bool DIMemoryObjectInfo::isElementLetProperty(unsigned Element) const {
     if (Element < NumFieldElements)
       return VD->isLet();
     Element -= NumFieldElements;
+  }
+
+  for (auto *property : NTD->getInitAccessorProperties()) {
+    auto *init = property->getAccessor(AccessorKind::Init);
+    if (init->getInitializedProperties().empty()) {
+      if (Element == 0)
+        return !property->getAccessor(AccessorKind::Set);
+      --Element;
+    }
   }
 
   // Otherwise, we miscounted elements?
@@ -799,8 +822,9 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       continue;
     }
 
-    // Look through mark_must_check. To us, it is not interesting.
-    if (auto *mmi = dyn_cast<MarkMustCheckInst>(User)) {
+    // Look through mark_unresolved_non_copyable_value. To us, it is not
+    // interesting.
+    if (auto *mmi = dyn_cast<MarkUnresolvedNonCopyableValueInst>(User)) {
       collectUses(mmi, BaseEltNo);
       continue;
     }
@@ -1200,21 +1224,43 @@ ElementUseCollector::collectAssignOrInitUses(AssignOrInitInst *Inst,
                      ->getDeclContext()
                      ->getSelfNominalTypeDecl();
 
+  auto expansionContext = TypeExpansionContext(TheMemory.getFunction());
+
   auto selfTy = Inst->getSelf()->getType();
 
   auto addUse = [&](VarDecl *property, DIUseKind useKind) {
-    auto expansionContext = TypeExpansionContext(*Inst->getFunction());
+    unsigned fieldIdx = 0;
+    for (auto *VD : typeDC->getStoredProperties()) {
+      if (VD == property)
+        break;
+
+      fieldIdx += getElementCountRec(
+          expansionContext, Module,
+          selfTy.getFieldType(VD, Module, expansionContext), false);
+    }
+
     auto type = selfTy.getFieldType(property, Module, expansionContext);
-    addElementUses(Module.getFieldIndex(typeDC, property), type, Inst, useKind,
-                   property);
+    addElementUses(fieldIdx, type, Inst, useKind, property);
   };
 
   auto initializedElts = Inst->getInitializedProperties();
   if (initializedElts.empty()) {
-    // Add a placeholder use that doesn't touch elements to make sure that
-    // the `assign_or_init` instruction gets the kind set when `initializes`
-    // list is empty.
-    trackUse(DIMemoryUse(Inst, DIUseKind::InitOrAssign, BaseEltNo, 0));
+    auto initAccessorProperties = typeDC->getInitAccessorProperties();
+    auto initFieldAt = typeDC->getStoredProperties().size();
+
+    for (auto *property : initAccessorProperties) {
+      auto initAccessor = property->getAccessor(AccessorKind::Init);
+      if (!initAccessor->getInitializedProperties().empty())
+        continue;
+
+      if (property == Inst->getProperty()) {
+        trackUse(DIMemoryUse(Inst, DIUseKind::InitOrAssign, initFieldAt,
+                             /*NumElements=*/1));
+        break;
+      }
+
+      ++initFieldAt;
+    }
   } else {
     for (auto *property : initializedElts)
       addUse(property, DIUseKind::InitOrAssign);
@@ -1597,7 +1643,8 @@ void ElementUseCollector::collectClassSelfUses(
     // and copy_value.
     if (isa<BeginBorrowInst>(User) || isa<BeginAccessInst>(User) ||
         isa<UpcastInst>(User) || isa<UncheckedRefCastInst>(User) ||
-        isa<CopyValueInst>(User) || isa<MarkMustCheckInst>(User)) {
+        isa<CopyValueInst>(User) ||
+        isa<MarkUnresolvedNonCopyableValueInst>(User)) {
       auto value = cast<SingleValueInstruction>(User);
       std::copy(value->use_begin(), value->use_end(),
                 std::back_inserter(Worklist));
@@ -1699,8 +1746,8 @@ collectDelegatingInitUses(const DIMemoryObjectInfo &TheMemory,
       continue;
     }
 
-    // Look through mark_must_check.
-    if (auto *MMCI = dyn_cast<MarkMustCheckInst>(User)) {
+    // Look through mark_unresolved_non_copyable_value.
+    if (auto *MMCI = dyn_cast<MarkUnresolvedNonCopyableValueInst>(User)) {
       collectDelegatingInitUses(TheMemory, UseInfo, MMCI);
       continue;
     }

@@ -92,12 +92,13 @@ namespace swift {
   class LazyIterableDeclContextData;
   class LazyMemberLoader;
   struct MacroDiscriminatorContext;
-  class ModuleDependencyInfo;
+  class ModuleInterfaceChecker;
   class PatternBindingDecl;
   class PatternBindingInitializer;
   class PluginLoader;
   class SourceFile;
   class SourceLoc;
+  struct TemplateInstantiationError;
   class Type;
   class TypeVariableType;
   class TupleType;
@@ -898,6 +899,10 @@ public:
   /// Get the runtime availability of support for concurrency.
   AvailabilityContext getConcurrencyAvailability();
 
+  /// Get the runtime availability of the `DiscardingTaskGroup`,
+  /// and supporting runtime functions function
+  AvailabilityContext getConcurrencyDiscardingTaskGroupAvailability();
+
   /// Get the back-deployed availability for concurrency.
   AvailabilityContext getBackDeployedConcurrencyAvailability();
 
@@ -928,6 +933,22 @@ public:
   /// Get the runtime availability of runtime functions for
   /// variadic generic types.
   AvailabilityContext getVariadicGenericTypeAvailability();
+
+  /// Get the runtime availability of the conformsToProtocol runtime entrypoint
+  /// that takes a signed protocol descriptor pointer.
+  AvailabilityContext getSignedConformsToProtocolAvailability();
+
+  /// Get the runtime availability of runtime entrypoints that take signed type
+  /// descriptors.
+  AvailabilityContext getSignedDescriptorAvailability();
+
+  /// Get the runtime availability of the swift_initRawStructMetadata entrypoint
+  /// that fixes up the value witness table of @_rawLayout dependent types.
+  AvailabilityContext getInitRawStructMetadataAvailability();
+
+  /// Get the runtime availability of being able to use symbolic references to
+  /// objective c protocols.
+  AvailabilityContext getObjCSymbolicReferencesAvailability();
 
   /// Get the runtime availability of features introduced in the Swift 5.2
   /// compiler for the target platform.
@@ -1028,27 +1049,6 @@ public:
 
   /// Retrieve the module interface checker associated with this AST context.
   ModuleInterfaceChecker *getModuleInterfaceChecker() const;
-
-  /// Retrieve the module dependencies for the module with the given name.
-  ///
-  llvm::Optional<const ModuleDependencyInfo *> getModuleDependencies(
-      StringRef moduleName, ModuleDependenciesCache &cache,
-      InterfaceSubContextDelegate &delegate,
-      bool optionalDependencyLookup = false, bool isTestableImport = false,
-      llvm::Optional<std::pair<std::string, swift::ModuleDependencyKind>>
-          dependencyOf = llvm::None);
-
-  /// Retrieve the module dependencies for the Clang module with the given name.
-  llvm::Optional<const ModuleDependencyInfo *>
-  getClangModuleDependencies(StringRef moduleName,
-                             ModuleDependenciesCache &cache,
-                             InterfaceSubContextDelegate &delegate);
-
-  /// Retrieve the module dependencies for the Swift module with the given name.
-  llvm::Optional<const ModuleDependencyInfo *>
-  getSwiftModuleDependencies(StringRef moduleName,
-                             ModuleDependenciesCache &cache,
-                             InterfaceSubContextDelegate &delegate);
 
   /// Compute the extra implicit framework search paths on Apple platforms:
   /// $SDKROOT/System/Library/Frameworks/ and $SDKROOT/Library/Frameworks/.
@@ -1246,13 +1246,16 @@ public:
   unsigned bumpGeneration() { return CurrentGeneration++; }
 
   /// Produce a "normal" conformance for a nominal type.
+  ///
+  /// For ordinary conformance lookups, use ModuleDecl::lookupConformance()
+  /// instead.
   NormalProtocolConformance *
-  getConformance(Type conformingType,
-                 ProtocolDecl *protocol,
-                 SourceLoc loc,
-                 DeclContext *dc,
-                 ProtocolConformanceState state,
-                 bool isUnchecked);
+  getNormalConformance(Type conformingType,
+                       ProtocolDecl *protocol,
+                       SourceLoc loc,
+                       DeclContext *dc,
+                       ProtocolConformanceState state,
+                       bool isUnchecked);
 
   /// Produce a self-conformance for the given protocol.
   SelfProtocolConformance *
@@ -1261,8 +1264,6 @@ public:
   /// Produce the builtin conformance for some structural type to some protocol.
   BuiltinProtocolConformance *
   getBuiltinConformance(Type type, ProtocolDecl *protocol,
-                        GenericSignature genericSig,
-                        ArrayRef<Requirement> conditionalRequirements,
                         BuiltinConformanceKind kind);
 
   /// A callback used to produce a diagnostic for an ill-formed protocol
@@ -1330,11 +1331,14 @@ public:
   getInheritedConformance(Type type, ProtocolConformance *inherited);
 
   /// Get the lazy data for the given declaration.
+  LazyContextData *getLazyContextData(const Decl *decl) const;
+
+  /// Get or otherwise allocate the lazy data for the given declaration.
   ///
   /// \param lazyLoader If non-null, the lazy loader to use when creating the
   /// lazy data. The pointer must either be null or be consistent
-  /// across all calls for the same \p func.
-  LazyContextData *getOrCreateLazyContextData(const DeclContext *decl,
+  /// across all calls for the same \p decl.
+  LazyContextData *getOrCreateLazyContextData(const Decl *decl,
                                               LazyMemberLoader *lazyLoader);
 
   /// Get the lazy iterable context for the given iterable declaration context.

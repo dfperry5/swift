@@ -11,13 +11,12 @@
 
 import SwiftSyntax
 import SwiftSyntaxMacros
-
-@_implementationOnly import SwiftDiagnostics
-@_implementationOnly import SwiftOperators
-@_implementationOnly import SwiftSyntaxBuilder
+import SwiftDiagnostics
+import SwiftOperators
+import SwiftSyntaxBuilder
 
 public struct ObservableMacro {
-  static let moduleName = "_Observation"
+  static let moduleName = "Observation"
 
   static let conformanceName = "Observable"
   static var qualifiedConformanceName: String {
@@ -59,10 +58,10 @@ public struct ObservableMacro {
   static func withMutationFunction(_ observableType: TokenSyntax) -> DeclSyntax {
     return 
       """
-      internal nonisolated func withMutation<Member, T>(
+      internal nonisolated func withMutation<Member, MutationResult>(
         keyPath: KeyPath<\(observableType), Member>,
-        _ mutation: () throws -> T
-      ) rethrows -> T {
+        _ mutation: () throws -> MutationResult
+      ) rethrows -> MutationResult {
         try \(raw: registrarVariableName).withMutation(of: self, keyPath: keyPath, mutation)
       }
       """
@@ -71,8 +70,8 @@ public struct ObservableMacro {
   static var ignoredAttribute: AttributeSyntax {
     AttributeSyntax(
       leadingTrivia: .space,
-      atSignToken: .atSignToken(),
-      attributeName: SimpleTypeIdentifierSyntax(name: .identifier(ignoredMacroName)),
+      atSign: .atSignToken(),
+      attributeName: IdentifierTypeSyntax(name: .identifier(ignoredMacroName)),
       trailingTrivia: .space
     )
   }
@@ -109,10 +108,10 @@ extension DiagnosticsError {
   }
 }
 
-extension ModifierListSyntax {
-  func privatePrefixed(_ prefix: String) -> ModifierListSyntax {
+extension DeclModifierListSyntax {
+  func privatePrefixed(_ prefix: String) -> DeclModifierListSyntax {
     let modifier: DeclModifierSyntax = DeclModifierSyntax(name: "private", trailingTrivia: .space)
-    return ModifierListSyntax([modifier] + filter {
+    return [modifier] + filter {
       switch $0.name.tokenKind {
       case .keyword(let keyword):
         switch keyword {
@@ -127,7 +126,7 @@ extension ModifierListSyntax {
       default:
         return true
       }
-    })
+    }
   }
   
   init(keyword: Keyword) {
@@ -161,7 +160,7 @@ extension PatternBindingListSyntax {
           ),
           typeAnnotation: binding.typeAnnotation,
           initializer: binding.initializer,
-          accessor: binding.accessor,
+          accessorBlock: binding.accessorBlock,
           trailingComma: binding.trailingComma,
           trailingTrivia: binding.trailingTrivia)
         
@@ -173,12 +172,13 @@ extension PatternBindingListSyntax {
 }
 
 extension VariableDeclSyntax {
-    func privatePrefixed(_ prefix: String, addingAttribute attribute: AttributeSyntax) -> VariableDeclSyntax {
-    VariableDeclSyntax(
+  func privatePrefixed(_ prefix: String, addingAttribute attribute: AttributeSyntax) -> VariableDeclSyntax {
+    let newAttributes = attributes + [.attribute(attribute)]
+    return VariableDeclSyntax(
       leadingTrivia: leadingTrivia,
-      attributes: attributes?.appending(.attribute(attribute)) ?? [.attribute(attribute)],
-      modifiers: modifiers?.privatePrefixed(prefix) ?? ModifierListSyntax(keyword: .private),
-      bindingKeyword: TokenSyntax(bindingKeyword.tokenKind, leadingTrivia: .space, trailingTrivia: .space, presence: .present),
+      attributes: newAttributes,
+      modifiers: modifiers.privatePrefixed(prefix),
+      bindingSpecifier: TokenSyntax(bindingSpecifier.tokenKind, leadingTrivia: .space, trailingTrivia: .space, presence: .present),
       bindings: bindings.privatePrefixed(prefix),
       trailingTrivia: trailingTrivia
     )
@@ -198,19 +198,23 @@ extension ObservableMacro: MemberMacro {
     providingMembersOf declaration: Declaration,
     in context: Context
   ) throws -> [DeclSyntax] {
-    guard let identified = declaration.asProtocol(IdentifiedDeclSyntax.self) else {
+    guard let identified = declaration.asProtocol(NamedDeclSyntax.self) else {
       return []
     }
     
-    let observableType = identified.identifier
+    let observableType = identified.name
     
     if declaration.isEnum {
       // enumerations cannot store properties
-      throw DiagnosticsError(syntax: node, message: "@Observable cannot be applied to enumeration type \(observableType.text)", id: .invalidApplication)
+      throw DiagnosticsError(syntax: node, message: "'@Observable' cannot be applied to enumeration type '\(observableType.text)'", id: .invalidApplication)
+    }
+    if declaration.isStruct {
+      // structs are not yet supported; copying/mutation semantics tbd
+      throw DiagnosticsError(syntax: node, message: "'@Observable' cannot be applied to struct type '\(observableType.text)'", id: .invalidApplication)
     }
     if declaration.isActor {
       // actors cannot yet be supported for their isolation
-      throw DiagnosticsError(syntax: node, message: "@Observable cannot be applied to actor type \(observableType.text)", id: .invalidApplication) 
+      throw DiagnosticsError(syntax: node, message: "'@Observable' cannot be applied to actor type '\(observableType.text)'", id: .invalidApplication)
     }
     
     var declarations = [DeclSyntax]()
@@ -218,15 +222,6 @@ extension ObservableMacro: MemberMacro {
     declaration.addIfNeeded(ObservableMacro.registrarVariable(observableType), to: &declarations)
     declaration.addIfNeeded(ObservableMacro.accessFunction(observableType), to: &declarations)
     declaration.addIfNeeded(ObservableMacro.withMutationFunction(observableType), to: &declarations)
-
-#if !OBSERVATION_SUPPORTS_PEER_MACROS
-    let storedInstanceVariables = declaration.definedVariables.filter { $0.isValidForObservation }
-    for property in storedInstanceVariables {
-       if property.hasMacroApplication(ObservableMacro.ignoredMacroName) { continue }
-       let storage = DeclSyntax(property.privatePrefixed("_", addingAttribute: ObservableMacro.ignoredAttribute))
-       declaration.addIfNeeded(storage, to: &declarations)
-    }
-#endif
 
     return declarations
   }
@@ -248,7 +243,7 @@ extension ObservableMacro: MemberAttributeMacro {
       return []
     }
 
-    // dont apply to ignored properties or properties that are already flaged as tracked
+    // dont apply to ignored properties or properties that are already flagged as tracked
     if property.hasMacroApplication(ObservableMacro.ignoredMacroName) ||
        property.hasMacroApplication(ObservableMacro.trackedMacroName) {
       return []
@@ -256,35 +251,35 @@ extension ObservableMacro: MemberAttributeMacro {
     
     
     return [
-      AttributeSyntax(attributeName: SimpleTypeIdentifierSyntax(name: .identifier(ObservableMacro.trackedMacroName)))
+      AttributeSyntax(attributeName: IdentifierTypeSyntax(name: .identifier(ObservableMacro.trackedMacroName)))
     ]
   }
 }
 
-extension ObservableMacro: ConformanceMacro {
-  public static func expansion<Declaration: DeclGroupSyntax, Context: MacroExpansionContext>(
+extension ObservableMacro: ExtensionMacro {
+  public static func expansion(
     of node: AttributeSyntax,
-    providingConformancesOf declaration: Declaration,
-    in context: Context
-  ) throws -> [(TypeSyntax, GenericWhereClauseSyntax?)] {
-    let inheritanceList: InheritedTypeListSyntax?
-    if let classDecl = declaration.as(ClassDeclSyntax.self) {
-      inheritanceList = classDecl.inheritanceClause?.inheritedTypeCollection
-    } else if let structDecl = declaration.as(StructDeclSyntax.self) {
-      inheritanceList = structDecl.inheritanceClause?.inheritedTypeCollection
+    attachedTo declaration: some DeclGroupSyntax,
+    providingExtensionsOf type: some TypeSyntaxProtocol,
+    conformingTo protocols: [TypeSyntax],
+    in context: some MacroExpansionContext
+  ) throws -> [ExtensionDeclSyntax] {
+    // This method can be called twice - first with an empty `protocols` when
+    // no conformance is needed, and second with a `MissingTypeSyntax` instance.
+    if protocols.isEmpty {
+      return []
+    }
+
+    let decl: DeclSyntax = """
+        extension \(raw: type.trimmedDescription): \(raw: qualifiedConformanceName) {}
+        """
+    let ext = decl.cast(ExtensionDeclSyntax.self)
+
+    if let availability = declaration.attributes.availability {
+      return [ext.with(\.attributes, availability)]
     } else {
-      inheritanceList = nil
+      return [ext]
     }
-    
-    if let inheritanceList {
-      for inheritance in inheritanceList {
-        if inheritance.typeName.identifier == ObservableMacro.conformanceName {
-          return []
-        }
-      }
-    }
-    
-    return [(ObservableMacro.observableConformanceType, nil)]
   }
 }
 
@@ -309,7 +304,8 @@ public struct ObservationTrackedMacro: AccessorMacro {
 
     let initAccessor: AccessorDeclSyntax =
       """
-      init(initialValue) initializes(_\(identifier)) {
+      @storageRestrictions(initializes: _\(identifier))
+      init(initialValue) {
         _\(identifier) = initialValue
       }
       """
