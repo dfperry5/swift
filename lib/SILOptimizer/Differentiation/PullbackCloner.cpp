@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "swift/Basic/STLExtras.h"
 #define DEBUG_TYPE "differentiation"
 
 #include "swift/SILOptimizer/Differentiation/PullbackCloner.h"
@@ -110,7 +111,7 @@ private:
   /// Mapping from original basic blocks to local temporary values to be cleaned
   /// up. This is populated when pullback emission is run on one basic block and
   /// cleaned before processing another basic block.
-  llvm::DenseMap<SILBasicBlock *, SmallSetVector<SILValue, 64>>
+  llvm::DenseMap<SILBasicBlock *, llvm::SmallSetVector<SILValue, 32>>
       blockTemporaries;
 
   /// The scope cloner.
@@ -651,7 +652,7 @@ private:
     llvm::SmallString<32> adjName;
     auto *newBuf = createFunctionLocalAllocation(
         bufType, loc, /*zeroInitialize*/ true,
-        debugInfo.transform(
+        swift::transform(debugInfo,
           [&](AdjointValue::DebugInfo di) {
             llvm::raw_svector_ostream adjNameStream(adjName);
             SILDebugVariable &dv = di.second;
@@ -3330,7 +3331,11 @@ void PullbackCloner::Implementation::
   builder.setCurrentDebugScope(remapScope(dti->getDebugScope()));
   builder.setInsertionPoint(arrayAdjoint->getParentBlock());
   for (auto use : dti->getResult(1)->getUses()) {
-    auto *ptai = dyn_cast<PointerToAddressInst>(use->getUser());
+    auto *mdi = dyn_cast<MarkDependenceInst>(use->getUser());
+    assert(mdi && "Expected mark_dependence user");
+    auto *ptai =
+        dyn_cast_or_null<PointerToAddressInst>(getSingleNonDebugUser(mdi));
+    assert(ptai && "Expected pointer_to_address user");
     auto adjBuf = getAdjointBuffer(origBB, ptai);
     auto *eltAdjBuf = getArrayAdjointElementBuffer(arrayAdjoint, 0, loc);
     builder.emitInPlaceAdd(loc, adjBuf, eltAdjBuf);

@@ -3,12 +3,12 @@
 // RUN: %target-swift-frontend -emit-module -emit-module-path %t/OtherActors.swiftmodule -module-name OtherActors %S/Inputs/OtherActors.swift -disable-availability-checking
 
 // RUN: %target-swift-frontend -I %t  -disable-availability-checking -warn-concurrency -parse-as-library -emit-sil -o /dev/null -verify %s
-// RUN: %target-swift-frontend -I %t  -disable-availability-checking -warn-concurrency -parse-as-library -emit-sil -o /dev/null -verify -enable-experimental-feature SendNonSendable %s
+// RUN: %target-swift-frontend -I %t  -disable-availability-checking -warn-concurrency -parse-as-library -emit-sil -o /dev/null -verify -enable-experimental-feature RegionBasedIsolation %s
 
 // REQUIRES: concurrency
 // REQUIRES: asserts
 
-import OtherActors // expected-remark{{add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'OtherActors'}}{{1-1=@preconcurrency }}
+import OtherActors // expected-warning{{add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'OtherActors'}}{{1-1=@preconcurrency }}
 
 let immutableGlobal: String = "hello"
 var mutableGlobal: String = "can't touch this" // expected-note 5{{var declared here}}
@@ -824,6 +824,7 @@ actor SomeActorWithInits {
   // expected-note@+1 3 {{mutation of this property is only permitted within the actor}}
   var mutableState: Int = 17
   var otherMutableState: Int
+  // expected-note@+1 {{mutation of this property is only permitted within the actor}}
   let nonSendable: SomeClass
 
   // Sema should not complain about referencing non-sendable members
@@ -887,7 +888,7 @@ actor SomeActorWithInits {
   @MainActor init(i5 x: SomeClass) {
     self.mutableState = 42
     self.otherMutableState = 17
-    self.nonSendable = x
+    self.nonSendable = x // expected-warning {{actor-isolated property 'nonSendable' can not be mutated from the main actor; this is an error in Swift 6}}
 
     self.isolated() // expected-warning{{actor-isolated instance method 'isolated()' can not be referenced from the main actor; this is an error in Swift 6}}
     self.nonisolated()
@@ -1528,5 +1529,43 @@ class OverridesNonsiolatedInit: SuperWithNonisolatedInit {
   nonisolated func f() {
     // expected-error@+1 {{main actor-isolated property 'x' can not be mutated from a non-isolated context}}
     super.x = 10
+  }
+}
+
+// expected-note@+1 2 {{class 'NonSendable' does not conform to the 'Sendable' protocol}}
+class NonSendable {}
+
+actor ProtectNonSendable {
+  // expected-note@+1 {{property declared here}}
+  let ns = NonSendable()
+
+  init() {}
+
+  @MainActor init(fromMain: Void) {
+    // expected-warning@+1 {{actor-isolated property 'ns' can not be referenced from the main actor; this is an error in Swift 6}}
+    _ = self.ns
+  }
+}
+
+@MainActor
+class ReferenceActor {
+  let a: ProtectNonSendable
+
+  init() async {
+    self.a = ProtectNonSendable()
+
+    // expected-warning@+1 {{non-sendable type 'NonSendable' in asynchronous access to actor-isolated property 'ns' cannot cross actor boundary}}
+    _ = a.ns
+  }
+}
+
+actor AnotherActor {
+  let a: ProtectNonSendable
+
+  init() {
+    self.a = ProtectNonSendable()
+
+    // expected-warning@+1 {{non-sendable type 'NonSendable' in asynchronous access to actor-isolated property 'ns' cannot cross actor boundary}}
+    _ = a.ns
   }
 }

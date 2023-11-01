@@ -8892,7 +8892,8 @@ static Expr *wrapAsyncLetInitializer(
       ConstraintSystem &cs, Expr *initializer, DeclContext *dc) {
   // Form the autoclosure type. It is always 'async', and will be 'throws'.
   Type initializerType = initializer->getType();
-  bool throws = TypeChecker::canThrow(cs.getASTContext(), initializer);
+  bool throws = TypeChecker::canThrow(cs.getASTContext(), initializer)
+                  .has_value();
   auto extInfo = ASTExtInfoBuilder()
     .withAsync()
     .withConcurrent()
@@ -8911,7 +8912,14 @@ static Expr *wrapAsyncLetInitializer(
   // actual calls and translate them into a different mechanism.
   auto autoclosureCall = CallExpr::createImplicitEmpty(ctx, autoclosureExpr);
   autoclosureCall->setType(initializerType);
-  autoclosureCall->setThrows(throws);
+  // FIXME: Use thrown type from above.
+  if (throws) {
+    autoclosureCall->setThrows(
+        ThrownErrorDestination::forMatchingContextType(
+          ctx.getErrorExistentialType()));
+  } else {
+    autoclosureCall->setThrows(nullptr);
+  }
 
   // For a throwing expression, wrap the call in a 'try'.
   Expr *resultInit = autoclosureCall;

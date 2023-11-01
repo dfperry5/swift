@@ -736,7 +736,8 @@ public:
     // Create a synthesized ExtensionDecl for the conformance.
     ASTContext &ctx = M->getASTContext();
     auto inherits = ctx.AllocateCopy(llvm::makeArrayRef(InheritedEntry(
-        TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()), isUnchecked)));
+        TypeLoc::withoutLoc(proto->getDeclaredInterfaceType()), isUnchecked,
+        /*isRetroactive=*/false)));
     auto extension =
         ExtensionDecl::create(ctx, SourceLoc(), nullptr, inherits,
                               nominal->getModuleScopeContext(), nullptr);
@@ -822,13 +823,7 @@ bool swift::emitSwiftInterface(raw_ostream &out,
 
   printImports(out, Opts, M, aliasModuleNamesTargets);
 
-  static bool forceUseExportedModuleNameInPublicOnly =
-    getenv("SWIFT_DEBUG_USE_EXPORTED_MODULE_NAME_IN_PUBLIC_ONLY");
-  bool useExportedModuleNameInPublicOnly =
-    M->getASTContext().LangOpts.hasFeature(Feature::ModuleInterfaceExportAs) ||
-    forceUseExportedModuleNameInPublicOnly;
-  bool useExportedModuleNames = !(useExportedModuleNameInPublicOnly &&
-                                  Opts.PrintPrivateInterfaceContent);
+  bool useExportedModuleNames = !Opts.PrintPrivateInterfaceContent;
 
   const PrintOptions printOptions = PrintOptions::printSwiftInterfaceFile(
       M, Opts.PreserveTypesAsWritten, Opts.PrintFullConvention,
@@ -838,7 +833,7 @@ bool swift::emitSwiftInterface(raw_ostream &out,
   InheritedProtocolCollector::PerTypeMap inheritedProtocolMap;
 
   SmallVector<Decl *, 16> topLevelDecls;
-  M->getTopLevelDecls(topLevelDecls);
+  M->getTopLevelDeclsWithAuxiliaryDecls(topLevelDecls);
   for (const Decl *D : topLevelDecls) {
     InheritedProtocolCollector::collectProtocols(inheritedProtocolMap, D);
 

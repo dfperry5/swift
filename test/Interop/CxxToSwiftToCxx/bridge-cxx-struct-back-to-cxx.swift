@@ -18,7 +18,9 @@
 // Check that the generated header can be
 // built with Clang modules enabled in C++.
 
-// RUN: %target-interop-build-clangxx -fsyntax-only -x c++-header %t/full-cxx-swift-cxx-bridging.h -std=gnu++20 -c -fmodules -fcxx-modules -I %t
+// RUN: %target-interop-build-clangxx -fsyntax-only -x c++-header %t/full-cxx-swift-cxx-bridging.h -std=gnu++17 -c -fmodules -fcxx-modules -I %t -D_LIBCPP_DISABLE_AVAILABILITY
+// FIXME: remove _LIBCPP_DISABLE_AVAILABILITY above (https://github.com/apple/swift/issues/67841)
+// FIXME: test c++20 (rdar://117419434)
 
 // XFAIL: OS=linux-android, OS=linux-androideabi
 
@@ -202,7 +204,7 @@ public struct Strct {
 // CHECK-NEXT: static inline const constexpr bool isUsableInGenericContext<ns::NonTrivialTemplateInt> = true;
 // CHECK-NEXT: template<>
 // CHECK-NEXT: struct TypeMetadataTrait<ns::NonTrivialTemplateInt> {
-// CHECK-NEXT:   static SWIFT_INLINE_THUNK void * _Nonnull getTypeMetadata() {
+// CHECK-NEXT:   static SWIFT_INLINE_PRIVATE_HELPER void * _Nonnull getTypeMetadata() {
 // CHECK-NEXT:     return _impl::$sSo2nsO0030NonTrivialTemplateCInt_hHAFhrbVMa(0)._0;
 // CHECK-NEXT:   }
 // CHECK-NEXT: };
@@ -241,7 +243,7 @@ public struct Strct {
 // CHECK-NEXT: static inline const constexpr bool isUsableInGenericContext<ns::NonTrivialTemplateTrivial> = true;
 // CHECK-NEXT: template<>
 // CHECK-NEXT: struct TypeMetadataTrait<ns::NonTrivialTemplateTrivial> {
-// CHECK-NEXT:   static SWIFT_INLINE_THUNK void * _Nonnull getTypeMetadata() {
+// CHECK-NEXT:   static SWIFT_INLINE_PRIVATE_HELPER void * _Nonnull getTypeMetadata() {
 // CHECK-NEXT:     return _impl::$sSo2nsO0037NonTrivialTemplateTrivialinNS_CsGGkdcVMa(0)._0;
 // CHECK-NEXT:   }
 // CHECK-NEXT: };

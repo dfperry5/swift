@@ -713,6 +713,15 @@ bool SILModuleConventions::isPassedIndirectlyInSIL(SILType type, SILModule &M) {
   return false;
 }
 
+bool SILModuleConventions::isThrownIndirectlyInSIL(SILType type, SILModule &M) {
+  if (SILModuleConventions(M).loweredAddresses) {
+    return M.Types.getTypeLowering(type, TypeExpansionContext::minimal())
+        .isAddressOnly();
+  }
+
+  return false;
+}
+
 bool SILFunctionType::isNoReturnFunction(SILModule &M,
                                          TypeExpansionContext context) const {
   for (unsigned i = 0, e = getNumResults(); i < e; ++i) {
@@ -1130,6 +1139,13 @@ bool SILType::isMarkedAsImmortal() const {
   return false;
 }
 
+bool SILType::isEscapable() const {
+  if (auto *nom = getASTType().getAnyNominal())
+    return nom->isEscapable();
+
+  return true;
+}
+
 intptr_t SILType::getFieldIdxOfNominalType(StringRef fieldName) const {
   auto *nominal = getNominalOrBoundGenericNominal();
   if (!nominal)
@@ -1216,4 +1232,8 @@ SILType SILType::removingMoveOnlyWrapperToBoxedType(const SILFunction *fn) {
 ProtocolConformanceRef
 SILType::conformsToProtocol(SILFunction *fn, ProtocolDecl *protocol) const {
   return fn->getParentModule()->conformsToProtocol(getASTType(), protocol);
+}
+
+bool SILType::isSendable(SILFunction *fn) const {
+  return getASTType()->isSendableType(fn->getParentModule());
 }

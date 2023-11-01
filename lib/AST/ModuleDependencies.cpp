@@ -16,6 +16,7 @@
 #include "swift/AST/ModuleDependencies.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticsFrontend.h"
+#include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/Frontend/Frontend.h"
 #include "llvm/CAS/CASProvidingFileSystem.h"
@@ -136,6 +137,20 @@ void ModuleDependencyInfo::addModuleImport(
 
     ImportPath::Builder scratch;
     auto realPath = importDecl->getRealModulePath(scratch);
+
+    // Explicit 'Builtin' import is not a part of the module's
+    // dependency set, does not exist on the filesystem,
+    // and is resolved within the compiler during compilation.
+    SmallString<64> importedModuleName;
+    realPath.getString(importedModuleName);
+    if (importedModuleName == BUILTIN_NAME)
+      continue;
+
+    // Ignore/diagnose tautological imports akin to import resolution
+    if (!swift::dependencies::checkImportNotTautological(
+            realPath, importDecl->getLoc(), sf, importDecl->isExported()))
+      continue;
+
     addModuleImport(realPath, &alreadyAddedModules);
 
     // Additionally, keep track of which dependencies of a Source
@@ -397,6 +412,35 @@ SwiftDependencyScanningService::SwiftDependencyScanningService() {
       /* SharedFS */ nullptr,
       /* OptimizeArgs */ true);
   SharedFilesystemCache.emplace();
+}
+
+bool
+swift::dependencies::checkImportNotTautological(const ImportPath::Module modulePath, 
+                                                const SourceLoc importLoc,
+                                                const SourceFile &SF,
+                                                bool isExported) {
+  if (modulePath.front().Item != SF.getParentModule()->getName() ||
+      // Overlays use an @_exported self-import to load their clang module.
+      isExported ||
+      // Imports of your own submodules are allowed in cross-language libraries.
+      modulePath.size() != 1 ||
+      // SIL files self-import to get decls from the rest of the module.
+      SF.Kind == SourceFileKind::SIL)
+    return true;
+
+  ASTContext &ctx = SF.getASTContext();
+
+  StringRef filename = llvm::sys::path::filename(SF.getFilename());
+  if (filename.empty())
+    ctx.Diags.diagnose(importLoc, diag::sema_import_current_module,
+                       modulePath.front().Item);
+  else
+    ctx.Diags.diagnose(importLoc, diag::sema_import_current_module_with_file,
+                       filename, modulePath.front().Item);
+
+  return false;
+
+  return false;
 }
 
 void SwiftDependencyTracker::addCommonSearchPathDeps(
@@ -754,7 +798,7 @@ void ModuleDependenciesCache::resolveDependencyImports(ModuleDependencyID module
   updateDependency(moduleID, dependencyInfo);
 }
 
-void ModuleDependenciesCache::setSwiftOverlayDependencues(ModuleDependencyID moduleID,
+void ModuleDependenciesCache::setSwiftOverlayDependencies(ModuleDependencyID moduleID,
                                                           const ArrayRef<ModuleDependencyID> dependencyIDs) {
   auto optionalDependencyInfo = findDependency(moduleID);
   assert(optionalDependencyInfo.has_value() && "Resolving unknown dependency");

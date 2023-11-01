@@ -1725,7 +1725,7 @@ void namelookup::forEachPotentialAttachedMacro(
   // We intentionally avoid calling `forEachAttachedMacro` in order to avoid
   // a request cycle.
   auto moduleScopeCtx = decl->getDeclContext()->getModuleScopeContext();
-  for (auto attrConst : decl->getSemanticAttrs().getAttributes<CustomAttr>()) {
+  for (auto attrConst : decl->getExpandedAttrs().getAttributes<CustomAttr>()) {
     auto *attr = const_cast<CustomAttr *>(attrConst);
     UnresolvedMacroReference macroRef(attr);
     auto macroName = macroRef.getMacroName();
@@ -3297,7 +3297,7 @@ createExtensionGenericParams(ASTContext &ctx,
 }
 
 /// If the extended type is a generic typealias whose underlying type is
-/// a tuple, the extension inherits the generic paramter list from the
+/// a tuple, the extension inherits the generic parameter list from the
 /// typealias.
 static GenericParamList *
 createTupleExtensionGenericParams(ASTContext &ctx,
@@ -3664,7 +3664,7 @@ void swift::getDirectlyInheritedNominalTypeDecls(
   auto inheritedTypes = InheritedTypes(decl);
   if (TypeRepr *typeRepr = inheritedTypes.getTypeRepr(i)) {
     loc = typeRepr->getLoc();
-    uncheckedLoc = typeRepr->findUncheckedAttrLoc();
+    uncheckedLoc = typeRepr->findAttrLoc(TAK_unchecked);
   }
 
   // Form the result.
@@ -4005,16 +4005,12 @@ void FindLocalVal::visitBraceStmt(BraceStmt *S, bool isTopLevelCode) {
     }
   }
 
-  auto visitDecl = [&](Decl *D) {
+  std::function<void(Decl *)> visitDecl;
+  visitDecl = [&](Decl *D) {
     if (auto *VD = dyn_cast<ValueDecl>(D))
       checkValueDecl(VD, DeclVisibilityKind::LocalVariable);
-    D->visitAuxiliaryDecls([&](Decl *D) {
-      if (auto *VD = dyn_cast<ValueDecl>(D))
-        checkValueDecl(VD, DeclVisibilityKind::LocalVariable);
-      // FIXME: Recursively call `visitDecl` to handle nested macros.
-    });
+    D->visitAuxiliaryDecls(visitDecl);
   };
-
   for (auto elem : S->getElements()) {
     if (auto *E = elem.dyn_cast<Expr *>()) {
       // 'MacroExpansionExpr' at code-item position may introduce value decls.

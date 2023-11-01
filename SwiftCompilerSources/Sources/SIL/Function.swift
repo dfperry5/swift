@@ -112,8 +112,12 @@ final public class Function : CustomStringConvertible, HasShortDescription, Hash
 
   public func hasSemanticsAttribute(_ attr: StaticString) -> Bool {
     attr.withUTF8Buffer { (buffer: UnsafeBufferPointer<UInt8>) in
-      bridged.hasSemanticsAttr(BridgedStringRef(buffer.baseAddress!, buffer.count))
+      bridged.hasSemanticsAttr(BridgedStringRef(data: buffer.baseAddress!, count: buffer.count))
     }
+  }
+
+  public var hasUnsafeNonEscapableResult: Bool {
+    return bridged.hasUnsafeNonEscapableResult()
   }
 
   /// True if the callee function is annotated with @_semantics("programtermination_point").

@@ -1147,8 +1147,15 @@ SILGenFunction::ForceTryEmission::ForceTryEmission(SILGenFunction &SGF,
 
   // Set up a "catch" block for when an error occurs.
   SILBasicBlock *catchBB = SGF.createBasicBlock(FunctionSection::Postmatter);
+
+  // FIXME: typed throws
+  ASTContext &ctx = SGF.getASTContext();
+  (void) catchBB->createPhiArgument(SILType::getExceptionType(ctx),
+                                    OwnershipKind::Owned);
+
   SGF.ThrowDest = JumpDest(catchBB, SGF.Cleanups.getCleanupsDepth(),
-                           CleanupLocation(loc));
+                           CleanupLocation(loc),
+                           ThrownErrorInfo(/*indirectErrorAddr=*/nullptr));
 }
 
 void SILGenFunction::ForceTryEmission::finish() {
@@ -1164,10 +1171,11 @@ void SILGenFunction::ForceTryEmission::finish() {
     // Otherwise, we need to emit it.
     SILGenSavedInsertionPoint scope(SGF, catchBB, FunctionSection::Postmatter);
 
-    if (auto diagnoseError = SGF.getASTContext().getDiagnoseUnexpectedError()) {
-      ASTContext &ctx = SGF.getASTContext();
-      auto error = SGF.B.createTermResult(SILType::getExceptionType(ctx),
-                                          OwnershipKind::Owned);
+    // FIXME: typed throws
+    auto error = ManagedValue::forForwardedRValue(SGF, catchBB->getArgument(0));
+
+    ASTContext &ctx = SGF.getASTContext();
+    if (auto diagnoseError = ctx.getDiagnoseUnexpectedError()) {
       auto args = SGF.emitSourceLocationArgs(Loc->getExclaimLoc(), Loc);
 
       SGF.emitApplyOfLibraryIntrinsic(
@@ -1237,9 +1245,15 @@ RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
 
   // Set up a "catch" block for when an error occurs.
   SILBasicBlock *catchBB = SGF.createBasicBlock(FunctionSection::Postmatter);
+
+  // FIXME: typed throws
+  auto *errorArg = catchBB->createPhiArgument(
+      SILType::getExceptionType(SGF.getASTContext()), OwnershipKind::Owned);
+
   llvm::SaveAndRestore<JumpDest> throwDest{
     SGF.ThrowDest,
-    JumpDest(catchBB, SGF.Cleanups.getCleanupsDepth(), E)};
+    JumpDest(catchBB, SGF.Cleanups.getCleanupsDepth(), E,
+             ThrownErrorInfo(/*indirectErrorAddr=*/nullptr))};
 
   SILValue branchArg;
   if (shouldWrapInOptional) {
@@ -1298,8 +1312,6 @@ RValue RValueEmitter::visitOptionalTryExpr(OptionalTryExpr *E, SGFContext C) {
   // result type.
   SGF.B.emitBlock(catchBB);
   FullExpr catchCleanups(SGF.Cleanups, E);
-  auto *errorArg = catchBB->createPhiArgument(
-      SILType::getExceptionType(SGF.getASTContext()), OwnershipKind::Owned);
   (void) SGF.emitManagedRValueWithCleanup(errorArg);
   catchCleanups.pop();
 
@@ -2548,6 +2560,7 @@ SILGenFunction::emitApplyOfDefaultArgGenerator(SILLocation loc,
                                                ConcreteDeclRef defaultArgsOwner,
                                                unsigned destIndex,
                                                CanType resultType,
+                                               bool implicitlyAsync,
                                                SGFContext C) {
   SILDeclRef generator 
     = SILDeclRef::getDefaultArgGenerator(defaultArgsOwner.getDecl(),
@@ -2578,8 +2591,24 @@ SILGenFunction::emitApplyOfDefaultArgGenerator(SILLocation loc,
   emitCaptures(loc, generator, CaptureEmission::ImmediateApplication,
                captures);
 
+  // The default argument might require the callee's isolation. If so,
+  // make sure to emit an actor hop.
+  //
+  // FIXME: Instead of hopping back and forth for each individual isolated
+  // default argument, we should emit one hop for all default arguments if
+  // any of them are isolated, and immediately enter the function after.
+  llvm::Optional<ActorIsolation> implicitActorHopTarget = llvm::None;
+  if (implicitlyAsync) {
+    auto *param = getParameterAt(defaultArgsOwner.getDecl(), destIndex);
+    auto isolation = param->getInitializerIsolation();
+    if (isolation.isActorIsolated()) {
+      implicitActorHopTarget = isolation;
+    }
+  }
+
   return emitApply(std::move(resultPtr), std::move(argScope), loc, fnRef, subs,
-                   captures, calleeTypeInfo, ApplyOptions(), C, llvm::None);
+                   captures, calleeTypeInfo, ApplyOptions(), C,
+                   implicitActorHopTarget);
 }
 
 RValue SILGenFunction::emitApplyOfStoredPropertyInitializer(

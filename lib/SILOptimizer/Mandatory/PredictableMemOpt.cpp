@@ -187,7 +187,7 @@ struct AvailableValue {
 
   /// If this gets too expensive in terms of copying, we can use an arena and a
   /// FrozenPtrSet like we do in ARC.
-  SmallSetVector<StoreInst *, 1> InsertionPoints;
+  llvm::SmallSetVector<StoreInst *, 1> InsertionPoints;
 
   /// Just for updating.
   SmallVectorImpl<PMOMemoryUse> *Uses;
@@ -2754,6 +2754,7 @@ bool AllocOptimize::tryToRemoveDeadAllocation() {
             LLVM_FALLTHROUGH;
           case TermKind::ReturnInst:
           case TermKind::ThrowInst:
+          case TermKind::ThrowAddrInst:
           case TermKind::UnwindInst:
           case TermKind::YieldInst: {
             // These terminators can never be non-consuming uses of an owned

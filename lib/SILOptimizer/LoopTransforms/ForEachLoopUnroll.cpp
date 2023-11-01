@@ -159,7 +159,7 @@ class ArrayInfo {
   llvm::DenseMap<uint64_t, StoreInst *> elementStoreMap;
 
   /// List of Sequence.forEach calls invoked on the array.
-  SmallSetVector<TryApplyInst *, 4> forEachCalls;
+  llvm::SmallSetVector<TryApplyInst *, 4> forEachCalls;
 
   /// Indicates whether the array could be modified after initialization. Note
   /// that this not include modifications to the elements of the array. When
@@ -302,6 +302,11 @@ void ArrayInfo::classifyUsesOfArray(SILValue arrayValue) {
     // above as the array would be passed indirectly.
     if (isFixLifetimeUseOfArray(user, arrayValue))
       continue;
+    if (auto *MDI = dyn_cast<MarkDependenceInst>(user)) {
+      if (MDI->getBase() == arrayValue) {
+        continue;
+      }
+    }
     // Check if this is a forEach call on the array.
     if (TryApplyInst *forEachCall = isForEachUseOfArray(user, arrayValue)) {
       forEachCalls.insert(forEachCall);

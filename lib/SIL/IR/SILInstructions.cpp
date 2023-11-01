@@ -814,7 +814,7 @@ DifferentiableFunctionInst *DifferentiableFunctionInst::create(
   auto derivativeFunctions =
       VJPAndJVPFunctions.has_value()
           ? ArrayRef<SILValue>(
-                reinterpret_cast<SILValue *>(VJPAndJVPFunctions.getPointer()),
+                reinterpret_cast<SILValue *>(&*VJPAndJVPFunctions),
                 2)
           : ArrayRef<SILValue>();
   size_t size = totalSizeToAlloc<Operand>(1 + derivativeFunctions.size());
@@ -841,7 +841,7 @@ LinearFunctionInst::LinearFunctionInst(
     : InstructionBaseWithTrailingOperands(
           OriginalFunction,
           TransposeFunction.has_value()
-              ? ArrayRef<SILValue>(TransposeFunction.getPointer(), 1)
+              ? ArrayRef<SILValue>(&*TransposeFunction, 1)
               : ArrayRef<SILValue>(),
           Loc, getLinearFunctionType(OriginalFunction, ParameterIndices),
           forwardingOwnershipKind),
@@ -1068,7 +1068,7 @@ IntegerLiteralInst *IntegerLiteralInst::create(SILDebugLocation Loc,
            "IntegerLiteralInst APInt value's bit width doesn't match type");
   } else {
     assert(Ty.is<BuiltinIntegerLiteralType>());
-    assert(Value.getBitWidth() == Value.getMinSignedBits());
+    assert(Value.getBitWidth() == Value.getSignificantBits());
   }
 #endif
 
@@ -1085,7 +1085,7 @@ static APInt getAPInt(AnyBuiltinIntegerType *anyIntTy, intmax_t value) {
   // Otherwise, build using the size of the type and then truncate to the
   // minimum width necessary.
   APInt result(8 * sizeof(value), value, /*signed*/ true);
-  result = result.trunc(result.getMinSignedBits());
+  result = result.trunc(result.getSignificantBits());
   return result;
 }
 
@@ -1699,6 +1699,7 @@ bool TermInst::isFunctionExiting() const {
     return false;
   case TermKind::ReturnInst:
   case TermKind::ThrowInst:
+  case TermKind::ThrowAddrInst:
   case TermKind::UnwindInst:
     return true;
   }
@@ -1719,6 +1720,7 @@ bool TermInst::isProgramTerminating() const {
   case TermKind::CheckedCastAddrBranchInst:
   case TermKind::ReturnInst:
   case TermKind::ThrowInst:
+  case TermKind::ThrowAddrInst:
   case TermKind::UnwindInst:
   case TermKind::TryApplyInst:
   case TermKind::YieldInst:
@@ -1745,6 +1747,7 @@ const Operand *TermInst::forwardedOperand() const {
   case TermKind::UnreachableInst:
   case TermKind::ReturnInst:
   case TermKind::ThrowInst:
+  case TermKind::ThrowAddrInst:
   case TermKind::YieldInst:
   case TermKind::TryApplyInst:
   case TermKind::CondBranchInst:

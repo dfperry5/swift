@@ -353,6 +353,12 @@ How swift-C++ bridging code is compiled:
     DEFAULT:      based on the build configuration
 ]=] DEFAULT)
 
+option(SWIFT_USE_SYMLINKS "Use symlinks instead of copying binaries" ${CMAKE_HOST_UNIX})
+set(SWIFT_COPY_OR_SYMLINK "copy")
+if(SWIFT_USE_SYMLINKS)
+  set(SWIFT_COPY_OR_SYMLINK "create_symlink")
+endif()
+
 # The following only works with the Ninja generator in CMake >= 3.0.
 set(SWIFT_PARALLEL_LINK_JOBS "" CACHE STRING
   "Define the maximum number of linker jobs for swift.")
@@ -399,9 +405,10 @@ set(SWIFT_STDLIB_MSVC_RUNTIME_LIBRARY
 
 
 if(BRIDGING_MODE STREQUAL "DEFAULT" OR NOT BRIDGING_MODE)
-  if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Windows" OR (CMAKE_Swift_COMPILER AND CMAKE_Swift_COMPILER_VERSION VERSION_LESS 5.8))
     # In debug builds, to workaround a problem with LLDB's `po` command (rdar://115770255).
     # On windows to workaround a build problem.
+    # If the host Swift version is less than 5.8, use pure mode to workaround a C++ interop compiler crash.
     set(BRIDGING_MODE "PURE")
   else()
     set(BRIDGING_MODE "INLINE")
@@ -1333,6 +1340,15 @@ endif()
 add_subdirectory(include)
 
 if(SWIFT_INCLUDE_TOOLS)
+
+  # TODO Remove this once release/5.9 is done and we can finish migrating Swift
+  #      off of `llvm::None`/`llvm::Optional`, and `llvm::makeArrayRef`.
+  # This is to silence the avalanche of deprecation warnings from LLVM headers
+  # until we can actually do something about them. This is nasty, but it's
+  # better than losing context due to the sheer number in-actionable deprecation
+  # warnings or the massive number of merge-conflicts we would get otherwise.
+  add_definitions(-DSWIFT_TARGET)
+
   # Include 'swift-syntax'.
   # This is a function because we want to set some 'CMAKE_*' variables temporarily.'
   # TODO: Replace this with 'block()' after CMake 3.25

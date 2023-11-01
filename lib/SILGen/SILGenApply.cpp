@@ -1856,6 +1856,7 @@ static void emitRawApply(SILGenFunction &SGF,
                          CanSILFunctionType substFnType,
                          ApplyOptions options,
                          ArrayRef<SILValue> indirectResultAddrs,
+                         SILValue indirectErrorAddr,
                          SmallVectorImpl<SILValue> &rawResults,
                          ExecutorBreadcrumb prevExecutor) {
   SILFunctionConventions substFnConv(substFnType, SGF.SGM.M);
@@ -1879,6 +1880,10 @@ static void emitRawApply(SILGenFunction &SGF,
   }
 #endif
   argValues.append(indirectResultAddrs.begin(), indirectResultAddrs.end());
+
+  assert(!!indirectErrorAddr == substFnConv.hasIndirectSILErrorResults());
+  if (indirectErrorAddr)
+    argValues.push_back(indirectErrorAddr);
 
   auto inputParams = substFnType->getParameters();
   assert(inputParams.size() == args.size());
@@ -1978,6 +1983,7 @@ static void emitRawApply(SILGenFunction &SGF,
     SILBasicBlock *errorBB =
       SGF.getTryApplyErrorDest(loc, substFnType, prevExecutor,
                                substFnType->getErrorResult(),
+                               indirectErrorAddr,
                                options.contains(ApplyFlags::DoesNotThrow));
 
     options -= ApplyFlags::DoesNotThrow;
@@ -2518,18 +2524,21 @@ private:
     AbstractionPattern origResultType;
     ClaimedParamsRef paramsToEmit;
     SILFunctionTypeRepresentation functionRepresentation;
-    
+    bool implicitlyAsync;
+
     DefaultArgumentStorage(SILLocation loc,
                            ConcreteDeclRef defaultArgsOwner,
                            unsigned destIndex,
                            CanType resultType,
                            AbstractionPattern origResultType,
                            ClaimedParamsRef paramsToEmit,
-                           SILFunctionTypeRepresentation functionRepresentation)
+                           SILFunctionTypeRepresentation functionRepresentation,
+                           bool implicitlyAsync)
       : loc(loc), defaultArgsOwner(defaultArgsOwner), destIndex(destIndex),
         resultType(resultType), origResultType(origResultType),
         paramsToEmit(paramsToEmit),
-        functionRepresentation(functionRepresentation)
+        functionRepresentation(functionRepresentation),
+        implicitlyAsync(implicitlyAsync)
     {}
   };
   struct BorrowedLValueStorage {
@@ -2656,13 +2665,15 @@ public:
                   CanType resultType,
                   AbstractionPattern origResultType,
                   ClaimedParamsRef params,
-                  SILFunctionTypeRepresentation functionTypeRepresentation)
+                  SILFunctionTypeRepresentation functionTypeRepresentation,
+                  bool implicitlyAsync)
     : Kind(DefaultArgument) {
     Value.emplace<DefaultArgumentStorage>(Kind, loc, defaultArgsOwner,
                                           destIndex,
                                           resultType,
                                           origResultType, params,
-                                          functionTypeRepresentation);
+                                          functionTypeRepresentation,
+                                          implicitlyAsync);
   }
 
   DelayedArgument(DelayedArgument &&other)
@@ -3261,7 +3272,7 @@ public:
                                     defArg->getParamIndex(),
                                     substParamType, origParamType,
                                     claimNextParameters(numParams),
-                                    Rep);
+                                    Rep, defArg->isImplicitlyAsync());
       Args.push_back(ManagedValue());
 
       maybeEmitForeignArgument();
@@ -4255,7 +4266,8 @@ void DelayedArgument::emitDefaultArgument(SILGenFunction &SGF,
   auto value = SGF.emitApplyOfDefaultArgGenerator(info.loc,
                                                   info.defaultArgsOwner,
                                                   info.destIndex,
-                                                  info.resultType);
+                                                  info.resultType,
+                                                  info.implicitlyAsync);
 
   SmallVector<ManagedValue, 4> loweredArgs;
   SmallVector<DelayedArgument, 4> delayedArgs;
@@ -4870,7 +4882,8 @@ SILGenFunction::emitBeginApply(SILLocation loc, ManagedValue fn,
   // Emit the call.
   SmallVector<SILValue, 4> rawResults;
   emitRawApply(*this, loc, fn, subs, args, substFnType, options,
-               /*indirect results*/ {}, rawResults, ExecutorBreadcrumb());
+               /*indirect results*/ {}, /*indirect errors*/ {},
+               rawResults, ExecutorBreadcrumb());
 
   auto token = rawResults.pop_back_val();
   auto yieldValues = llvm::makeArrayRef(rawResults);
@@ -5405,6 +5418,16 @@ RValue SILGenFunction::emitApply(
   SmallVector<SILValue, 4> indirectResultAddrs;
   resultPlan->gatherIndirectResultAddrs(*this, loc, indirectResultAddrs);
 
+  SILValue indirectErrorAddr;
+  if (substFnType->hasErrorResult()) {
+    auto errorResult = substFnType->getErrorResult();
+    if (errorResult.getConvention() == ResultConvention::Indirect) {
+      auto loweredErrorResultType = getSILType(errorResult, substFnType);
+      indirectErrorAddr = B.createAllocStack(loc, loweredErrorResultType);
+      enterDeallocStackCleanup(indirectErrorAddr);
+    }
+  }
+
   // If the function returns an inner pointer, we'll need to lifetime-extend
   // the 'self' parameter.
   SILValue lifetimeExtendedSelf;
@@ -5515,6 +5538,7 @@ RValue SILGenFunction::emitApply(
 
     case ActorIsolation::Unspecified:
     case ActorIsolation::Nonisolated:
+    case ActorIsolation::NonisolatedUnsafe:
       llvm_unreachable("Not isolated");
       break;
     }
@@ -5533,7 +5557,8 @@ RValue SILGenFunction::emitApply(
   {
     SmallVector<SILValue, 1> rawDirectResults;
     emitRawApply(*this, loc, fn, subs, args, substFnType, options,
-                 indirectResultAddrs, rawDirectResults, breadcrumb);
+                 indirectResultAddrs, indirectErrorAddr,
+                 rawDirectResults, breadcrumb);
     assert(rawDirectResults.size() == 1);
     rawDirectResult = rawDirectResults[0];
   }
@@ -5702,12 +5727,22 @@ SILValue SILGenFunction::emitApplyWithRethrow(SILLocation loc, SILValue fn,
   // Emit the rethrow logic.
   {
     B.emitBlock(errorBB);
-    SILValue error = errorBB->createPhiArgument(
-        fnConv.getSILErrorType(getTypeExpansionContext()),
-        OwnershipKind::Owned);
+
+    SILValue error;
+    bool indirectError = fnConv.hasIndirectSILErrorResults();
+
+    if (!indirectError) {
+      error = errorBB->createPhiArgument(
+          fnConv.getSILErrorType(getTypeExpansionContext()),
+          OwnershipKind::Owned);
+    }
 
     Cleanups.emitCleanupsForReturn(CleanupLocation(loc), IsForUnwind);
-    B.createThrow(loc, error);
+
+    if (!indirectError)
+      B.createThrow(loc, error);
+    else
+      B.createThrowAddr(loc);
   }
 
   // Enter the normal path.
@@ -6217,7 +6252,10 @@ SILGenFunction::emitUninitializedArrayAllocation(Type ArrayTy,
   SmallVector<ManagedValue, 2> resultElts;
   std::move(result).getAll(resultElts);
 
-  return {resultElts[0], resultElts[1].getUnmanagedValue()};
+  // Add a mark_dependence between the interior pointer and the array value
+  auto dependentValue = B.createMarkDependence(Loc, resultElts[1].getValue(),
+                                               resultElts[0].getValue());
+  return {resultElts[0], dependentValue};
 }
 
 /// Deallocate an uninitialized array.
@@ -6524,9 +6562,9 @@ ArgumentSource AccessorBaseArgPreparer::prepareAccessorObjectBaseArg() {
   if (selfParam.isConsumed() && !base.hasCleanup()) {
     base = base.copyUnmanaged(SGF, loc);
   }
-
-  // If the parameter is indirect, we need to drop the value into
-  // temporary memory.
+  // If the parameter is indirect, we'll need to drop the value into
+  // temporary memory. Make a copy scoped to the current formal access that
+  // we can materialize later.
   if (SGF.silConv.isSILIndirect(selfParam)) {
     // It's a really bad idea to materialize when we're about to
     // pass a value to an inout argument, because it's a really easy
@@ -6536,14 +6574,17 @@ ArgumentSource AccessorBaseArgPreparer::prepareAccessorObjectBaseArg() {
     // itself).
     assert(!selfParam.isIndirectMutating() &&
            "passing unmaterialized r-value as inout argument");
-
-    base = base.formallyMaterialize(SGF, loc);
-    auto shouldTake = IsTake_t(base.hasCleanup());
-    base = SGF.emitFormalAccessLoad(loc, base.forward(SGF),
-                                    SGF.getTypeLowering(baseLoweredType),
-                                    SGFContext(), shouldTake);
+           
+    // Avoid copying the base if it's move-only. It should be OK to do in this
+    // case since the move-only base will be accessed in a formal access scope
+    // as well. This isn't always true for copyable bases so be less aggressive
+    // in that case.
+    if (base.getType().isMoveOnly()) {
+      base = base.formalAccessBorrow(SGF, loc);
+    } else {
+      base = base.formalAccessCopy(SGF, loc);
+    }
   }
-
   return ArgumentSource(loc, RValue(SGF, loc, baseFormalType, base));
 }
 

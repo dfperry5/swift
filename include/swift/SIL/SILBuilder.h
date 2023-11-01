@@ -396,20 +396,7 @@ public:
   llvm::Optional<SILDebugVariable>
   substituteAnonymousArgs(llvm::SmallString<4> Name,
                           llvm::Optional<SILDebugVariable> Var,
-                          SILLocation Loc) {
-    if (Var && shouldDropVariable(*Var, Loc))
-      return {};
-    if (!Var || !Var->ArgNo || !Var->Name.empty())
-      return Var;
-
-    auto *VD = Loc.getAsASTNode<VarDecl>();
-    if (VD && !VD->getName().empty())
-      return Var;
-
-    llvm::raw_svector_ostream(Name) << '_' << (Var->ArgNo - 1);
-    Var->Name = Name;
-    return Var;
-  }
+                          SILLocation Loc);
 
   AllocStackInst *
   createAllocStack(SILLocation Loc, SILType elementType,
@@ -2495,6 +2482,11 @@ public:
   ThrowInst *createThrow(SILLocation Loc, SILValue errorValue) {
     return insertTerminator(
         new (getModule()) ThrowInst(getSILDebugLocation(Loc), errorValue));
+  }
+
+  ThrowAddrInst *createThrowAddr(SILLocation Loc) {
+    return insertTerminator(
+        new (getModule()) ThrowAddrInst(getSILDebugLocation(Loc)));
   }
 
   UnwindInst *createUnwind(SILLocation loc) {

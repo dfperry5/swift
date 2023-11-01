@@ -1,4 +1,5 @@
-import CASTBridging
+import ASTBridging
+import BasicBridging
 import SwiftOperators
 import SwiftSyntax
 import SwiftSyntaxMacros
@@ -14,9 +15,7 @@ class SourceManager {
 
   /// The set of source files that have been exported to the C++ code of
   /// the program.
-  var exportedSourceFilesBySyntax: [
-    SourceFileSyntax : UnsafePointer<ExportedSourceFile>
-  ] = [:]
+  var exportedSourceFilesBySyntax: [SourceFileSyntax: UnsafePointer<ExportedSourceFile>] = [:]
 
   /// The set of nodes that have been detached from their parent nodes.
   ///
@@ -90,8 +89,8 @@ extension SourceManager {
 
     // The position of our node is...
     let finalPosition =
-      node.position                      // Our position relative to its root
-      + SourceLength(utf8Length: offset) // and that root's offset in its parent
+      node.position  // Our position relative to its root
+      + SourceLength(utf8Length: offset)  // and that root's offset in its parent
       + SourceLength(utf8Length: parentOffset.utf8Offset)
     return (rootSF, finalPosition)
   }

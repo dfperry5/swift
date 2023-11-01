@@ -351,7 +351,7 @@ protected:
   // for the inline bitfields.
   union { uint64_t OpaqueBits;
 
-  SWIFT_INLINE_BITFIELD_BASE(Decl, bitmax(NumDeclKindBits,8)+1+1+1+1+1,
+  SWIFT_INLINE_BITFIELD_BASE(Decl, bitmax(NumDeclKindBits,8)+1+1+1+1+1+1,
     Kind : bitmax(NumDeclKindBits,8),
 
     /// Whether this declaration is invalid.
@@ -374,7 +374,10 @@ protected:
     /// a local context, but should behave like a top-level
     /// declaration for name lookup purposes. This is used by
     /// lldb.
-    Hoisted : 1
+    Hoisted : 1,
+
+    /// Whether the set of semantic attributes has been computed.
+    SemanticAttrsComputed : 1
   );
 
   SWIFT_INLINE_BITFIELD_FULL(PatternBindingDecl, Decl, 1+1+2+16,
@@ -921,7 +924,12 @@ public:
   /// expansions.
   OrigDeclAttributes getOriginalAttrs() const;
 
-  /// Returns the semantic attributes attached to this declaration,
+  /// Returns the attributes attached to this declaration,
+  /// including attributes that are generated as the result of member
+  /// attribute macro expansion.
+  DeclAttributes getExpandedAttrs() const;
+
+  /// Returns all semantic attributes attached to this declaration,
   /// including attributes that are generated as the result of member
   /// attribute macro expansion.
   DeclAttributes getSemanticAttrs() const;
@@ -956,6 +964,10 @@ public:
   /// an attached macro.
   unsigned getAttachedMacroDiscriminator(DeclBaseName macroName, MacroRole role,
                                          const CustomAttr *attr) const;
+
+  /// Returns the resolved type for the give custom attribute attached to this
+  /// declaration.
+  Type getResolvedCustomAttrType(CustomAttr *attr) const;
 
   /// Determines if this declaration is exposed to clients of the module it is
   /// defined in. For example, `public` declarations are exposed to clients.
@@ -1084,6 +1096,14 @@ public:
 
   void setEscapedFromIfConfig(bool Escaped) {
     Bits.Decl.EscapedFromIfConfig = Escaped;
+  }
+
+  bool getSemanticAttrsComputed() const {
+    return Bits.Decl.SemanticAttrsComputed;
+  }
+
+  void setSemanticAttrsComputed(bool Computed) {
+    Bits.Decl.SemanticAttrsComputed = Computed;
   }
 
   /// \returns the unparsed comment attached to this declaration.
@@ -1573,10 +1593,14 @@ struct InheritedEntry : public TypeLoc {
   /// Whether there was an @unchecked attribute.
   bool isUnchecked = false;
 
+  /// Whether there was an @retroactive attribute.
+  bool isRetroactive = false;
+
   InheritedEntry(const TypeLoc &typeLoc);
 
-  InheritedEntry(const TypeLoc &typeLoc, bool isUnchecked)
-    : TypeLoc(typeLoc), isUnchecked(isUnchecked) { }
+  InheritedEntry(const TypeLoc &typeLoc, bool isUnchecked, bool isRetroactive)
+    : TypeLoc(typeLoc), isUnchecked(isUnchecked), isRetroactive(isRetroactive) {
+    }
 };
 
 /// A wrapper for the collection of inherited types for either a `TypeDecl` or
@@ -1595,6 +1619,9 @@ public:
   bool empty() const { return Entries.empty(); }
   size_t size() const { return Entries.size(); }
   IntRange<size_t> const getIndices() { return indices(Entries); }
+
+  /// Returns the ASTContext associated with the wrapped declaration.
+  ASTContext &getASTContext() const;
 
   /// Returns the `TypeRepr *` for the entry of the inheritance clause at the
   /// given index.
@@ -1615,6 +1642,10 @@ public:
   /// NOTE: The `Type` associated with the entry may not be resolved yet.
   const InheritedEntry &getEntry(unsigned i) const { return Entries[i]; }
 
+  // Retrieve the location of the colon character introducing the inheritance
+  // clause.
+  SourceLoc getColonLoc() const;
+
   /// Returns the source location of the beginning of the inheritance clause.
   SourceLoc getStartLoc() const {
     return getEntries().front().getSourceRange().Start;
@@ -1624,6 +1655,10 @@ public:
   SourceLoc getEndLoc() const {
     return getEntries().back().getSourceRange().End;
   }
+
+  /// Compute the SourceRange to be used when removing entry \c i from the
+  /// inheritance clause. Accounts for commas and colons as-needed.
+  SourceRange getRemovalRange(unsigned i) const;
 };
 
 /// ExtensionDecl - This represents a type extension containing methods
@@ -2606,18 +2641,18 @@ private:
     /// optional result.
     unsigned isIUO : 1;
 
-    /// Whether the "isMoveOnly" bit has been computed yet.
-    unsigned isMoveOnlyComputed : 1;
+    /// Whether the "isEscapable" bit has been computed yet.
+    unsigned isEscapable : 1;
 
-    /// Whether this declaration can not be copied and thus is move only.
-    unsigned isMoveOnly : 1;
+    /// Whether this declaration is escapable.
+    unsigned isEscapableComputed : 1;
   } LazySemanticInfo = { };
 
   friend class DynamicallyReplacedDeclRequest;
   friend class OverriddenDeclsRequest;
   friend class IsObjCRequest;
   friend class IsFinalRequest;
-  friend class IsMoveOnlyRequest;
+  friend class IsEscapableRequest;
   friend class IsDynamicRequest;
   friend class IsImplicitlyUnwrappedOptionalRequest;
   friend class InterfaceTypeRequest;
@@ -2722,25 +2757,6 @@ public:
   /// Returns \c true if this value decl is inlinable with attributes
   /// \c \@usableFromInline, \c \@inlinalbe, and \c \@_alwaysEmitIntoClient
   bool isUsableFromInline() const;
-
-  /// Returns \c true if this value decl needs a special case handling for an
-  /// interface file.
-  ///
-  /// One such case is a reference of an inlinable decl with a `package` access level
-  /// in an interface file as follows: Package decls are only printed in interface files if
-  /// they are inlinable (as defined in \c isUsableFromInline). They could be
-  /// referenced by a module outside of its defining module that belong to the same
-  /// package determined by the `package-name` flag. However, the flag is only in
-  /// .swiftmodule and .private.swiftinterface, thus type checking references of inlinable
-  /// package symbols in public interfaces fails due to the missing flag.
-  /// Instead of adding the package-name flag to the public interfaces, which
-  /// could raise a security concern, we grant access to such cases. 
-  ///
-  /// \sa useDC The use site where this value decl is referenced.
-  /// \sa useAcl The access level of its use site.
-  /// \sa declScope The access scope of this decl site.
-  bool skipAccessCheckIfInterface(const DeclContext *useDC, AccessLevel useAcl,
-                                  AccessScope declScope) const;
 
   /// Returns \c true if this declaration is *not* intended to be used directly
   /// by application developers despite the visibility.
@@ -2920,8 +2936,8 @@ public:
   /// Is this declaration 'final'?
   bool isFinal() const;
 
-  /// Is this declaration 'moveOnly'?
-  bool isMoveOnly() const;
+  /// Is this declaration escapable?
+  bool isEscapable() const;
 
   /// Is this declaration marked with 'dynamic'?
   bool isDynamic() const;
@@ -3095,7 +3111,17 @@ public:
 
 /// This is a common base class for declarations which declare a type.
 class TypeDecl : public ValueDecl {
+private:
   ArrayRef<InheritedEntry> Inherited;
+
+  struct {
+    /// Whether the "hasNoncopyableAnnotation" bit has been computed yet.
+    unsigned isNoncopyableAnnotationComputed : 1;
+
+    /// Whether this declaration had a noncopyable inverse written somewhere.
+    unsigned hasNoncopyableAnnotation : 1;
+  } LazySemanticInfo = { };
+  friend class HasNoncopyableAnnotationRequest;
 
 protected:
   TypeDecl(DeclKind K, llvm::PointerUnion<DeclContext *, ASTContext *> context,
@@ -3123,6 +3149,10 @@ public:
   InheritedTypes getInherited() const { return InheritedTypes(this); }
 
   void setInherited(ArrayRef<InheritedEntry> i) { Inherited = i; }
+
+  /// Is this type _always_ noncopyable? Will answer 'false' if the type is
+  /// conditionally copyable.
+  bool isNoncopyable() const;
 
   static bool classof(const Decl *D) {
     return D->getKind() >= DeclKind::First_TypeDecl &&
@@ -4991,7 +5021,7 @@ class ProtocolDecl final : public NominalTypeDecl {
   /// \c None if it hasn't yet been computed.
   llvm::Optional<bool> getCachedHasSelfOrAssociatedTypeRequirements() {
     if (Bits.ProtocolDecl.HasSelfOrAssociatedTypeRequirementsValid)
-      return Bits.ProtocolDecl.HasSelfOrAssociatedTypeRequirements;
+      return static_cast<bool>(Bits.ProtocolDecl.HasSelfOrAssociatedTypeRequirements);
 
     return llvm::None;
   }
@@ -6099,7 +6129,10 @@ public:
   /// True if this is a top-level global variable from the main source file.
   bool isTopLevelGlobal() const { return Bits.VarDecl.IsTopLevelGlobal; }
   void setTopLevelGlobal(bool b) { Bits.VarDecl.IsTopLevelGlobal = b; }
-  
+
+  /// True if this is any storage of static duration (global scope or static).
+  bool isGlobalStorage() const;
+
   /// Retrieve the custom attributes that attach property wrappers to this
   /// property. The returned list contains all of the attached property wrapper
   /// attributes in source order, which means the outermost wrapper attribute

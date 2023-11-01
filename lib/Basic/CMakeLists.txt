@@ -45,9 +45,7 @@ add_swift_host_library(swiftBasic STATIC
   BasicBridging.cpp
   BasicSourceInfo.cpp
   Cache.cpp
-  CBasicBridging.cpp
   ClusteredBitVector.cpp
-  CBasicBridging.cpp
   DiverseStack.cpp
   Edit.cpp
   EditorPlaceholder.cpp
@@ -90,7 +88,7 @@ add_swift_host_library(swiftBasic STATIC
   # Platform-agnostic fallback TaskQueue implementation
   Default/TaskQueue.inc
 
-  LLVM_LINK_COMPONENTS support)
+  LLVM_LINK_COMPONENTS support targetparser)
 _swift_gyb_target_sources(swiftBasic PRIVATE
     UnicodeExtendedGraphemeClusters.cpp.gyb)
 

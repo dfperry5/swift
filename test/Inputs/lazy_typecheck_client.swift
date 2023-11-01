@@ -7,6 +7,10 @@ struct ConformsToPublicProto: PublicProto {
   func req() -> Int { return 1 }
 }
 
+struct ConformsToMainActorProto: MainActorProtocol {
+  func req() -> Int { return 1 }
+}
+
 func testGlobalFunctions() {
   _ = publicFunc()
   _ = publicFuncWithDefaultArg()
@@ -39,7 +43,7 @@ func testPublicStruct() {
   PublicStruct.activeMethod()
 }
 
-func testPublicClass() {
+func testPublicClasses() {
   let c = PublicClass(x: 2)
   let _: Int = c.publicMethod()
   let _: Int = c.publicProperty
@@ -51,6 +55,11 @@ func testPublicClass() {
   let _: Int = d.publicProperty
   let _: String = d.publicPropertyInferredType
   PublicDerivedClass.publicClassMethod()
+
+  class DerivedFromPublicClassSynthesizedDesignatedInit: PublicClassSynthesizedDesignatedInit {
+    init() {}
+  }
+  let _ = DerivedFromPublicClassSynthesizedDesignatedInit()
 }
 
 func testPublicEnum(_ e: PublicEnum) {
@@ -76,6 +85,12 @@ func testConformances() {
     _ = x.req()
     constrainedGenericPublicFunction(x)
   }
+}
+
+@MainActor
+func testMainActorConstraint() {
+  let _: ConformsToMainActorProto = ConformsToMainActorProto()
+  let _: Int = PublicStruct(x: 5).publicMainActorMethod()
 }
 
 // FIXME: This conformance ought to be included to verify that a redundant
