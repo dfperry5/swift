@@ -39,6 +39,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Format.h"
 #include <cmath>
+#include <iostream>
 
 using namespace swift;
 using namespace constraints;
@@ -5163,6 +5164,8 @@ static bool diagnoseContextualFunctionCallGenericAmbiguity(
 
 bool ConstraintSystem::diagnoseAmbiguityWithFixes(
     SmallVectorImpl<Solution> &solutions) {
+  
+  std::cout << "I'm in here";
   if (solutions.empty())
     return false;
 
@@ -5371,14 +5374,27 @@ bool ConstraintSystem::diagnoseAmbiguityWithFixes(
               });
         })) {
       auto &aggregate = entry.second;
+      std::cout << "Here \n";
+      std::cout << "\n";
+      aggregate.front().second->dump();
+      std::cout << "\n";
+
+
       diagnosed |= aggregate.front().second->diagnoseForAmbiguity(aggregate);
     }
   }
+
+  std::cout << "\n";
+  std::cout << diagnoseContextualFunctionCallGenericAmbiguity(
+                        *this, contextualFixes, fixes.getArrayRef());
+  std::cout << "\n";
+
 
   if (!diagnosed && diagnoseContextualFunctionCallGenericAmbiguity(
                         *this, contextualFixes, fixes.getArrayRef()))
     return true;
 
+  std::cout << "Here - 2 \n";
   return diagnosed;
 }
 

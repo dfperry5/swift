@@ -30,6 +30,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/TrailingObjects.h"
 #include <string>
+#include <iostream>
 
 namespace llvm {
 class raw_ostream;
@@ -530,6 +531,7 @@ public:
       ArrayRef<std::pair<const Solution *, const ConstraintFix *>>;
 
   virtual bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const {
+    std::cout << "\n Returning in default function impl here \n";
     return false;
   }
 
@@ -2383,6 +2385,7 @@ public:
   static bool classof(const ConstraintFix *fix) {
     return fix->getKind() == FixKind::IgnoreContextualType;
   }
+
 };
 
 class IgnoreAssignmentDestinationType final : public ContextualMismatch {
@@ -2455,6 +2458,9 @@ public:
   unsigned getParamIdx() const;
 
   bool diagnose(const Solution &solution, bool asNote = false) const override;
+
+  // Added This - issue-61039 
+  bool diagnoseForAmbiguity(CommonFixesArray commonFixes) const override;
 
   static AllowArgumentMismatch *create(ConstraintSystem &cs, Type argType,
                                        Type paramType,

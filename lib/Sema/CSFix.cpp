@@ -32,6 +32,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/raw_ostream.h"
 #include <string>
+#include <iostream>
 
 using namespace swift;
 using namespace constraints;
@@ -374,12 +375,10 @@ bool RelabelArguments::diagnoseForAmbiguity(
 
     (void)overloadChoices.insert(decl);
   }
-
   // If all of the fixes point to the same overload choice then it's
   // exactly the same issue since the call site is static.
   if (overloadChoices.size() == 1)
     return diagnose(*commonFixes.front().first);
-
   return false;
 }
 
@@ -411,8 +410,11 @@ bool MissingConformance::diagnose(const Solution &solution, bool asNote) const {
 
 bool RequirementFix::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+  
   auto *primaryFix = commonFixes.front().second;
   assert(primaryFix);
+
+  
 
   if (llvm::all_of(
           commonFixes,
@@ -503,12 +505,15 @@ bool ContextualMismatch::diagnose(const Solution &solution, bool asNote) const {
 
 bool ContextualMismatch::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+  
+  std::cout << "\n ContextualMismatch \n";
+
   auto getTypes =
       [&](const std::pair<const Solution *, const ConstraintFix *> &entry)
       -> std::pair<Type, Type> {
     auto &solution = *entry.first;
     auto *fix = static_cast<const ContextualMismatch *>(entry.second);
-
+    
     return {solution.simplifyType(fix->getFromType()),
             solution.simplifyType(fix->getToType())};
   };
@@ -522,8 +527,14 @@ bool ContextualMismatch::diagnoseForAmbiguity(
                    etalonTypes.second->isEqual(types.second);
           })) {
     const auto &primary = commonFixes.front();
+    
+    std::cout << "\n ContextualMismatch - Return 2 \n";
+
+
     return primary.second->diagnose(*primary.first, /*asNote=*/false);
   }
+
+  std::cout << "\n ContextualMismatch - Return 3 \n";
 
   return false;
 }
@@ -675,6 +686,7 @@ bool AllowFunctionTypeMismatch::diagnose(const Solution &solution,
 
 bool AllowFunctionTypeMismatch::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+
   if (ContextualMismatch::diagnoseForAmbiguity(commonFixes))
     return true;
 
@@ -887,6 +899,7 @@ bool DefineMemberBasedOnUse::diagnose(const Solution &solution,
 bool
 DefineMemberBasedOnUse::diagnoseForAmbiguity(CommonFixesArray commonFixes) const {
   Type concreteBaseType;
+
   for (const auto &solutionAndFix : commonFixes) {
     const auto *solution = solutionAndFix.first;
     const auto *fix = solutionAndFix.second->getAs<DefineMemberBasedOnUse>();
@@ -948,6 +961,7 @@ bool AllowMemberRefOnExistential::diagnose(const Solution &solution,
 
 bool AllowInvalidMemberRef::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+
   auto *primaryFix =
       static_cast<const AllowInvalidMemberRef *>(commonFixes.front().second);
 
@@ -1231,6 +1245,7 @@ bool AllowInvalidRefInKeyPath::diagnose(const Solution &solution,
 
 bool AllowInvalidRefInKeyPath::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+
   auto *primaryFix =
       commonFixes.front().second->getAs<AllowInvalidRefInKeyPath>();
   assert(primaryFix);
@@ -1383,6 +1398,7 @@ MustBeCopyable* MustBeCopyable::create(ConstraintSystem &cs,
 bool MustBeCopyable::diagnoseForAmbiguity(CommonFixesArray commonFixes) const {
   // Only diagnose if all solutions agreed on the same errant non-copyable type.
   Type firstNonCopyable;
+
   for (const auto &solutionAndFix : commonFixes) {
     const auto *solution = solutionAndFix.first;
     const auto *fix = solutionAndFix.second->getAs<MustBeCopyable>();
@@ -1664,6 +1680,14 @@ IgnoreContextualType *IgnoreContextualType::create(ConstraintSystem &cs,
       IgnoreContextualType(cs, resultTy, specifiedTy, locator);
 }
 
+// Added This - issue-61039 
+bool AllowArgumentMismatch::diagnoseForAmbiguity(
+    CommonFixesArray commonFixes) const {
+      std::cout << "\n In here -- AllowArgumentMismatch , where values are being returned \n";
+      return false;
+  }
+
+
 bool IgnoreAssignmentDestinationType::diagnose(const Solution &solution,
                                                bool asNote) const {
   auto &cs = getConstraintSystem();
@@ -1696,7 +1720,9 @@ bool IgnoreAssignmentDestinationType::diagnose(const Solution &solution,
 
 bool IgnoreAssignmentDestinationType::diagnoseForAmbiguity(
     CommonFixesArray commonFixes) const {
+
   auto &cs = getConstraintSystem();
+
 
   // If all of the types are the same let's try to diagnose
   // this as if there is no ambiguity.
