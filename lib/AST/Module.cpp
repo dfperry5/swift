@@ -2715,7 +2715,9 @@ bool ModuleDecl::isExternallyConsumed() const {
   // App extensions are special beasts because they build without entrypoints
   // like library targets, but they behave like executable targets because
   // their associated modules are not suitable for distribution.
-  if (getASTContext().LangOpts.EnableAppExtensionRestrictions) {
+  // However, app extension libraries might be consumed externally.
+  if (getASTContext().LangOpts.EnableAppExtensionRestrictions &&
+      !getASTContext().LangOpts.EnableAppExtensionLibraryRestrictions) {
     return false;
   }
 
@@ -3441,6 +3443,16 @@ bool SourceFile::importsModuleAsWeakLinked(const ModuleDecl *module) const {
         importedModule->getUnderlyingModuleIfOverlay();
     if (module == clangModule)
       return true;
+
+    // Traverse the exported modules of this weakly-linked module to ensure
+    // that we weak-link declarations from its exported peers.
+    SmallVector<ImportedModule, 8> reexportedModules;
+    importedModule->getImportedModules(reexportedModules,
+                                       ModuleDecl::ImportFilterKind::Exported);
+    for (const ImportedModule &reexportedModule : reexportedModules) {
+      if (module == reexportedModule.importedModule)
+        return true;
+    }
   }
   return false;
 }
