@@ -1348,6 +1348,7 @@ public:
         case SelfAccessKind::Borrowing:
         case SelfAccessKind::NonMutating:
         case SelfAccessKind::Mutating:
+        case SelfAccessKind::ResultDependsOnSelf:
           ctx.Diags.diagnose(DS->getDiscardLoc(),
                              diag::discard_wrong_context_nonconsuming,
                              fn->getDescriptiveKind());
@@ -2727,10 +2728,6 @@ TypeCheckFunctionBodyRequest::evaluate(Evaluator &eval,
   const auto &tyOpts = ctx.TypeCheckerOpts;
   if (tyOpts.DebugTimeFunctionBodies || tyOpts.WarnLongFunctionBodies)
     timer.emplace(AFD);
-
-  auto SF = AFD->getParentSourceFile();
-  if (SF)
-    TypeChecker::buildTypeRefinementContextHierarchyDelayed(*SF, AFD);
 
   BraceStmt *body = AFD->getBody();
   assert(body && "Expected body to type-check");

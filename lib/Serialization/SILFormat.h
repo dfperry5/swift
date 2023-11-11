@@ -81,6 +81,8 @@ enum class KeyPathComputedComponentIdKindEncoding : uint8_t {
 ///
 /// \sa SIL_INDEX_BLOCK_ID
 namespace sil_index_block {
+// clang-format off
+
   // These IDs must \em not be renumbered or reordered without incrementing
   // the module version.
   enum RecordKind {
@@ -111,12 +113,16 @@ namespace sil_index_block {
     BCFixed<4>,  // record ID
     BCArray<BitOffsetField>
   >;
+
+// clang-format on
 }
 
 /// The record types within the "sil" block.
 ///
 /// \sa SIL_BLOCK_ID
 namespace sil_block {
+// clang-format off
+
   // These IDs must \em not be renumbered or reordered without incrementing
   // the module version.
   enum RecordKind : uint8_t {
@@ -128,6 +134,7 @@ namespace sil_block {
     SIL_ONE_TYPE_ONE_OPERAND,
     SIL_ONE_TYPE_VALUES,
     SIL_ONE_TYPE_OWNERSHIP_VALUES,
+    SIL_ONE_TYPE_VALUES_CATEGORIES,
     SIL_TWO_OPERANDS,
     SIL_TAIL_ADDR,
     SIL_INST_APPLY,
@@ -376,10 +383,10 @@ namespace sil_block {
   // SIL instructions with one type and a list of values.
   using SILOneTypeValuesLayout = BCRecordLayout<
     SIL_ONE_TYPE_VALUES,
-    SILInstOpCodeField,
-    TypeIDField,
-    SILTypeCategoryField,
-    BCArray<ValueIDField>
+    SILInstOpCodeField,      // opcode
+    TypeIDField,             // destType
+    SILTypeCategoryField,    // destCategory
+    BCArray<ValueIDField>    // operand ids
   >;
 
   // SIL instructions with one type, forwarding ownership, and a list of values.
@@ -391,6 +398,15 @@ namespace sil_block {
     TypeIDField,
     SILTypeCategoryField,
     BCArray<ValueIDField>>;
+
+  using SILOneTypeValuesCategoriesLayout = BCRecordLayout<
+    SIL_ONE_TYPE_VALUES_CATEGORIES,
+    SILInstOpCodeField,           // opcode
+    TypeIDField,                  // destType
+    SILTypeCategoryField,         // destCategory
+    BCFixed<1>,                   // options
+    BCArray<BCFixed<32>>          // operand id and categories.
+  >;
 
   enum ApplyKind : unsigned {
     SIL_APPLY = 0,
@@ -566,6 +582,8 @@ namespace sil_block {
     ValueIDField,               // decl
     BCArray<IdentifierIDField>  // referenced functions
   >;
+
+// clang-format on
 }
 
 } // end namespace serialization

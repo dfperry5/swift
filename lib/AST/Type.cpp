@@ -161,7 +161,7 @@ bool TypeBase::isMarkerExistential() {
 /// that does not rely on conformances.
 static bool alwaysNoncopyable(Type ty) {
   if (auto *nominal = ty->getNominalOrBoundGenericNominal())
-    return nominal->isNoncopyable();
+    return nominal->canBeNoncopyable();
 
   if (auto *expansion = ty->getAs<PackExpansionType>()) {
     return alwaysNoncopyable(expansion->getPatternType());
@@ -5045,8 +5045,7 @@ case TypeKind::Id:
     // Transform the thrown error.
     Type thrownError;
     if (Type origThrownError = function->getThrownError()) {
-      thrownError = origThrownError.transformWithPosition(
-          TypePosition::Invariant, fn);
+      thrownError = origThrownError.transformWithPosition(pos, fn);
       if (!thrownError)
         return Type();
 

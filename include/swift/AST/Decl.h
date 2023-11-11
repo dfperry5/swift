@@ -94,6 +94,7 @@ namespace swift {
   class NamedPattern;
   class EnumCaseDecl;
   class EnumElementDecl;
+  struct InverseMarking;
   class ParameterList;
   class ParameterTypeFlags;
   class Pattern;
@@ -240,7 +241,8 @@ enum class SelfAccessKind : uint8_t {
   LegacyConsuming,
   Consuming,
   Borrowing,
-  LastSelfAccessKind = Borrowing,
+  ResultDependsOnSelf,
+  LastSelfAccessKind = ResultDependsOnSelf,
 };
 enum : unsigned {
   NumSelfAccessKindBits =
@@ -279,6 +281,9 @@ struct OverloadSignature {
   /// Whether this is an async function.
   unsigned IsAsyncFunction : 1;
 
+  /// Whether this is an distributed function.
+  unsigned IsDistributed : 1;
+
   /// Whether this is a enum element.
   unsigned IsEnumElement : 1;
 
@@ -304,8 +309,8 @@ struct OverloadSignature {
   OverloadSignature()
       : UnaryOperator(UnaryOperatorKind::None), IsInstanceMember(false),
         IsVariable(false), IsFunction(false), IsAsyncFunction(false),
-        InProtocolExtension(false), InExtensionOfGenericType(false),
-        HasOpaqueReturnType(false) { }
+        IsDistributed(false), InProtocolExtension(false),
+        InExtensionOfGenericType(false), HasOpaqueReturnType(false) { }
 };
 
 /// Determine whether two overload signatures conflict.
@@ -3114,15 +3119,6 @@ class TypeDecl : public ValueDecl {
 private:
   ArrayRef<InheritedEntry> Inherited;
 
-  struct {
-    /// Whether the "hasNoncopyableAnnotation" bit has been computed yet.
-    unsigned isNoncopyableAnnotationComputed : 1;
-
-    /// Whether this declaration had a noncopyable inverse written somewhere.
-    unsigned hasNoncopyableAnnotation : 1;
-  } LazySemanticInfo = { };
-  friend class HasNoncopyableAnnotationRequest;
-
 protected:
   TypeDecl(DeclKind K, llvm::PointerUnion<DeclContext *, ASTContext *> context,
            Identifier name, SourceLoc NameLoc,
@@ -3150,9 +3146,13 @@ public:
 
   void setInherited(ArrayRef<InheritedEntry> i) { Inherited = i; }
 
-  /// Is this type _always_ noncopyable? Will answer 'false' if the type is
-  /// conditionally copyable.
-  bool isNoncopyable() const;
+  /// Is it possible for this type to lack a Copyable constraint?
+  /// If you need a more precise answer, ask this Decl's corresponding
+  /// Type if it `isNoncopyable` instead of using this.
+  bool canBeNoncopyable() const;
+
+  /// Determine how the ~Copyable was applied to this TypeDecl, if at all.
+  InverseMarking getNoncopyableMarking() const;
 
   static bool classof(const Decl *D) {
     return D->getKind() >= DeclKind::First_TypeDecl &&
@@ -3214,6 +3214,7 @@ class OpaqueTypeDecl final :
     public GenericTypeDecl,
     private llvm::TrailingObjects<OpaqueTypeDecl, TypeRepr *> {
   friend TrailingObjects;
+  friend class UniqueUnderlyingTypeSubstitutionsRequest;
 
 public:
   /// A set of substitutions that represents a possible underlying type iff
@@ -3252,6 +3253,10 @@ private:
       ConditionallyAvailableTypes = llvm::None;
 
   mutable Identifier OpaqueReturnTypeIdentifier;
+
+  struct {
+    unsigned UniqueUnderlyingTypeComputed : 1;
+  } LazySemanticInfo = { };
 
   OpaqueTypeDecl(ValueDecl *NamingDecl, GenericParamList *GenericParams,
                  DeclContext *DC,
@@ -3329,9 +3334,7 @@ public:
 
   /// The substitutions that map the generic parameters of the opaque type to
   /// the unique underlying types, when that information is known.
-  llvm::Optional<SubstitutionMap> getUniqueUnderlyingTypeSubstitutions() const {
-    return UniqueUnderlyingType;
-  }
+  llvm::Optional<SubstitutionMap> getUniqueUnderlyingTypeSubstitutions() const;
 
   void setUniqueUnderlyingTypeSubstitutions(SubstitutionMap subs) {
     assert(!UniqueUnderlyingType.has_value() && "resetting underlying type?!");

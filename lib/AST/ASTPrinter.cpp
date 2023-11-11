@@ -2119,6 +2119,10 @@ void PrintAST::printSelfAccessKindModifiersIfNeeded(const FuncDecl *FD) {
     if (!Options.excludeAttrKind(DAK_Borrowing))
       Printer.printKeyword("borrowing", Options, " ");
     break;
+  case SelfAccessKind::ResultDependsOnSelf:
+    if (!Options.excludeAttrKind(DAK_ResultDependsOnSelf))
+      Printer.printKeyword("_resultDependsOnSelf", Options, " ");
+    break;
   }
 }
 
@@ -3324,12 +3328,12 @@ static bool usesFeatureFlowSensitiveConcurrencyCaptures(Decl *decl) {
 static bool usesFeatureMoveOnly(Decl *decl) {
   if (auto *extension = dyn_cast<ExtensionDecl>(decl)) {
     if (auto *nominal = extension->getSelfNominalTypeDecl())
-      if (nominal->isNoncopyable())
+      if (nominal->canBeNoncopyable())
         return true;
   }
 
   if (auto typeDecl = dyn_cast<TypeDecl>(decl)) {
-    if (typeDecl->isNoncopyable())
+    if (typeDecl->canBeNoncopyable())
       return true;
   }
 
@@ -3516,8 +3520,15 @@ static bool usesFeatureStructLetDestructuring(Decl *decl) {
 }
 
 static bool usesFeatureNonEscapableTypes(Decl *decl) {
-  return decl->getAttrs().hasAttribute<NonEscapableAttr>()
-    || decl->getAttrs().hasAttribute<UnsafeNonEscapableResultAttr>();
+  if (decl->getAttrs().hasAttribute<NonEscapableAttr>() ||
+      decl->getAttrs().hasAttribute<UnsafeNonEscapableResultAttr>()) {
+    return true;
+  }
+  auto *fd = dyn_cast<FuncDecl>(decl);
+  if (fd && fd->getAttrs().getAttribute(DAK_ResultDependsOnSelf)) {
+    return true;
+  }
+  return false;
 }
 
 static bool hasParameterPacks(Decl *decl) {
@@ -3559,9 +3570,15 @@ static bool usesFeatureParameterPacks(Decl *decl) {
 
 static bool usesFeatureRegionBasedIsolation(Decl *decl) { return false; }
 
-static bool usesFeatureGlobalConcurrency(Decl *decl) { return false; }
+static bool usesFeatureGlobalConcurrency(Decl *decl) {
+  return false;
+}
 
 static bool usesFeatureIsolatedDefaultValues(Decl *decl) {
+  return false;
+}
+
+static bool usesFeatureInferSendableFromCaptures(Decl *decl) {
   return false;
 }
 
