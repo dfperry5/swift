@@ -507,8 +507,8 @@ bool CheckDistributedFunctionRequest::evaluate(
   } else if (isa<ProtocolDecl>(DC)) {
     if (auto seqReqTy =
         getConcreteReplacementForMemberSerializationRequirement(func)) {
-      auto seqReqTyDes = seqReqTy->castTo<ExistentialType>()->getConstraintType()->getDesugaredType();
-      for (auto req : flattenDistributedSerializationTypeToRequiredProtocols(seqReqTyDes)) {
+      auto layout = seqReqTy->getExistentialLayout();
+      for (auto req : layout.getProtocols()) {
         serializationRequirements.insert(req);
       }
     }
@@ -696,19 +696,6 @@ void TypeChecker::checkDistributedActor(SourceFile *SF, NominalTypeDecl *nominal
   // If applicable, this will create the default 'init(transport:)' initializer
   (void)nominal->getDefaultInitializer();
 
-  // We check decls for ambiguity more strictly than normal nominal types,
-  // because we want to record distributed accessors the same if function they
-  // point at (in a remote process) is async or not, as that has no effect on
-  // a caller from a different process, so we want to make the remoteCall target
-  // identifiers, less fragile against such refactorings.
-  //
-  // To achieve this, we ban overloads on just "effects" of functions,
-  // which are useful in local settings, but really should not be relied
-  // on as differenciators in remote calls - the call will always be "async"
-  // since it will go through a thunk, and then be asynchronously transferred
-  // to the called process.
-  llvm::SmallDenseSet<DeclName, 2> diagnosedAmbiguity;
-
   for (auto member : nominal->getMembers()) {
     // --- Ensure 'distributed func' all thunks
     if (auto *var = dyn_cast<VarDecl>(member)) {
@@ -733,48 +720,6 @@ void TypeChecker::checkDistributedActor(SourceFile *SF, NominalTypeDecl *nominal
               diag::distributed_actor_conformance_missing_system_type,
               nominal->getName());
           return;
-        }
-
-        // Check there's no async/no-async overloads, since those are more
-        // fragile in distribution than we'd want distributed calls to be.
-        // A remote call is always 'async throws', and we can always record
-        // an async throws "accessor" (see AccessibleFunction.cpp) as such.
-        // This means, if we allowed async/no-async overloads of functions,
-        // we'd have to store the precise "it was not throwing" information,
-        // but we'll _never_ make use of such because all remote calls are
-        // necessarily going to async to the actor in the recipient process,
-        // and for the remote caller, they are always as-if-async.
-        //
-        // By banning such overloads, which may be useful in local APIs,
-        // but too fragile in distributed APIs, we allow a remote 'v2' version
-        // of an implementation to add or remove `async` to their implementation
-        // without breaking calls which were made on previous 'v1' versions of
-        // the same interface; Callers are never broken this way, and rollouts
-        // are simpler.
-        //
-        // The restriction on overloads is not a problem for distributed calls,
-        // as we don't have a vast swab of APIs which must compatibly get async
-        // versions, as that is what the async overloading aimed to address.
-        //
-        // Note also, that overloading on throws is already illegal anyway.
-        if (!diagnosedAmbiguity.contains(func->getName())) {
-          auto candidates = nominal->lookupDirect(func->getName());
-          if (candidates.size() > 1) {
-            auto firstDecl = dyn_cast<AbstractFunctionDecl>(candidates.back());
-            for (auto decl : candidates) {
-              if (decl == firstDecl) {
-                decl->diagnose(
-                    diag::distributed_func_cannot_overload_on_async_only,
-                    decl->getName());
-              } else {
-                decl->diagnose(
-                    diag::distributed_func_other_ambiguous_overload_here,
-                    decl->getName());
-              }
-            }
-
-            diagnosedAmbiguity.insert(func->getName());
-          }
         }
       }
 
@@ -814,11 +759,13 @@ swift::getDistributedSerializationRequirementProtocols(
     return {};
   }
 
-  auto serialReqType =
-      ty->castTo<ExistentialType>()->getConstraintType()->getDesugaredType();
-
   // TODO(distributed): check what happens with Any
-  return flattenDistributedSerializationTypeToRequiredProtocols(serialReqType);
+  auto layout = ty->getExistentialLayout();
+  llvm::SmallPtrSet<ProtocolDecl *, 2> result;
+  for (auto p : layout.getProtocols()) {
+    result.insert(p);
+  }
+  return result;
 }
 
 ConstructorDecl*
@@ -942,8 +889,7 @@ GetDistributedActorArgumentDecodingMethodRequest::evaluate(Evaluator &evaluator,
       continue;
 
     auto paramTy = genericParamList->getParams()[0]
-                       ->getInterfaceType()
-                       ->getMetatypeInstanceType();
+                       ->getDeclaredInterfaceType();
 
     // `decodeNextArgument` should return its generic parameter value
     if (!FD->getResultInterfaceType()->isEqual(paramTy))
@@ -951,20 +897,16 @@ GetDistributedActorArgumentDecodingMethodRequest::evaluate(Evaluator &evaluator,
 
     // Let's find out how many serialization requirements does this method cover
     // e.g. `Codable` is two requirements - `Encodable` and `Decodable`.
-    unsigned numSerializationReqsCovered = llvm::count_if(
-        FD->getGenericRequirements(), [&](const Requirement &requirement) {
-          if (!(requirement.getFirstType()->isEqual(paramTy) &&
-                requirement.getKind() == RequirementKind::Conformance))
-            return 0;
-
-          return serializationReqs.count(requirement.getProtocolDecl()) ? 1 : 0;
-        });
+    bool okay = llvm::all_of(serializationReqs,
+                            [&](ProtocolDecl *p) -> bool {
+                              return FD->getGenericSignature()->requiresProtocol(paramTy, p);
+                            });
 
     // If the current method covers all of the serialization requirements,
     // it's a match. Note that it might also have other requirements, but
     // we let that go as long as there are no two candidates that differ
     // only in generic requirements.
-    if (numSerializationReqsCovered == serializationReqs.size())
+    if (okay)
       candidates.push_back(FD);
   }
 

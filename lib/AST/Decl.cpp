@@ -31,6 +31,7 @@
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/GenericSignature.h"
 #include "swift/AST/Initializer.h"
+#include "swift/AST/InverseMarking.h"
 #include "swift/AST/LazyResolver.h"
 #include "swift/AST/MacroDefinition.h"
 #include "swift/AST/MacroDiscriminatorContext.h"
@@ -603,6 +604,8 @@ llvm::raw_ostream &swift::operator<<(llvm::raw_ostream &OS,
   case SelfAccessKind::LegacyConsuming: return OS << "'__consuming'";
   case SelfAccessKind::Consuming: return OS << "'consuming'";
   case SelfAccessKind::Borrowing: return OS << "'borrowing'";
+  case SelfAccessKind::ResultDependsOnSelf:
+    return OS << "'resultDependsOnSelf'";
   }
   llvm_unreachable("Unknown SelfAccessKind");
 }
@@ -3203,9 +3206,35 @@ bool swift::conflicting(const OverloadSignature& sig1,
   if (sig1.IsInstanceMember != sig2.IsInstanceMember)
     return false;
 
-  // If one is an async function and the other is not, they can't conflict.
-  if (sig1.IsAsyncFunction != sig2.IsAsyncFunction)
-    return false;
+  // For distributed decls, check there's no async/no-async overloads,
+  // since those are more fragile in distribution than we'd want distributed calls to be.
+  //
+  // A remote call is always 'async throws', and we can always record
+  // an async throws "accessor" (see AccessibleFunction.cpp) as such.
+  // This means, if we allowed async/no-async overloads of functions,
+  // we'd have to store the precise "it was not throwing" information,
+  // but we'll _never_ make use of such because all remote calls are
+  // necessarily going to async to the actor in the recipient process,
+  // and for the remote caller, they are always as-if-async.
+  //
+  // By banning such overloads, which may be useful in local APIs,
+  // but too fragile in distributed APIs, we allow a remote 'v2' version
+  // of an implementation to add or remove `async` to their implementation
+  // without breaking calls which were made on previous 'v1' versions of
+  // the same interface; Callers are never broken this way, and rollouts
+  // are simpler.
+  //
+  // The restriction on overloads is not a problem for distributed calls,
+  // as we don't have a vast swab of APIs which must compatibly get async
+  // versions, as that is what the async overloading aimed to address.
+  //
+  // Note also, that overloading on throws is already illegal anyway.
+  if (!sig1.IsDistributed && !sig2.IsDistributed) {
+    // For non-distributed functions,
+    // if one is an async function and the other is not, they don't conflict.
+    if (sig1.IsAsyncFunction != sig2.IsAsyncFunction)
+      return false;
+  } // else, if any of the methods was distributed, continue checking
 
   // If one is a macro and the other is not, they can't conflict.
   if (sig1.IsMacro != sig2.IsMacro)
@@ -3458,6 +3487,8 @@ OverloadSignature ValueDecl::getOverloadSignature() const {
     signature.IsFunction = true;
     if (func->hasAsync())
       signature.IsAsyncFunction = true;
+    if (func->isDistributed())
+      signature.IsDistributed = true;
   }
 
   if (auto *extension = dyn_cast<ExtensionDecl>(getDeclContext()))
@@ -4090,6 +4121,15 @@ AccessLevel ValueDecl::getEffectiveAccess() const {
   case AccessLevel::Open:
     break;
   case AccessLevel::Package:
+    if (getModuleContext()->isTestingEnabled() ||
+        getModuleContext()->arePrivateImportsEnabled()) {
+        effectiveAccess = getMaximallyOpenAccessFor(this);
+    } else {
+        // Package declarations are effectively public within their
+        // package unit.
+        effectiveAccess = AccessLevel::Public;
+    }
+    break;
   case AccessLevel::Public:
   case AccessLevel::Internal:
     if (getModuleContext()->isTestingEnabled() ||
@@ -4846,12 +4886,16 @@ GenericParameterReferenceInfo ValueDecl::findExistentialSelfReferences(
                                         llvm::None);
 }
 
-bool TypeDecl::isNoncopyable() const {
-  // NOTE: must answer true iff it is unconditionally noncopyable.
-  return evaluateOrDefault(getASTContext().evaluator,
-                           HasNoncopyableAnnotationRequest{
-                               const_cast<TypeDecl *>(this)},
-                           true); // default to true for safety
+InverseMarking TypeDecl::getNoncopyableMarking() const {
+  return evaluateOrDefault(
+      getASTContext().evaluator,
+      NoncopyableAnnotationRequest{const_cast<TypeDecl *>(this)},
+      InverseMarking::forInverse(InverseMarking::Kind::None)
+  );
+}
+
+bool TypeDecl::canBeNoncopyable() const {
+  return getNoncopyableMarking().getInverse().isPresent();
 }
 
 Type TypeDecl::getDeclaredInterfaceType() const {
@@ -9562,6 +9606,12 @@ bool OpaqueTypeDecl::exportUnderlyingType() const {
   }
 
   llvm_unreachable("The naming decl is expected to be either an AFD or ASD");
+}
+
+llvm::Optional<SubstitutionMap>
+OpaqueTypeDecl::getUniqueUnderlyingTypeSubstitutions() const {
+  return evaluateOrDefault(getASTContext().evaluator,
+                           UniqueUnderlyingTypeSubstitutionsRequest{this}, {});
 }
 
 llvm::Optional<unsigned>

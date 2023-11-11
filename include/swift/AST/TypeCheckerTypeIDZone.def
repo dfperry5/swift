@@ -210,8 +210,9 @@ SWIFT_REQUEST(TypeChecker, IsDynamicRequest, bool(ValueDecl *),
               SeparatelyCached, NoLocationInfo)
 SWIFT_REQUEST(TypeChecker, IsFinalRequest, bool(ValueDecl *), SeparatelyCached,
               NoLocationInfo)
-SWIFT_REQUEST(TypeChecker, HasNoncopyableAnnotationRequest, bool(TypeDecl *), SeparatelyCached,
-              NoLocationInfo)
+SWIFT_REQUEST(TypeChecker, NoncopyableAnnotationRequest,
+              InverseMarking(TypeDecl *),
+              Cached, NoLocationInfo)
 SWIFT_REQUEST(TypeChecker, IsNoncopyableRequest,
               bool (CanType),
               Cached, NoLocationInfo)
@@ -512,8 +513,8 @@ SWIFT_REQUEST(TypeChecker, InitAccessorReferencedVariablesRequest,
                                   ArrayRef<Identifier>),
               Cached, NoLocationInfo)
 SWIFT_REQUEST(TypeChecker, ExpandChildTypeRefinementContextsRequest,
-              bool(Decl *, TypeRefinementContext *),
-              Cached, NoLocationInfo)
+              std::vector<TypeRefinementContext *>(TypeRefinementContext *),
+              SeparatelyCached, NoLocationInfo)
 SWIFT_REQUEST(TypeChecker, SerializeAttrGenericSignatureRequest,
               GenericSignature(Decl *, SpecializeAttr *),
               SeparatelyCached, NoLocationInfo)
@@ -526,3 +527,6 @@ SWIFT_REQUEST(TypeChecker, IsCCompatibleFuncDeclRequest,
 SWIFT_REQUEST(TypeChecker, SemanticDeclAttrsRequest,
               DeclAttributes(const Decl *),
               Cached, NoLocationInfo)
+SWIFT_REQUEST(TypeChecker, UniqueUnderlyingTypeSubstitutionsRequest,
+              llvm::Optional<SubstitutionMap>(const Decl *),
+              SeparatelyCached, NoLocationInfo)

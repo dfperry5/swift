@@ -427,11 +427,11 @@ public:
   void cacheResult(bool value) const;
 };
 
-/// Determine whether the given declaration has any markings that would cause it
-/// to not have an implicit, unconditional conformance to Copyable.
-class HasNoncopyableAnnotationRequest
-    : public SimpleRequest<HasNoncopyableAnnotationRequest, bool(TypeDecl *),
-                           RequestFlags::SeparatelyCached> {
+/// Determine the kind of noncopyable marking present for this declaration.
+class NoncopyableAnnotationRequest
+    : public SimpleRequest<NoncopyableAnnotationRequest,
+                           InverseMarking(TypeDecl *),
+                           RequestFlags::Cached> {
 public:
   using SimpleRequest::SimpleRequest;
 
@@ -439,13 +439,11 @@ private:
   friend SimpleRequest;
 
   // Evaluation.
-  bool evaluate(Evaluator &evaluator, TypeDecl *decl) const;
+  InverseMarking evaluate(Evaluator &evaluator, TypeDecl *decl) const;
 
 public:
-  // Separate caching.
+  // Caching.
   bool isCached() const { return true; }
-  llvm::Optional<bool> getCachedResult() const;
-  void cacheResult(bool value) const;
 };
 
 /// Determine whether the given declaration is escapable.
@@ -4543,23 +4541,26 @@ public:
   bool isCached() const { return true; }
 };
 
-/// Expand the children of the type refinement context for the given
-/// declaration.
+/// Expand the children of the given type refinement context.
 class ExpandChildTypeRefinementContextsRequest
     : public SimpleRequest<ExpandChildTypeRefinementContextsRequest,
-                           bool(Decl *, TypeRefinementContext *),
-                           RequestFlags::Cached> {
+                           std::vector<TypeRefinementContext *>(
+                               TypeRefinementContext *),
+                           RequestFlags::SeparatelyCached> {
 public:
   using SimpleRequest::SimpleRequest;
 
 private:
   friend SimpleRequest;
 
-  bool evaluate(Evaluator &evaluator, Decl *decl,
-                TypeRefinementContext *parentTRC) const;
+  std::vector<TypeRefinementContext *>
+  evaluate(Evaluator &evaluator, TypeRefinementContext *parentTRC) const;
 
 public:
+  // Separate caching.
   bool isCached() const { return true; }
+  llvm::Optional<std::vector<TypeRefinementContext *>> getCachedResult() const;
+  void cacheResult(std::vector<TypeRefinementContext *> children) const;
 };
 
 class SerializeAttrGenericSignatureRequest
@@ -4620,6 +4621,27 @@ public:
   bool isCached() const { return true; }
   llvm::Optional<DeclAttributes> getCachedResult() const;
   void cacheResult(DeclAttributes) const;
+};
+
+class UniqueUnderlyingTypeSubstitutionsRequest
+    : public SimpleRequest<UniqueUnderlyingTypeSubstitutionsRequest,
+                           llvm::Optional<SubstitutionMap>(
+                               const OpaqueTypeDecl *),
+                           RequestFlags::SeparatelyCached> {
+public:
+  using SimpleRequest::SimpleRequest;
+
+private:
+  friend SimpleRequest;
+
+  llvm::Optional<SubstitutionMap> evaluate(Evaluator &evaluator,
+                                           const OpaqueTypeDecl *) const;
+
+public:
+  // Separate caching.
+  bool isCached() const { return true; }
+  llvm::Optional<llvm::Optional<SubstitutionMap>> getCachedResult() const;
+  void cacheResult(llvm::Optional<SubstitutionMap>) const;
 };
 
 #define SWIFT_TYPEID_ZONE TypeChecker

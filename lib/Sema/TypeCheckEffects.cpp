@@ -718,6 +718,17 @@ public:
     return result;
   }
 
+  /// Return a classification that promotes a typed throws effect to an
+  /// untyped throws effect.
+  Classification promoteToUntypedThrows() const {
+    if (!hasThrows())
+      return *this;
+
+    Classification result(*this);
+    result.ThrownError = ThrownError->getASTContext().getErrorExistentialType();
+    return result;
+  }
+
   /// Return a classification that only retains the parts of this
   /// classification for the requested effect kind.
   Classification onlyEffect(EffectKind kind) const {
@@ -1109,9 +1120,15 @@ public:
         }
 
         for (unsigned i = 0, e = params.size(); i < e; ++i) {
-          result.merge(classifyArgument(args->getExpr(i),
-                                        params[i].getParameterType(),
-                                        kind));
+          auto argClassification = classifyArgument(
+              args->getExpr(i), params[i].getParameterType(), kind);
+
+          // Rethrows is untyped, so
+          if (kind == EffectKind::Throws) {
+            argClassification = argClassification.promoteToUntypedThrows();
+          }
+
+          result.merge(argClassification);
         }
 
         return;
@@ -3104,6 +3121,8 @@ private:
 
     if (auto thrownError = TypeChecker::canThrow(Ctx, E->getSubExpr())) {
       E->setThrownError(*thrownError);
+    } else {
+      E->setThrownError(Ctx.getNeverType());
     }
 
     scope.preserveCoverageFromOptionalOrForcedTryOperand();
@@ -3123,6 +3142,8 @@ private:
 
     if (auto thrownError = TypeChecker::canThrow(Ctx, E->getSubExpr())) {
       E->setThrownError(*thrownError);
+    } else {
+      E->setThrownError(Ctx.getNeverType());
     }
 
     scope.preserveCoverageFromOptionalOrForcedTryOperand();

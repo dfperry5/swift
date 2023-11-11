@@ -303,7 +303,7 @@ private:
   /// empty.
   StringRef WasmExportName;
 
-  /// Name of a Wasm import module and field if @extern(wasm) attribute
+  /// Name of a Wasm import module and field if @_extern(wasm) attribute
   llvm::Optional<std::pair<StringRef, StringRef>> WasmImportModuleAndField;
 
   /// Has value if there's a profile for this function
@@ -1288,14 +1288,14 @@ public:
   StringRef wasmExportName() const { return WasmExportName; }
   void setWasmExportName(StringRef value) { WasmExportName = value; }
 
-  /// Return Wasm import module name if @extern(wasm) was used otherwise empty
+  /// Return Wasm import module name if @_extern(wasm) was used otherwise empty
   StringRef wasmImportModuleName() const {
     if (WasmImportModuleAndField)
       return WasmImportModuleAndField->first;
     return StringRef();
   }
 
-  /// Return Wasm import field name if @extern(wasm) was used otherwise empty
+  /// Return Wasm import field name if @_extern(wasm) was used otherwise empty
   StringRef wasmImportFieldName() const {
     if (WasmImportModuleAndField)
       return WasmImportModuleAndField->second;
@@ -1403,7 +1403,7 @@ public:
     return std::find_if(begin(), end(),
                         [](const SILBasicBlock &BB) -> bool {
                           const TermInst *TI = BB.getTerminator();
-                          return isa<ThrowInst>(TI);
+                          return isa<ThrowInst>(TI) || isa<ThrowAddrInst>(TI);
                         });
   }
   
@@ -1413,7 +1413,7 @@ public:
     return std::find_if(begin(), end(),
                         [](const SILBasicBlock &BB) -> bool {
                           const TermInst *TI = BB.getTerminator();
-                          return isa<ThrowInst>(TI);
+                          return isa<ThrowInst>(TI) || isa<ThrowAddrInst>(TI);
                         });
   }
 
@@ -1455,7 +1455,8 @@ public:
   ArrayRef<SILArgument *> getArgumentsWithoutIndirectResults() const {
     assert(!empty() && "Cannot get arguments of a function without a body");
     return begin()->getArguments().slice(
-        getConventions().getNumIndirectSILResults());
+        getConventions().getNumIndirectSILResults() +
+          getConventions().getNumIndirectSILErrorResults());
   }
 
   const SILArgument *getSelfArgument() const {

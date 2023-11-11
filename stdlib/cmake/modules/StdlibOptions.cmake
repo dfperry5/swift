@@ -99,6 +99,13 @@ option(SWIFT_STDLIB_EMIT_API_DESCRIPTORS
         "Emit api descriptors for the standard library"
         FALSE)
 
+option(SWIFT_STDLIB_BUILD_ONLY_CORE_MODULES
+       "Build only the core subset of the standard library,
+       ignoring additional libraries such as Concurrency, Distributed and StringProcessing.
+       This is an option meant for internal configurations inside Apple
+       that need to build the standard libraries in chunks when constructing an SDK"
+       FALSE)
+
 if("${SWIFT_HOST_VARIANT_SDK}" IN_LIST SWIFT_DARWIN_PLATFORMS)
   set(SWIFT_STDLIB_ENABLE_PRESPECIALIZATION_default TRUE)
 elseif("${SWIFT_HOST_VARIANT_SDK}" STREQUAL "LINUX")
@@ -267,6 +274,10 @@ endif()
 option(SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS
        "Install a parent module map for Swift shims."
        ${SWIFT_STDLIB_INSTALL_PARENT_MODULE_FOR_SHIMS_default})
+
+option(SWIFT_STDLIB_OVERRIDABLE_RETAIN_RELEASE
+       "Allow retain/release functions to be overridden by indirecting through function pointers."
+       TRUE)
 
 set(SWIFT_RUNTIME_FIXED_BACKTRACER_PATH "" CACHE STRING
   "If set, provides a fixed path to the swift-backtrace binary.  This

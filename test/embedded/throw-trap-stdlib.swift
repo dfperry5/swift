@@ -1,5 +1,6 @@
 // RUN: %target-swift-frontend -emit-ir %s -enable-experimental-feature Embedded -throws-as-traps | %FileCheck %s
 
+// REQUIRES: swift_in_compiler
 // REQUIRES: VENDOR=apple
 // REQUIRES: OS=macosx
 
@@ -9,4 +10,4 @@ public func test() {
   }
 }
 
-// CHECK-NOT: swift_willThrow
+// CHECK: swift_willThrow
